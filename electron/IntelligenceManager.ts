@@ -134,6 +134,10 @@ export class IntelligenceManager extends EventEmitter {
         this.processCopilotTranscript(segment);
     }
 
+    recordTranscriptOnly(segment: import('./SessionTracker').TranscriptSegment): void {
+        this.session.recordTranscriptOnly(segment);
+    }
+
     async handleSuggestionTrigger(trigger: import('./SessionTracker').SuggestionTrigger): Promise<void> {
         return this.engine.handleSuggestionTrigger(trigger);
     }

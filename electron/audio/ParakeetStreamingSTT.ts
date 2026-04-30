@@ -6,6 +6,7 @@ import { RECOGNITION_LANGUAGES } from '../config/languages';
 export interface ParakeetStreamingConfig {
     glossary?: string;
     speechEndDebounceMs?: number;
+    partialCommitIntervalMs?: number;
 }
 
 export class ParakeetStreamingSTT extends EventEmitter {
@@ -20,11 +21,16 @@ export class ParakeetStreamingSTT extends EventEmitter {
     private pendingChunks: Buffer[] = [];
     private readonly maxPendingChunks = 200;
     private readonly speechEndDebounceMs: number;
+    private readonly partialCommitIntervalMs: number;
     private finalizeTimer: NodeJS.Timeout | null = null;
     private finalizeGeneration = 0;
     private samplesSinceLastFinal = 0;
     private lastFinalText = '';
     private lastFinalAt = 0;
+    private lastPartialText = '';
+    private lastPartialConfidence = 0.9;
+    private lastPartialAt = 0;
+    private lastCommittedPartialSourceText = '';
     private readonly sessionListener: (event: ParakeetBridgeEvent) => void;
 
     constructor(config: ParakeetStreamingConfig = {}) {
@@ -32,6 +38,7 @@ export class ParakeetStreamingSTT extends EventEmitter {
         this.sessionId = `parakeet_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         this.postProcessor = new TranscriptPostProcessor({ glossary: config.glossary });
         this.speechEndDebounceMs = this.normalizeDebounceMs(config.speechEndDebounceMs);
+        this.partialCommitIntervalMs = this.normalizePartialCommitIntervalMs(config.partialCommitIntervalMs);
         this.sessionListener = (event: ParakeetBridgeEvent) => this.handleBridgeEvent(event);
         this.bridge.on(`session:${this.sessionId}`, this.sessionListener);
     }
@@ -60,7 +67,11 @@ export class ParakeetStreamingSTT extends EventEmitter {
         this.clearFinalizeTimer();
         this.samplesSinceLastFinal = 0;
         this.lastFinalText = '';
-        this.lastFinalAt = 0;
+        this.lastFinalAt = Date.now();
+        this.lastPartialText = '';
+        this.lastPartialConfidence = 0.9;
+        this.lastPartialAt = 0;
+        this.lastCommittedPartialSourceText = '';
 
         void this.bridge.startSession(this.sessionId, { language: this.getIsoLanguage() || 'auto' })
             .then(() => {
@@ -78,6 +89,7 @@ export class ParakeetStreamingSTT extends EventEmitter {
 
     stop(): void {
         if (!this.active) return;
+        this.flushPendingTranscript();
         this.active = false;
         this.ready = false;
         this.pendingChunks = [];
@@ -86,6 +98,19 @@ export class ParakeetStreamingSTT extends EventEmitter {
     }
 
     finalize(): void {
+        this.finalizeNow();
+    }
+
+    flushPendingTranscript(): void {
+        this.clearFinalizeTimer();
+
+        const fallbackText = this.lastPartialText.trim();
+        if (fallbackText) {
+            this.commitPartialAsFinal(fallbackText, this.lastPartialConfidence || 0.85);
+            this.lastPartialText = '';
+            this.lastPartialAt = 0;
+        }
+
         this.finalizeNow();
     }
 
@@ -130,18 +155,36 @@ export class ParakeetStreamingSTT extends EventEmitter {
             const confidence = typeof event.confidence === 'number' ? event.confidence : 0.9;
             const result = this.postProcessor.process(rawText, { final, confidence });
             if (result.dropped) return;
-            if (final && this.shouldDropRepeatedFinal(result.text)) return;
+            const emittedText = this.getIncrementalTranscriptText(result.text);
+            if (!emittedText) return;
+            if (final && this.shouldDropRepeatedFinal(emittedText)) {
+                this.lastCommittedPartialSourceText = result.text.trim();
+                return;
+            }
+
+            if (!final) {
+                this.lastPartialText = result.text;
+                this.lastPartialConfidence = confidence;
+                this.lastPartialAt = Date.now();
+            }
 
             this.emit('transcript', {
-                text: result.text,
+                text: emittedText,
                 isFinal: final,
                 confidence,
             });
 
+            if (!final && this.shouldAutoCommitPartial(result.text)) {
+                this.commitPartialAsFinal(result.text, confidence);
+            }
+
             if (final) {
                 this.samplesSinceLastFinal = 0;
-                this.lastFinalText = this.normalizeForComparison(result.text);
+                this.lastFinalText = this.normalizeForComparison(emittedText);
                 this.lastFinalAt = Date.now();
+                this.lastCommittedPartialSourceText = result.text.trim();
+                this.lastPartialText = '';
+                this.lastPartialAt = 0;
             }
             return;
         }
@@ -179,8 +222,63 @@ export class ParakeetStreamingSTT extends EventEmitter {
         const normalized = this.normalizeForComparison(text);
         if (!normalized) return true;
         const now = Date.now();
-        if (normalized === this.lastFinalText && now - this.lastFinalAt < 10_000) return true;
+        if (normalized === this.lastFinalText && now - this.lastFinalAt < 60_000) return true;
         return false;
+    }
+
+    private shouldAutoCommitPartial(text: string): boolean {
+        const normalized = this.normalizeForComparison(this.getIncrementalTranscriptText(text));
+        if (normalized.length < 24) return false;
+        const now = Date.now();
+        if (now - this.lastFinalAt < this.partialCommitIntervalMs) return false;
+        if (normalized === this.lastFinalText) return false;
+        return true;
+    }
+
+    private commitPartialAsFinal(text: string, confidence: number): void {
+        const emittedText = this.getIncrementalTranscriptText(text);
+        if (!emittedText || this.shouldDropRepeatedFinal(emittedText)) return;
+        this.emit('transcript', {
+            text: emittedText,
+            isFinal: true,
+            confidence: confidence || 0.85,
+        });
+        this.samplesSinceLastFinal = 0;
+        this.lastFinalText = this.normalizeForComparison(emittedText);
+        this.lastFinalAt = Date.now();
+        this.lastCommittedPartialSourceText = text.trim();
+    }
+
+    private getIncrementalTranscriptText(sourceText: string): string {
+        const text = sourceText.trim();
+        const previous = this.lastCommittedPartialSourceText.trim();
+        if (!text || !previous) return text;
+
+        const currentNormalized = this.normalizeForComparison(text);
+        const previousNormalized = this.normalizeForComparison(previous);
+        if (!currentNormalized || currentNormalized === previousNormalized) return '';
+        if (previousNormalized.includes(currentNormalized)) return '';
+
+        const currentWords = text.split(/\s+/);
+        const previousWords = previous.split(/\s+/);
+        const normalizeWord = (word: string) => this.normalizeForComparison(word);
+        const currentNormWords = currentWords.map(normalizeWord);
+        const previousNormWords = previousWords.map(normalizeWord);
+        const maxOverlap = Math.min(currentNormWords.length, previousNormWords.length);
+
+        for (let overlap = maxOverlap; overlap >= 2; overlap--) {
+            const previousSuffix = previousNormWords.slice(previousNormWords.length - overlap).join(' ');
+            const currentPrefix = currentNormWords.slice(0, overlap).join(' ');
+            if (previousSuffix && previousSuffix === currentPrefix) {
+                return currentWords.slice(overlap).join(' ').trim();
+            }
+        }
+
+        if (currentNormalized.startsWith(previousNormalized)) {
+            return currentWords.slice(Math.min(previousWords.length, currentWords.length)).join(' ').trim();
+        }
+
+        return text;
     }
 
     private normalizeForComparison(text: string): string {
@@ -238,5 +336,12 @@ export class ParakeetStreamingSTT extends EventEmitter {
         const requested = Number.isFinite(value) ? value : envValue;
         if (!Number.isFinite(requested) || requested <= 0) return 2200;
         return Math.max(800, Math.min(5000, Math.round(requested)));
+    }
+
+    private normalizePartialCommitIntervalMs(value?: number): number {
+        const envValue = Number(process.env.NATIVELY_PARAKEET_PARTIAL_COMMIT_MS || '');
+        const requested = Number.isFinite(value) ? value : envValue;
+        if (!Number.isFinite(requested) || requested <= 0) return 12000;
+        return Math.max(6000, Math.min(30000, Math.round(requested)));
     }
 }

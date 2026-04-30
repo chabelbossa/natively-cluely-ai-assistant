@@ -442,7 +442,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.session.getFormattedContext(120);
+            const context = this.session.getFullSessionContext() || this.session.getFormattedContext(600);
             if (!context) {
                 console.warn('[IntelligenceEngine] No context available for recap');
                 this.setMode('idle');

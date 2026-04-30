@@ -137,7 +137,7 @@ export class MeetingPersistence {
             }
 
             // Generate Structured Summary
-            if (data.transcript.length > 2) {
+            if (data.transcript.length > 0) {
                 const baseRules = `RULES:
 - Do NOT invent information not present in the context
 - You MAY infer implied action items or next steps if they are logical consequences of the discussion
@@ -244,6 +244,15 @@ Return ONLY valid JSON (no markdown code blocks):
             console.error("Error generating meeting metadata", e);
         }
 
+        if (data.transcript.length > 0 && !this.hasSummaryContent(summaryData)) {
+            console.warn('[MeetingPersistence] Using local fallback summary because LLM summary was unavailable.');
+            summaryData = this.buildLocalSummary(data.transcript);
+        }
+
+        if (title === "Untitled Session" && data.transcript.length > 0) {
+            title = this.buildLocalTitle(data.transcript);
+        }
+
         try {
             const minutes = Math.floor(data.durationMs / 60000);
             const seconds = ((data.durationMs % 60000) / 1000).toFixed(0);
@@ -274,6 +283,70 @@ Return ONLY valid JSON (no markdown code blocks):
         } catch (error) {
             console.error('[MeetingPersistence] Failed to save meeting:', error);
         }
+    }
+
+    private hasSummaryContent(summary: { overview?: string; actionItems: string[], keyPoints: string[], sections?: Array<{ title: string; bullets: string[] }> }): boolean {
+        if (summary.overview?.trim()) return true;
+        if (summary.actionItems?.length > 0) return true;
+        if (summary.keyPoints?.length > 0) return true;
+        return Boolean(summary.sections?.some(section => section.bullets.length > 0));
+    }
+
+    private buildLocalTitle(transcript: TranscriptSegment[]): string {
+        const firstText = transcript.find(segment => segment.text?.trim())?.text || 'Meeting Notes';
+        const words = firstText
+            .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .split(' ')
+            .filter(Boolean)
+            .slice(0, 6);
+        return words.length > 0 ? words.join(' ') : 'Meeting Notes';
+    }
+
+    private buildLocalSummary(transcript: TranscriptSegment[]): { overview: string; actionItems: string[]; keyPoints: string[] } {
+        const usableSegments = transcript
+            .filter(segment => segment.text?.trim())
+            .filter(segment => !['system', 'ai', 'assistant', 'model'].includes(String(segment.speaker || '').toLowerCase()));
+
+        const preferredSegments = usableSegments.some(segment => segment.speaker !== 'user')
+            ? usableSegments.filter(segment => segment.speaker !== 'user')
+            : usableSegments;
+
+        const cleaned = preferredSegments
+            .map(segment => this.cleanTranscriptText(segment.text))
+            .filter(text => text.length > 0);
+
+        const combined = cleaned.join(' ');
+        const overview = combined
+            ? this.truncateAtWord(combined, 420)
+            : 'No reliable transcript content was captured.';
+
+        const keyPoints = Array.from(new Set(cleaned
+            .map(text => this.truncateAtWord(text, 180))
+            .filter(text => text.length >= 12)))
+            .slice(-6);
+
+        return {
+            overview,
+            actionItems: [],
+            keyPoints: keyPoints.length > 0 ? keyPoints : [overview],
+        };
+    }
+
+    private cleanTranscriptText(text: string): string {
+        return text
+            .replace(/\s+/g, ' ')
+            .replace(/\s+([,.!?;:])/g, '$1')
+            .trim();
+    }
+
+    private truncateAtWord(text: string, maxLength: number): string {
+        const clean = this.cleanTranscriptText(text);
+        if (clean.length <= maxLength) return clean;
+        const truncated = clean.slice(0, maxLength);
+        const lastSpace = truncated.lastIndexOf(' ');
+        return `${truncated.slice(0, lastSpace > 80 ? lastSpace : maxLength).trim()}...`;
     }
 
     /**

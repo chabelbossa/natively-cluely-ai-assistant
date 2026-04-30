@@ -352,7 +352,8 @@ const App: React.FC = () => {
       localStorage.setItem('natively_last_meeting_start', Date.now().toString());
       const inputDeviceId = localStorage.getItem('preferredInputDeviceId');
       let outputDeviceId = localStorage.getItem('preferredOutputDeviceId');
-      const useExperimentalSck = localStorage.getItem('useExperimentalSckBackend') === 'true';
+      const sckPreference = localStorage.getItem('useExperimentalSckBackend');
+      const useExperimentalSck = sckPreference === null ? true : sckPreference === 'true';
 
       // Override output device ID to force SCK if experimental mode is enabled
       // Default to CoreAudio unless experimental is enabled

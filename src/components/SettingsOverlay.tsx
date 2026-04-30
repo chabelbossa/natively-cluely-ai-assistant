@@ -857,7 +857,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [selectedInput, setSelectedInput] = useState('');
     const [selectedOutput, setSelectedOutput] = useState('');
     const [micLevel, setMicLevel] = useState(0);
-    const [useExperimentalSck, setUseExperimentalSck] = useState(false);
+    const [useExperimentalSck, setUseExperimentalSck] = useState(true);
 
     // STT Provider settings
     const [sttProvider, setSttProvider] = useState<'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local'>('none');
@@ -1311,7 +1311,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             loadDevices();
 
             // Load Experimental SCK pref
-            const savedSck = localStorage.getItem('useExperimentalSckBackend') === 'true';
+            const sckPreference = localStorage.getItem('useExperimentalSckBackend');
+            const savedSck = sckPreference === null ? true : sckPreference === 'true';
             setUseExperimentalSck(savedSck);
 
             // Load Calendar Status
@@ -3581,10 +3582,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         <div>
                                                             <div className="flex items-center gap-2 mb-0.5">
                                                                 <h3 className="text-sm font-bold text-text-primary">SCK Backend</h3>
-                                                                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-500/20 text-indigo-400 uppercase tracking-wide">Alternative</span>
+                                                                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-500/20 text-indigo-400 uppercase tracking-wide">Recommended</span>
                                                             </div>
                                                             <p className="text-xs text-text-secondary leading-relaxed max-w-[300px]">
-                                                                Use the ScreenCaptureKit backend. An optimized alternative to CoreAudio if you experience any capture issues.
+                                                                Use the ScreenCaptureKit backend for cleaner call and conference audio capture.
                                                             </p>
                                                         </div>
                                                     </div>

@@ -99,7 +99,75 @@ interface LiveTranscriptTurn {
     timestamp: number;
 }
 
-const MAX_LIVE_TRANSCRIPT_TURNS = 12;
+const MAX_LIVE_TRANSCRIPT_TURNS = 120;
+const MAX_COPY_TRANSCRIPT_TURNS = 1000;
+const LIVE_TRANSCRIPT_COLLAPSED_PAGE_SIZE = 4;
+const LIVE_TRANSCRIPT_EXPANDED_PAGE_SIZE = 12;
+
+const normalizeTranscriptText = (text: string) => text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const shouldReplaceTranscriptTurn = (last: LiveTranscriptTurn | undefined, next: LiveTranscriptTurn) => {
+    if (!last || last.speaker !== next.speaker) return false;
+
+    const lastText = normalizeTranscriptText(last.text);
+    const nextText = normalizeTranscriptText(next.text);
+    if (!lastText || !nextText) return false;
+
+    const elapsed = next.timestamp - last.timestamp;
+    const overlaps = lastText.includes(nextText) || nextText.includes(lastText);
+
+    if (!last.final && !next.final) {
+        return overlaps || elapsed < 2500;
+    }
+
+    if (!last.final && next.final) {
+        return overlaps || elapsed < 15000;
+    }
+
+    return false;
+};
+
+const transcriptTextSimilarity = (a: string, b: string) => {
+    const aWords = a.split(' ').filter(Boolean);
+    const bWords = b.split(' ').filter(Boolean);
+    if (aWords.length === 0 || bWords.length === 0) return 0;
+
+    const aSet = new Set(aWords);
+    const bSet = new Set(bWords);
+    let intersection = 0;
+    for (const word of aSet) {
+        if (bSet.has(word)) intersection++;
+    }
+
+    const union = new Set([...aSet, ...bSet]).size;
+    return union === 0 ? 0 : intersection / union;
+};
+
+const upsertTranscriptTurn = (turns: LiveTranscriptTurn[], next: LiveTranscriptTurn, limit: number) => {
+    const last = turns[turns.length - 1];
+    if (last && last.speaker === next.speaker && last.final && next.final && next.timestamp - last.timestamp < 45000) {
+        const lastText = normalizeTranscriptText(last.text);
+        const nextText = normalizeTranscriptText(next.text);
+
+        if (lastText === nextText || lastText.includes(nextText)) {
+            return turns;
+        }
+
+        if (nextText.includes(lastText) || transcriptTextSimilarity(lastText, nextText) >= 0.82) {
+            return [...turns.slice(0, -1), next].slice(-limit);
+        }
+    }
+
+    if (shouldReplaceTranscriptTurn(last, next)) {
+        return [...turns.slice(0, -1), next].slice(-limit);
+    }
+
+    return [...turns, next].slice(-limit);
+};
 
 const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, overlayOpacity = OVERLAY_OPACITY_DEFAULT }) => {
     const isLightTheme = useResolvedTheme() === 'light';
@@ -142,7 +210,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
     const [rollingTranscript, setRollingTranscript] = useState('');  // For interviewer rolling text bar
     const [liveTranscriptTurns, setLiveTranscriptTurns] = useState<LiveTranscriptTurn[]>([]);
+    const [copyTranscriptTurns, setCopyTranscriptTurns] = useState<LiveTranscriptTurn[]>([]);
     const [pendingLiveTranscript, setPendingLiveTranscript] = useState<Partial<Record<LiveTranscriptTurn['speaker'], LiveTranscriptTurn>>>({});
+    const [copiedTranscriptId, setCopiedTranscriptId] = useState<string | null>(null);
+    const [isTranscriptExpanded, setIsTranscriptExpanded] = useState(false);
+    const [transcriptPage, setTranscriptPage] = useState(0);
     const [isInterviewerSpeaking, setIsInterviewerSpeaking] = useState(false);  // Track if actively speaking
     const [voiceInput, setVoiceInput] = useState('');  // Accumulated user voice input
     const voiceInputRef = useRef<string>('');  // Ref for capturing in async handlers
@@ -434,7 +506,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             setCopilotSuggestion(null);
             setManualTranscript('');
             setLiveTranscriptTurns([]);
+            setCopyTranscriptTurns([]);
             setPendingLiveTranscript({});
+            setIsTranscriptExpanded(false);
+            setTranscriptPage(0);
             setRollingTranscript('');
             setVoiceInput('');
             setIsProcessing(false);
@@ -465,6 +540,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
         const speaker: LiveTranscriptTurn['speaker'] = transcript.speaker === 'user' ? 'user' : 'interviewer';
         const timestamp = Date.now();
+        const turn: LiveTranscriptTurn = {
+            id: `${transcript.final ? 'final' : 'partial'}-${speaker}-${timestamp}-${Math.random().toString(16).slice(2)}`,
+            speaker,
+            text,
+            final: transcript.final,
+            timestamp,
+        };
 
         if (!transcript.final) {
             setPendingLiveTranscript(prev => ({
@@ -477,6 +559,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                     timestamp,
                 },
             }));
+            setLiveTranscriptTurns(prev => upsertTranscriptTurn(prev, turn, MAX_LIVE_TRANSCRIPT_TURNS));
+            setCopyTranscriptTurns(prev => upsertTranscriptTurn(prev, turn, MAX_COPY_TRANSCRIPT_TURNS));
             return;
         }
 
@@ -487,23 +571,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             return next;
         });
 
-        setLiveTranscriptTurns(prev => {
-            const last = prev[prev.length - 1];
-            if (last && last.speaker === speaker && last.text === text && timestamp - last.timestamp < 5000) {
-                return prev;
-            }
-
-            return [
-                ...prev,
-                {
-                    id: `${speaker}-${timestamp}-${Math.random().toString(16).slice(2)}`,
-                    speaker,
-                    text,
-                    final: true,
-                    timestamp,
-                },
-            ].slice(-MAX_LIVE_TRANSCRIPT_TURNS);
-        });
+        setLiveTranscriptTurns(prev => upsertTranscriptTurn(prev, turn, MAX_LIVE_TRANSCRIPT_TURNS));
+        setCopyTranscriptTurns(prev => upsertTranscriptTurn(prev, turn, MAX_COPY_TRANSCRIPT_TURNS));
     };
 
     useEffect(() => {
@@ -2103,8 +2172,63 @@ Provide only the answer, nothing else.`;
     const interviewerSttIndicatorStatus = sttInterviewerStatus;
     // Strip consecutive error count from display — show only in expanded diagnostics
     const interviewerSttIndicatorError = sttInterviewerError?.replace(/\s*\(\d+ consecutive errors\):?/gi, '');
-    const pendingLiveTranscriptTurns = Object.values(pendingLiveTranscript).filter(Boolean) as LiveTranscriptTurn[];
-    const hasLiveTranscript = showTranscript && (liveTranscriptTurns.length > 0 || pendingLiveTranscriptTurns.length > 0);
+    const visibleTranscriptTurns = [...liveTranscriptTurns].sort((a, b) => a.timestamp - b.timestamp);
+    const copyableTranscriptTurns = [...copyTranscriptTurns].sort((a, b) => a.timestamp - b.timestamp);
+    const hasLiveTranscript = showTranscript && visibleTranscriptTurns.length > 0;
+    const transcriptPageSize = isTranscriptExpanded ? LIVE_TRANSCRIPT_EXPANDED_PAGE_SIZE : LIVE_TRANSCRIPT_COLLAPSED_PAGE_SIZE;
+    const maxTranscriptPage = Math.max(0, Math.ceil(visibleTranscriptTurns.length / transcriptPageSize) - 1);
+    const currentTranscriptPage = Math.min(transcriptPage, maxTranscriptPage);
+    const transcriptWindowEnd = Math.max(0, visibleTranscriptTurns.length - (currentTranscriptPage * transcriptPageSize));
+    const transcriptWindowStart = Math.max(0, transcriptWindowEnd - transcriptPageSize);
+    const displayedTranscriptTurns = visibleTranscriptTurns.slice(transcriptWindowStart, transcriptWindowEnd);
+
+    useEffect(() => {
+        setTranscriptPage(page => Math.min(page, maxTranscriptPage));
+    }, [maxTranscriptPage]);
+
+    const getTranscriptSpeakerLabel = (speaker: LiveTranscriptTurn['speaker']) => {
+        if (speaker === 'interviewer') return 'Speaker';
+        return 'Mic';
+    };
+
+    const formatTranscriptTurn = (turn: LiveTranscriptTurn) => {
+        const time = new Date(turn.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        return `[${time}] ${getTranscriptSpeakerLabel(turn.speaker)}: ${turn.text}`;
+    };
+
+    const copyTextToClipboard = async (text: string) => {
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.setAttribute('readonly', 'true');
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
+        }
+    };
+
+    const markTranscriptCopied = (id: string) => {
+        setCopiedTranscriptId(id);
+        window.setTimeout(() => {
+            setCopiedTranscriptId(current => current === id ? null : current);
+        }, 1400);
+    };
+
+    const handleCopyTranscriptTurn = async (turn: LiveTranscriptTurn) => {
+        await copyTextToClipboard(formatTranscriptTurn(turn));
+        markTranscriptCopied(turn.id);
+    };
+
+    const handleCopyFullTranscript = async () => {
+        if (copyableTranscriptTurns.length === 0) return;
+        await copyTextToClipboard(copyableTranscriptTurns.map(formatTranscriptTurn).join('\n'));
+        markTranscriptCopied('all');
+    };
 
     const copyDiagnostics = async () => {
         const version = import.meta.env.VITE_APP_VERSION || 'unknown';
@@ -2263,8 +2387,57 @@ Provide only the answer, nothing else.`;
                                         <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wide overlay-text-muted">
                                             <Mic className="w-3 h-3" />
                                             Live transcript
+                                            {visibleTranscriptTurns.length > transcriptPageSize && (
+                                                <span className="normal-case font-medium opacity-70">
+                                                    {currentTranscriptPage + 1}/{maxTranscriptPage + 1}
+                                                </span>
+                                            )}
                                         </div>
                                         <div className="flex items-center gap-1.5 text-[10px] overlay-text-muted">
+                                            {visibleTranscriptTurns.length > transcriptPageSize && (
+                                                <>
+                                                    <button
+                                                        onClick={() => setTranscriptPage(page => Math.min(maxTranscriptPage, page + 1))}
+                                                        disabled={currentTranscriptPage >= maxTranscriptPage}
+                                                        className={`p-1.5 rounded-full border transition-all active:scale-95 disabled:opacity-35 disabled:pointer-events-none ${quickActionClass}`}
+                                                        style={appearance.chipStyle}
+                                                        title="Older transcript"
+                                                    >
+                                                        <ChevronUp className="w-3 h-3" />
+                                                    </button>
+                                                    <button
+                                                        onClick={() => setTranscriptPage(page => Math.max(0, page - 1))}
+                                                        disabled={currentTranscriptPage === 0}
+                                                        className={`p-1.5 rounded-full border transition-all active:scale-95 disabled:opacity-35 disabled:pointer-events-none ${quickActionClass}`}
+                                                        style={appearance.chipStyle}
+                                                        title="Newer transcript"
+                                                    >
+                                                        <ChevronDown className="w-3 h-3" />
+                                                    </button>
+                                                </>
+                                            )}
+                                            <button
+                                                onClick={() => {
+                                                    setIsTranscriptExpanded(prev => !prev);
+                                                    setTranscriptPage(0);
+                                                }}
+                                                className={`flex items-center gap-1 px-2 py-1 rounded-full border transition-all active:scale-95 ${quickActionClass}`}
+                                                style={appearance.chipStyle}
+                                                title={isTranscriptExpanded ? 'Collapse transcript' : 'Expand transcript'}
+                                            >
+                                                {isTranscriptExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                                                <span>{isTranscriptExpanded ? 'Less' : 'More'}</span>
+                                            </button>
+                                            <button
+                                                onClick={handleCopyFullTranscript}
+                                                disabled={copyableTranscriptTurns.length === 0}
+                                                className={`flex items-center gap-1 px-2 py-1 rounded-full border transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none ${quickActionClass}`}
+                                                style={appearance.chipStyle}
+                                                title="Copy full transcript"
+                                            >
+                                                {copiedTranscriptId === 'all' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                                                <span>{copiedTranscriptId === 'all' ? 'Copied' : 'Copy all'}</span>
+                                            </button>
                                             {(pendingLiveTranscript.user || pendingLiveTranscript.interviewer) && (
                                                 <>
                                                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -2273,16 +2446,24 @@ Provide only the answer, nothing else.`;
                                             )}
                                         </div>
                                     </div>
-                                    <div className="max-h-[132px] overflow-y-auto px-3.5 pb-3 space-y-2" style={{ scrollbarWidth: 'none' }}>
-                                        {[...liveTranscriptTurns, ...pendingLiveTranscriptTurns].map((turn) => (
-                                            <div key={turn.id} className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 text-[12px] leading-snug">
+                                    <div className={`px-3.5 pb-3 space-y-2 overflow-hidden ${isTranscriptExpanded ? 'min-h-[220px]' : ''}`}>
+                                        {displayedTranscriptTurns.map((turn) => (
+                                            <div key={turn.id} className="group/transcript grid grid-cols-[72px_minmax(0,1fr)_24px] gap-2 text-[12px] leading-snug">
                                                 <div className={`font-semibold ${turn.speaker === 'user' ? 'text-emerald-400' : 'overlay-text-muted'}`}>
-                                                    {turn.speaker === 'user' ? 'Me' : 'Speaker'}
+                                                    {getTranscriptSpeakerLabel(turn.speaker)}
                                                 </div>
-                                                <div className={`min-w-0 ${turn.final ? 'overlay-text-primary' : 'overlay-text-muted italic'}`}>
+                                                <div className={`min-w-0 select-text ${turn.final ? 'overlay-text-primary' : 'overlay-text-muted italic'}`}>
                                                     {turn.text}
                                                     {!turn.final && <span className="inline-block ml-1 w-1 h-1 rounded-full bg-emerald-400 align-middle animate-pulse" />}
                                                 </div>
+                                                <button
+                                                    onClick={() => handleCopyTranscriptTurn(turn)}
+                                                    className="opacity-0 group-hover/transcript:opacity-100 focus:opacity-100 p-1 rounded-md overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive transition-opacity"
+                                                    title="Copy transcript line"
+                                                    style={appearance.iconStyle}
+                                                >
+                                                    {copiedTranscriptId === turn.id ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                                                </button>
                                             </div>
                                         ))}
                                         <div ref={liveTranscriptEndRef} />

@@ -243,7 +243,12 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
         analytics.trackCommandExecuted('start_prepared_meeting');
         try {
             const inputDeviceId = localStorage.getItem('preferredInputDeviceId');
-            const outputDeviceId = localStorage.getItem('preferredOutputDeviceId');
+            let outputDeviceId = localStorage.getItem('preferredOutputDeviceId');
+            const sckPreference = localStorage.getItem('useExperimentalSckBackend');
+            const useExperimentalSck = sckPreference === null ? true : sckPreference === 'true';
+            if (useExperimentalSck) {
+                outputDeviceId = 'sck';
+            }
 
             await window.electronAPI.startMeeting({
                 title: preparedEvent.title,

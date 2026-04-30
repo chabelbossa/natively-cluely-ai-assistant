@@ -177,6 +177,7 @@ type STTProvider = (GoogleSTT | RestSTT | LocalSTT | ParakeetStreamingSTT | Deep
   setAudioChannelCount?: (count: number) => void;
   setCredentials?: (keyPath: string) => void;
   notifySpeechEnded?: () => void;
+  flushPendingTranscript?: () => void;
 };
 
 type ScreenshotWindowMode = 'launcher' | 'overlay';
@@ -828,6 +829,41 @@ export class AppState {
   private _audioTestStarting = false;               // P2-12: in-flight guard against concurrent calls
   private googleSTT: STTProvider | null = null; // Interviewer
   private googleSTT_User: STTProvider | null = null; // User
+  private audioLevelLastLogAt: Record<'interviewer' | 'user', number> = {
+    interviewer: 0,
+    user: 0,
+  };
+
+  private getPcm16Level(chunk: Buffer): { rms: number; peak: number } {
+    if (!chunk || chunk.length < 2) return { rms: 0, peak: 0 };
+
+    let sumSquares = 0;
+    let peak = 0;
+    let count = 0;
+    const step = Math.max(2, Math.floor((chunk.length / 2) / 1200) * 2);
+    for (let i = 0; i < chunk.length - 1; i += step) {
+      const sample = chunk.readInt16LE(i);
+      const abs = Math.abs(sample);
+      peak = Math.max(peak, abs);
+      sumSquares += sample * sample;
+      count++;
+    }
+
+    return {
+      rms: count > 0 ? Math.sqrt(sumSquares / count) : 0,
+      peak,
+    };
+  }
+
+  private maybeLogAudioLevel(channel: 'interviewer' | 'user', chunk: Buffer): void {
+    const now = Date.now();
+    if (now - this.audioLevelLastLogAt[channel] < 5000) return;
+    this.audioLevelLastLogAt[channel] = now;
+
+    const level = this.getPcm16Level(chunk);
+    const label = channel === 'interviewer' ? 'system' : 'mic';
+    console.log(`[Main][audio-level] ${label} rms=${level.rms.toFixed(1)} peak=${level.peak}`);
+  }
 
   private createSTTProvider(speaker: 'interviewer' | 'user'): STTProvider | null {
     const { CredentialsManager } = require('./services/CredentialsManager');
@@ -938,33 +974,47 @@ export class AppState {
         return;
       }
 
-      this.intelligenceManager.handleTranscript({
+      const helper = this.getWindowHelper();
+      const timestamp = Date.now();
+      const payload = {
         speaker: speaker,
         text: segment.text,
-        timestamp: Date.now(),
+        timestamp,
         final: segment.isFinal,
         confidence: segment.confidence
-      });
+      };
+      helper.getLauncherWindow()?.webContents.send('native-audio-transcript', payload);
+      helper.getOverlayWindow()?.webContents.send('native-audio-transcript', payload);
+
+      const transcriptSegment = {
+        speaker: speaker,
+        text: segment.text,
+        timestamp,
+        final: segment.isFinal,
+        confidence: segment.confidence
+      };
+
+      // Passive meeting intelligence should trust the system-audio channel.
+      // Microphone STT is still shown in the UI and used by the explicit Answer
+      // recording flow. We still persist final mic transcripts for post-meeting
+      // transcript/summary, but keep them out of passive answer context by default.
+      const includeMicContext = process.env.NATIVELY_INCLUDE_MIC_CONTEXT === '1';
+      const shouldFeedPassiveContext = speaker === 'interviewer' || includeMicContext;
+      if (!shouldFeedPassiveContext) {
+        this.intelligenceManager.recordTranscriptOnly(transcriptSegment);
+        return;
+      }
+
+      this.intelligenceManager.handleTranscript(transcriptSegment);
 
       // Feed final transcript to JIT RAG indexer
       if (segment.isFinal && this.ragManager) {
         this.ragManager.feedLiveTranscript([{
           speaker: speaker,
           text: segment.text,
-          timestamp: Date.now()
+          timestamp
         }]);
       }
-
-      const helper = this.getWindowHelper();
-      const payload = {
-        speaker: speaker,
-        text: segment.text,
-        timestamp: Date.now(),
-        final: segment.isFinal,
-        confidence: segment.confidence
-      };
-      helper.getLauncherWindow()?.webContents.send('native-audio-transcript', payload);
-      helper.getOverlayWindow()?.webContents.send('native-audio-transcript', payload);
 
       // Feed final recruiter (system audio) transcripts to negotiation tracker
       if (segment.isFinal && speaker === 'interviewer') {
@@ -1088,6 +1138,7 @@ export class AppState {
           if (_sysChunkCount <= 3 || _sysChunkCount % 500 === 0) {
             console.log(`[Main] SystemAudio->STT: chunk #${_sysChunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
           }
+          this.maybeLogAudioLevel('interviewer', chunk);
           this.googleSTT?.write(chunk);
         });
         this.systemAudioCapture.on('sample_rate_changed', (rate: number) => {
@@ -1107,6 +1158,7 @@ export class AppState {
       if (!this.microphoneCapture) {
         this.microphoneCapture = new MicrophoneCapture();
         this.microphoneCapture.on('data', (chunk: Buffer) => {
+          this.maybeLogAudioLevel('user', chunk);
           this.googleSTT_User?.write(chunk);
         });
         this.microphoneCapture.on('sample_rate_changed', (rate: number) => {
@@ -1184,6 +1236,7 @@ export class AppState {
         if (_rcfgSysChunkCount <= 3 || _rcfgSysChunkCount % 500 === 0) {
           console.log(`[Main] (Reconfigured) SystemAudio->STT: chunk #${_rcfgSysChunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
         }
+        this.maybeLogAudioLevel('interviewer', chunk);
         this.googleSTT?.write(chunk);
       });
       this.systemAudioCapture.on('sample_rate_changed', (rate: number) => {
@@ -1211,6 +1264,7 @@ export class AppState {
           if (_dfltSysChunkCount <= 3 || _dfltSysChunkCount % 500 === 0) {
             console.log(`[Main] (Default) SystemAudio->STT: chunk #${_dfltSysChunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
           }
+          this.maybeLogAudioLevel('interviewer', chunk);
           this.googleSTT?.write(chunk);
         });
         this.systemAudioCapture.on('sample_rate_changed', (rate: number) => {
@@ -1243,6 +1297,7 @@ export class AppState {
 
       this.microphoneCapture.on('data', (chunk: Buffer) => {
         // console.log('[Main] Mic chunk', chunk.length);
+        this.maybeLogAudioLevel('user', chunk);
         this.googleSTT_User?.write(chunk);
       });
       this.microphoneCapture.on('sample_rate_changed', (rate: number) => {
@@ -1265,6 +1320,7 @@ export class AppState {
         this.googleSTT_User?.setSampleRate(rate);
 
         this.microphoneCapture.on('data', (chunk: Buffer) => {
+          this.maybeLogAudioLevel('user', chunk);
           this.googleSTT_User?.write(chunk);
         });
         this.microphoneCapture.on('sample_rate_changed', (rate: number) => {
@@ -1485,6 +1541,32 @@ export class AppState {
     }
   }
 
+  public async flushPendingSttTranscripts(reason: string = 'manual'): Promise<void> {
+    const flushProvider = (provider: STTProvider | null, label: string) => {
+      if (!provider) return;
+      try {
+        if (provider.flushPendingTranscript) {
+          console.log(`[Main] Flushing pending STT transcript for ${label} (${reason})`);
+          provider.flushPendingTranscript();
+          return;
+        }
+        if (provider.finalize) {
+          console.log(`[Main] Finalizing STT provider for ${label} (${reason})`);
+          provider.finalize();
+        }
+      } catch (err) {
+        console.warn(`[Main] Failed to flush pending STT transcript for ${label}:`, err);
+      }
+    };
+
+    flushProvider(this.googleSTT, 'interviewer');
+    flushProvider(this.googleSTT_User, 'user');
+
+    // Give synchronous EventEmitter listeners and very fast provider finalizers a tick
+    // before the caller reads context or marks the meeting inactive.
+    await new Promise(resolve => setTimeout(resolve, 120));
+  }
+
   public async startMeeting(metadata?: any): Promise<void> {
     console.log('[Main] Starting Meeting...', metadata);
 
@@ -1514,14 +1596,16 @@ export class AppState {
       console.log(`[Main] macOS screen recording permission status: ${screenStatus}`);
       if (screenStatus === 'denied') {
         // Permission was explicitly denied — warn the user via the UI but do NOT
-        // auto-open System Settings. Forcing that window open every meeting start
-        // is extremely disruptive, especially when mic transcription is still working.
-        // The UI will show a non-blocking banner; the user can fix it deliberately.
-        const message = 'Screen Recording permission denied. System audio will not be captured. To fix: System Settings → Privacy & Security → Screen Recording → enable Natively.';
+        // continue in microphone-only mode. For meeting/call use cases that creates
+        // misleading transcripts where every voice is labeled as Mic, which then
+        // pollutes summaries and AI answers. Allow an explicit escape hatch only
+        // for local mic-only debugging.
+        const message = 'Screen Recording permission denied. Natively cannot separate Speaker from Mic until this is enabled. To fix: System Settings → Privacy & Security → Screen Recording → enable Natively, then quit and relaunch Natively.';
         console.warn('[Main]', message);
         this.broadcast('system-audio-permission-denied', message);
-        // NOTE: Do NOT call shell.openExternal() here — it hijacks focus on every meeting
-        // start. The UI banner (system-audio-permission-denied IPC event) handles this.
+        if (process.env.NATIVELY_ALLOW_MIC_ONLY !== '1') {
+          throw new Error(message);
+        }
       }
       // 'not-determined': Handled at startup. SCK/CoreAudio will trigger the TCC
       // dialog itself when it first attempts to access screen content.
@@ -1595,6 +1679,7 @@ export class AppState {
 
   public async endMeeting(): Promise<void> {
     console.log('[Main] Ending Meeting...');
+    await this.flushPendingSttTranscripts('meeting_end');
     this.isMeetingActive = false; // Block new data immediately
     this.broadcastMeetingState();
 

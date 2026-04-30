@@ -2306,6 +2306,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // MODE 2: What Should I Say (Primary auto-answer)
   safeHandle("generate-what-to-say", async (_, question?: string, imagePaths?: string[]) => {
     try {
+      await appState.flushPendingSttTranscripts?.('what_to_say');
       const intelligenceManager = appState.getIntelligenceManager();
       // Question and imagePaths are now optional - IntelligenceManager infers from transcript
       const answer = await intelligenceManager.runWhatShouldISay(question, 0.8, imagePaths);
@@ -2320,6 +2321,7 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("generate-clarify", async () => {
     try {
+      await appState.flushPendingSttTranscripts?.('clarify');
       const intelligenceManager = appState.getIntelligenceManager();
       const clarification = await intelligenceManager.runClarify();
       // If null returned without throwing, the engine already set mode to idle.
@@ -2413,6 +2415,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // MODE 4: Recap (Summary)
   safeHandle("generate-recap", async () => {
     try {
+      await appState.flushPendingSttTranscripts?.('recap');
       const intelligenceManager = appState.getIntelligenceManager();
       const summary = await intelligenceManager.runRecap();
       return { summary };
@@ -2424,6 +2427,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // MODE 6: Follow-Up Questions
   safeHandle("generate-follow-up-questions", async () => {
     try {
+      await appState.flushPendingSttTranscripts?.('follow_up_questions');
       const intelligenceManager = appState.getIntelligenceManager();
       const questions = await intelligenceManager.runFollowUpQuestions();
       return { questions };

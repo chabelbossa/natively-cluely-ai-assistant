@@ -220,7 +220,7 @@ export class SessionTracker {
 
         if (!isInternalPrompt) {
             // Add to session transcript
-            this.fullTranscript.push(segment);
+            this.upsertFullTranscript(segment, text);
             // Compact transcript with summarization instead of losing early context
             // Fire-and-forget: sync context; errors are caught internally
             void this.compactTranscriptIfNeeded().catch(e =>
@@ -329,6 +329,29 @@ export class SessionTracker {
         }
 
         return this.addTranscript(segment);
+    }
+
+    /**
+     * Persist a final transcript segment without adding it to the live LLM context.
+     * Useful for microphone capture: we want the post-meeting transcript/summary to
+     * include it, but we don't want passive answers to treat mic echo as interviewer context.
+     */
+    recordTranscriptOnly(segment: TranscriptSegment): void {
+        if (!segment.final) return;
+
+        const text = segment.text.trim();
+        if (!text) return;
+
+        const isInternalPrompt = text.startsWith("You are a real-time interview assistant") ||
+            text.startsWith("You are a helper") ||
+            text.startsWith("CONTEXT:");
+
+        if (isInternalPrompt) return;
+
+        this.upsertFullTranscript(segment, text);
+        void this.compactTranscriptIfNeeded().catch(e =>
+            console.warn('[SessionTracker] compactTranscript error (non-fatal):', e)
+        );
     }
 
     // ============================================
@@ -490,6 +513,64 @@ export class SessionTracker {
         if (speaker === 'user') return 'user';
         if (speaker === 'assistant') return 'assistant';
         return 'interviewer'; // system audio = interviewer
+    }
+
+    private upsertFullTranscript(segment: TranscriptSegment, textOverride?: string): void {
+        const text = (textOverride ?? segment.text).trim();
+        if (!text) return;
+
+        const next: TranscriptSegment = { ...segment, text };
+        const last = this.fullTranscript[this.fullTranscript.length - 1];
+        if (last && last.speaker === next.speaker) {
+            const elapsed = Math.abs(next.timestamp - last.timestamp);
+            const lastText = this.normalizeTranscriptForComparison(last.text);
+            const nextText = this.normalizeTranscriptForComparison(next.text);
+
+            if (lastText && nextText && elapsed < 45_000) {
+                if (lastText === nextText || lastText.includes(nextText)) {
+                    return;
+                }
+                if (nextText.includes(lastText)) {
+                    this.fullTranscript[this.fullTranscript.length - 1] = next;
+                    return;
+                }
+
+                const similarity = this.transcriptSimilarity(lastText, nextText);
+                if (similarity >= 0.82) {
+                    if (nextText.length > lastText.length) {
+                        this.fullTranscript[this.fullTranscript.length - 1] = next;
+                    }
+                    return;
+                }
+            }
+        }
+
+        this.fullTranscript.push(next);
+    }
+
+    private normalizeTranscriptForComparison(text: string): string {
+        return text
+            .toLowerCase()
+            .normalize('NFKC')
+            .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    private transcriptSimilarity(a: string, b: string): number {
+        const aWords = a.split(' ').filter(Boolean);
+        const bWords = b.split(' ').filter(Boolean);
+        if (aWords.length === 0 || bWords.length === 0) return 0;
+
+        const aSet = new Set(aWords);
+        const bSet = new Set(bWords);
+        let intersection = 0;
+        for (const word of aSet) {
+            if (bSet.has(word)) intersection++;
+        }
+
+        const union = new Set([...aSet, ...bSet]).size;
+        return union === 0 ? 0 : intersection / union;
     }
 
     private evictOldEntries(): void {

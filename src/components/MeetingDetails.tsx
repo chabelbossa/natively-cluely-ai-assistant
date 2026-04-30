@@ -88,10 +88,29 @@ const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting: initialMeeting
         }
     };
 
+    const copyTextToClipboard = async (text: string) => {
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.setAttribute('readonly', 'true');
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
+        }
+    };
+
     const handleCopy = async () => {
         let textToCopy = '';
 
         if (activeTab === 'summary' && meeting.detailedSummary) {
+            const customSections = meeting.detailedSummary.sections
+                ?.map(section => `${section.title.toUpperCase()}:\n${section.bullets.map(item => `- ${item}`).join('\n') || 'None'}`)
+                .join('\n\n');
             textToCopy = `
 Meeting: ${meeting.title}
 Date: ${new Date(meeting.date).toLocaleDateString()}
@@ -104,9 +123,10 @@ ${meeting.detailedSummary.actionItems?.map(item => `- ${item}`).join('\n') || 'N
 
 KEY POINTS:
 ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'None'}
+${customSections ? `\n\n${customSections}` : ''}
             `.trim();
         } else if (activeTab === 'transcript' && meeting.transcript) {
-            textToCopy = meeting.transcript.map(t => `[${formatTime(t.timestamp)}] ${t.speaker === 'user' ? 'Me' : 'Them'}: ${t.text}`).join('\n');
+            textToCopy = meeting.transcript.map(t => `[${formatTime(t.timestamp)}] ${t.speaker === 'user' ? 'Mic' : 'Speaker'}: ${t.text}`).join('\n');
         } else if (activeTab === 'usage' && meeting.usage) {
             textToCopy = meeting.usage.map(u => `Q: ${u.question || ''}\nA: ${u.answer || ''}`).join('\n\n');
         }
@@ -114,7 +134,7 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
         if (!textToCopy) return;
 
         try {
-            await navigator.clipboard.writeText(textToCopy);
+            await copyTextToClipboard(textToCopy);
             setIsCopied(true);
             setTimeout(() => setIsCopied(false), 2000);
         } catch (err) {
@@ -411,7 +431,7 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
                                             <div key={i} className="group">
                                                 <div className="flex items-center gap-2 mb-1">
                                                     <span className="text-xs font-semibold text-text-secondary">
-                                                        {entry.speaker === 'user' ? 'Me' : 'Them'}
+                                                        {entry.speaker === 'user' ? 'Mic' : 'Speaker'}
                                                     </span>
                                                     <span className="text-xs text-text-tertiary font-mono">{entry.timestamp ? formatTime(entry.timestamp) : '0:00'}</span>
                                                 </div>
