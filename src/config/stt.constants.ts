@@ -1,6 +1,6 @@
 /**
  * Speech-to-Text Provider Constants
- * Configuration for STT providers (Google gRPC, REST, WebSocket)
+ * Configuration for STT providers (Google gRPC, REST, WebSocket, local realtime)
  */
 
 export type SttProviderId = 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'natively' | 'local';
@@ -126,11 +126,12 @@ export const STT_PROVIDERS: Record<SttProviderId, SttProviderConfig> = {
     local: {
         id: 'local',
         name: 'Local STT',
-        description: 'Local whisper.cpp model file or OpenAI-compatible endpoint',
+        description: 'Local Parakeet realtime, whisper.cpp model file, or OpenAI-compatible endpoint',
         endpoint: 'http://127.0.0.1:8000/v1/audio/transcriptions',
         model: 'whisper-large-v3-turbo',
         uploadType: 'multipart',
         availableModels: [
+            { id: 'parakeet-tdt-0.6b-v3', label: 'Parakeet TDT 0.6B V3 (Realtime)' },
             { id: 'whisper-large-v3-turbo', label: 'Whisper Large V3 Turbo' },
             { id: 'whisper-large-v3', label: 'Whisper Large V3' },
             { id: 'parakeet-v3', label: 'Parakeet V3' },

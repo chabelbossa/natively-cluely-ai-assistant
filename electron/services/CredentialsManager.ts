@@ -23,7 +23,7 @@ export interface CurlProvider {
 }
 
 export type StoredSttProvider = 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local';
-export type StoredLocalSttMode = 'server' | 'whisper_cpp';
+export type StoredLocalSttMode = 'server' | 'whisper_cpp' | 'parakeet_stream';
 
 export interface StoredLocalSttConfig {
     mode?: StoredLocalSttMode;
@@ -31,6 +31,7 @@ export interface StoredLocalSttConfig {
     model?: string;
     whisperCppModelPath?: string;
     whisperCppExecutablePath?: string;
+    glossary?: string;
 }
 
 export interface StoredCredentials {
@@ -52,6 +53,7 @@ export interface StoredCredentials {
     localSttModel?: string;
     localSttWhisperCppModelPath?: string;
     localSttWhisperCppExecutablePath?: string;
+    localSttGlossary?: string;
     openAiSttApiKey?: string;
     deepgramApiKey?: string;
     elevenLabsApiKey?: string;
@@ -164,11 +166,12 @@ export class CredentialsManager {
 
     public getLocalSttConfig(): Required<StoredLocalSttConfig> {
         return {
-            mode: this.credentials.localSttMode || 'whisper_cpp',
+            mode: this.credentials.localSttMode || 'parakeet_stream',
             endpoint: this.credentials.localSttEndpoint || 'http://127.0.0.1:8000/v1/audio/transcriptions',
             model: this.credentials.localSttModel || 'whisper-large-v3-turbo',
             whisperCppModelPath: this.credentials.localSttWhisperCppModelPath || this.getDefaultVoiceInkWhisperModelPath(),
             whisperCppExecutablePath: this.credentials.localSttWhisperCppExecutablePath || '/opt/homebrew/bin/whisper-cli',
+            glossary: this.credentials.localSttGlossary || this.getDefaultSttGlossary(),
         };
     }
 
@@ -292,17 +295,22 @@ export class CredentialsManager {
             ? { endpoint: configOrEndpoint, model }
             : (configOrEndpoint || {});
 
-        this.credentials.localSttMode = config.mode || this.credentials.localSttMode || 'whisper_cpp';
+        this.credentials.localSttMode = config.mode || this.credentials.localSttMode || 'parakeet_stream';
         this.credentials.localSttEndpoint = (config.endpoint || '').trim() || 'http://127.0.0.1:8000/v1/audio/transcriptions';
         this.credentials.localSttModel = (config.model || '').trim() || 'whisper-large-v3-turbo';
         this.credentials.localSttWhisperCppModelPath = (config.whisperCppModelPath || '').trim() || this.getDefaultVoiceInkWhisperModelPath();
         this.credentials.localSttWhisperCppExecutablePath = (config.whisperCppExecutablePath || '').trim() || '/opt/homebrew/bin/whisper-cli';
+        this.credentials.localSttGlossary = (config.glossary || '').trim() || this.getDefaultSttGlossary();
         this.saveCredentials();
         console.log(`[CredentialsManager] Local STT config set to: ${this.credentials.localSttMode}`);
     }
 
     private getDefaultVoiceInkWhisperModelPath(): string {
         return path.join(app.getPath('home'), 'Library/Application Support/com.prakashjoshipax.VoiceInk/WhisperModels/ggml-large-v3-turbo-q5_0.bin');
+    }
+
+    private getDefaultSttGlossary(): string {
+        return 'Kyntia, SSO, Next.js, NestJS, WaChap, Kloo, Artiweb, API, frontend, backend';
     }
 
     public setElevenLabsApiKey(key: string): void {

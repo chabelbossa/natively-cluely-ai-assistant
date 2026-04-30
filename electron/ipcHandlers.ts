@@ -1420,6 +1420,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         localSttMode: localSttConfig.mode,
         localSttEndpoint: localSttConfig.endpoint,
         localSttModel: localSttConfig.model,
+        localSttGlossary: localSttConfig.glossary,
         localSttWhisperCppModelPath: localSttConfig.whisperCppModelPath,
         localSttWhisperCppExecutablePath: localSttConfig.whisperCppExecutablePath,
         hasSttGroqKey: hasKey(creds.groqSttApiKey),
@@ -1449,7 +1450,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         claudePreferredModel: creds.claudePreferredModel || undefined,
       };
     } catch (error: any) {
-      return { hasGeminiKey: false, hasGroqKey: false, hasOpenaiKey: false, hasClaudeKey: false, hasNativelyKey: false, googleServiceAccountPath: null, sttProvider: 'none', groqSttModel: 'whisper-large-v3-turbo', localSttMode: 'whisper_cpp', localSttEndpoint: 'http://127.0.0.1:8000/v1/audio/transcriptions', localSttModel: 'whisper-large-v3-turbo', localSttWhisperCppModelPath: path.join(app.getPath('home'), 'Library/Application Support/com.prakashjoshipax.VoiceInk/WhisperModels/ggml-large-v3-turbo-q5_0.bin'), localSttWhisperCppExecutablePath: '/opt/homebrew/bin/whisper-cli', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasTavilyKey: false, sttGroqKey: '', sttOpenaiKey: '', sttDeepgramKey: '', sttElevenLabsKey: '', sttAzureKey: '', sttIbmKey: '', sttSonioxKey: '' };
+      return { hasGeminiKey: false, hasGroqKey: false, hasOpenaiKey: false, hasClaudeKey: false, hasNativelyKey: false, googleServiceAccountPath: null, sttProvider: 'none', groqSttModel: 'whisper-large-v3-turbo', localSttMode: 'parakeet_stream', localSttEndpoint: 'http://127.0.0.1:8000/v1/audio/transcriptions', localSttModel: 'whisper-large-v3-turbo', localSttGlossary: 'Kyntia, SSO, Next.js, NestJS, WaChap, Kloo, Artiweb, API, frontend, backend', localSttWhisperCppModelPath: path.join(app.getPath('home'), 'Library/Application Support/com.prakashjoshipax.VoiceInk/WhisperModels/ggml-large-v3-turbo-q5_0.bin'), localSttWhisperCppExecutablePath: '/opt/homebrew/bin/whisper-cli', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasTavilyKey: false, sttGroqKey: '', sttOpenaiKey: '', sttDeepgramKey: '', sttElevenLabsKey: '', sttAzureKey: '', sttIbmKey: '', sttSonioxKey: '' };
     }
   });
 
@@ -1583,7 +1584,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle("set-local-stt-config", async (_, config: { mode?: 'server' | 'whisper_cpp'; endpoint?: string; model?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => {
+  safeHandle("set-local-stt-config", async (_, config: { mode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; endpoint?: string; model?: string; glossary?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       CredentialsManager.getInstance().setLocalSttConfig(config || {});
@@ -1687,11 +1688,27 @@ export function initializeIpcHandlers(appState: AppState): void {
     return msg.replace(/:\s*[a-zA-Z0-9*]+\*+[a-zA-Z0-9*]+\.?$/g, '').trim();
   };
 
-  safeHandle("test-local-stt-connection", async (_, config: { mode?: 'server' | 'whisper_cpp'; endpoint?: string; model?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => {
+  safeHandle("test-local-stt-connection", async (_, config: { mode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; endpoint?: string; model?: string; glossary?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => {
     console.log(`[IPC] Received test-local-stt-connection request`);
     try {
       const { LocalSTT, DEFAULT_LOCAL_STT_MODEL } = require('./audio/LocalSTT');
       const localConfig = LocalSTT.normalizeConfig(config || {});
+
+      if (localConfig.mode === 'parakeet_stream') {
+        const { ParakeetBridge } = require('./audio/ParakeetBridge');
+        const bridge = ParakeetBridge.getInstance();
+        if (!ParakeetBridge.isDefaultModelAvailable()) {
+          return {
+            success: false,
+            error: `Parakeet V3 model cache missing: ${ParakeetBridge.getDefaultModelDirectory()}`,
+          };
+        }
+
+        const sessionId = `ipc-test-${Date.now()}`;
+        await bridge.startSession(sessionId, { language: 'auto' });
+        bridge.stopSession(sessionId);
+        return { success: true };
+      }
 
       const numSamples = 8000;
       const pcmData = Buffer.alloc(numSamples * 2);

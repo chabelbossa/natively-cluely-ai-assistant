@@ -242,10 +242,11 @@ interface ProviderSelectProps {
     onChange: (value: string) => void;
 }
 
-type LocalSttMode = 'server' | 'whisper_cpp';
+type LocalSttMode = 'server' | 'whisper_cpp' | 'parakeet_stream';
 
 const DEFAULT_LOCAL_STT_ENDPOINT = 'http://127.0.0.1:8000/v1/audio/transcriptions';
 const DEFAULT_LOCAL_STT_MODEL = 'whisper-large-v3-turbo';
+const DEFAULT_LOCAL_STT_GLOSSARY = 'Kyntia, SSO, Next.js, NestJS, WaChap, Kloo, Artiweb, API, frontend, backend';
 const DEFAULT_WHISPER_CPP_EXECUTABLE_PATH = '/opt/homebrew/bin/whisper-cli';
 const DEFAULT_VOICEINK_WHISPER_MODEL_PATH = '/Users/user/Library/Application Support/com.prakashjoshipax.VoiceInk/WhisperModels/ggml-large-v3-turbo-q5_0.bin';
 
@@ -861,9 +862,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     // STT Provider settings
     const [sttProvider, setSttProvider] = useState<'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local'>('none');
     const [groqSttModel, setGroqSttModel] = useState('whisper-large-v3-turbo');
-    const [localSttMode, setLocalSttMode] = useState<LocalSttMode>('whisper_cpp');
+    const [localSttMode, setLocalSttMode] = useState<LocalSttMode>('parakeet_stream');
     const [localSttEndpoint, setLocalSttEndpoint] = useState(DEFAULT_LOCAL_STT_ENDPOINT);
     const [localSttModel, setLocalSttModel] = useState(DEFAULT_LOCAL_STT_MODEL);
+    const [localSttGlossary, setLocalSttGlossary] = useState(DEFAULT_LOCAL_STT_GLOSSARY);
     const [localSttWhisperCppModelPath, setLocalSttWhisperCppModelPath] = useState(DEFAULT_VOICEINK_WHISPER_MODEL_PATH);
     const [localSttWhisperCppExecutablePath, setLocalSttWhisperCppExecutablePath] = useState(DEFAULT_WHISPER_CPP_EXECUTABLE_PATH);
     const [sttGroqKey, setSttGroqKey] = useState('');
@@ -915,6 +917,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                     if (creds.localSttMode) setLocalSttMode(creds.localSttMode);
                     if (creds.localSttEndpoint) setLocalSttEndpoint(creds.localSttEndpoint);
                     if (creds.localSttModel) setLocalSttModel(creds.localSttModel);
+                    if (creds.localSttGlossary) setLocalSttGlossary(creds.localSttGlossary);
                     if (creds.localSttWhisperCppModelPath) setLocalSttWhisperCppModelPath(creds.localSttWhisperCppModelPath);
                     if (creds.localSttWhisperCppExecutablePath) setLocalSttWhisperCppExecutablePath(creds.localSttWhisperCppExecutablePath);
                     setGoogleServiceAccountPath(creds.googleServiceAccountPath);
@@ -959,6 +962,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                     if (creds.localSttMode) setLocalSttMode(creds.localSttMode);
                     if (creds.localSttEndpoint) setLocalSttEndpoint(creds.localSttEndpoint);
                     if (creds.localSttModel) setLocalSttModel(creds.localSttModel);
+                    if (creds.localSttGlossary) setLocalSttGlossary(creds.localSttGlossary);
                     if (creds.localSttWhisperCppModelPath) setLocalSttWhisperCppModelPath(creds.localSttWhisperCppModelPath);
                     if (creds.localSttWhisperCppExecutablePath) setLocalSttWhisperCppExecutablePath(creds.localSttWhisperCppExecutablePath);
                     setHasNativelyKey(creds.hasNativelyKey || false);
@@ -992,6 +996,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
         mode: localSttMode,
         endpoint: localSttEndpoint.trim(),
         model: localSttModel.trim(),
+        glossary: localSttGlossary.trim(),
         whisperCppModelPath: localSttWhisperCppModelPath.trim(),
         whisperCppExecutablePath: localSttWhisperCppExecutablePath.trim(),
     });
@@ -1343,9 +1348,11 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
         }
     }, [isOpen, activeTab, selectedInput]);
 
-    const isLocalSttConfigReady = localSttMode === 'whisper_cpp'
-        ? Boolean(localSttWhisperCppModelPath.trim() && localSttWhisperCppExecutablePath.trim())
-        : Boolean(localSttEndpoint.trim());
+    const isLocalSttConfigReady = localSttMode === 'parakeet_stream'
+        ? true
+        : localSttMode === 'whisper_cpp'
+            ? Boolean(localSttWhisperCppModelPath.trim() && localSttWhisperCppExecutablePath.trim())
+            : Boolean(localSttEndpoint.trim());
 
     return (
         <AnimatePresence>
@@ -3025,7 +3032,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         onChange={(val) => handleSttProviderChange(val as any)}
                                                         options={[
                                                             ...(hasNativelyKey ? [{ id: 'natively', label: 'Natively API', badge: 'Saved' as const, recommended: true, desc: 'Managed transcription via Natively backend', color: 'blue', icon: <Mic size={14} /> }] : []),
-                                                            { id: 'local', label: 'Local STT', badge: isLocalSttConfigReady ? (localSttMode === 'whisper_cpp' ? 'Local file' : 'Endpoint') : null, recommended: true, desc: 'VoiceInk whisper.cpp model or OpenAI-compatible endpoint', color: 'green', icon: <Mic size={14} /> },
+                                                            { id: 'local', label: 'Local STT', badge: isLocalSttConfigReady ? (localSttMode === 'parakeet_stream' ? 'Realtime' : localSttMode === 'whisper_cpp' ? 'Local file' : 'Endpoint') : null, recommended: true, desc: 'Parakeet realtime, VoiceInk whisper.cpp, or OpenAI-compatible endpoint', color: 'green', icon: <Mic size={14} /> },
                                                             { id: 'google', label: 'Google Cloud', badge: googleServiceAccountPath ? 'Saved' : null, recommended: true, desc: 'gRPC streaming via Service Account', color: 'blue', icon: <Mic size={14} /> },
                                                             { id: 'groq', label: 'Groq Whisper', badge: hasStoredSttGroqKey ? 'Saved' : null, recommended: true, desc: 'Ultra-fast REST transcription', color: 'orange', icon: <Mic size={14} /> },
                                                             { id: 'openai', label: 'OpenAI Whisper', badge: hasStoredSttOpenaiKey ? 'Saved' : null, desc: 'OpenAI-compatible Whisper API', color: 'green', icon: <Mic size={14} /> },
@@ -3078,8 +3085,14 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-3">
                                                     <div>
                                                         <label className="text-xs font-medium text-text-secondary mb-2 block">Local Mode</label>
-                                                        <div className="grid grid-cols-2 gap-2">
+                                                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                                                             {[
+                                                                {
+                                                                    id: 'parakeet_stream' as const,
+                                                                    label: 'Parakeet Realtime',
+                                                                    desc: 'FluidAudio cache, live partials',
+                                                                    icon: <Zap size={13} />,
+                                                                },
                                                                 {
                                                                     id: 'whisper_cpp' as const,
                                                                     label: 'Whisper.cpp file',
@@ -3112,7 +3125,17 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         </div>
                                                     </div>
 
-                                                    {localSttMode === 'whisper_cpp' ? (
+                                                    {localSttMode === 'parakeet_stream' ? (
+                                                        <div className="rounded-lg border border-green-500/20 bg-green-500/10 p-3">
+                                                            <div className="flex items-center gap-2 text-xs font-medium text-green-300">
+                                                                <Activity size={13} />
+                                                                Parakeet V3 realtime
+                                                            </div>
+                                                            <p className="mt-1.5 text-[11px] leading-5 text-text-secondary">
+                                                                Uses the existing FluidAudio model cache at ~/Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v3. Natively will not download another model.
+                                                            </p>
+                                                        </div>
+                                                    ) : localSttMode === 'whisper_cpp' ? (
                                                         <>
                                                             <div>
                                                                 <label className="text-xs font-medium text-text-secondary mb-2 block">Whisper.cpp Model File</label>
@@ -3165,6 +3188,19 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                             </div>
                                                         </>
                                                     )}
+                                                    <div>
+                                                        <label className="text-xs font-medium text-text-secondary mb-2 block">Glossary</label>
+                                                        <textarea
+                                                            value={localSttGlossary}
+                                                            onChange={(e) => setLocalSttGlossary(e.target.value)}
+                                                            rows={3}
+                                                            placeholder={DEFAULT_LOCAL_STT_GLOSSARY}
+                                                            className="w-full resize-none bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary transition-colors"
+                                                        />
+                                                        <p className="text-[10px] text-text-tertiary mt-1.5">
+                                                            Terms to preserve in local transcripts. Separate words with commas.
+                                                        </p>
+                                                    </div>
                                                     <div className="flex items-center gap-3">
                                                         <button
                                                             onClick={handleLocalSttConfigSave}

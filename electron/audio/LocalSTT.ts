@@ -19,11 +19,12 @@ import { promisify } from 'util';
 import axios from 'axios';
 import FormData from 'form-data';
 import { RECOGNITION_LANGUAGES } from '../config/languages';
+import { TranscriptPostProcessor } from './TranscriptPostProcessor';
 
 export const DEFAULT_LOCAL_STT_ENDPOINT = 'http://127.0.0.1:8000/v1/audio/transcriptions';
 export const DEFAULT_LOCAL_STT_MODEL = 'whisper-large-v3-turbo';
 export const DEFAULT_LOCAL_STT_WHISPER_CPP_MODEL = 'ggml-large-v3-turbo-q5_0';
-export type LocalSttMode = 'server' | 'whisper_cpp';
+export type LocalSttMode = 'server' | 'whisper_cpp' | 'parakeet_stream';
 
 export interface LocalSttConfig {
     mode?: LocalSttMode;
@@ -31,6 +32,7 @@ export interface LocalSttConfig {
     model?: string;
     whisperCppModelPath?: string;
     whisperCppExecutablePath?: string;
+    glossary?: string;
 }
 
 const execFileAsync = promisify(execFile);
@@ -45,6 +47,7 @@ export class LocalSTT extends EventEmitter {
     private model: string;
     private whisperCppModelPath: string;
     private whisperCppExecutablePath: string;
+    private postProcessor: TranscriptPostProcessor;
     private languageKey = 'auto';
 
     private chunks: Buffer[] = [];
@@ -66,6 +69,7 @@ export class LocalSTT extends EventEmitter {
         this.model = normalized.model;
         this.whisperCppModelPath = normalized.whisperCppModelPath;
         this.whisperCppExecutablePath = normalized.whisperCppExecutablePath;
+        this.postProcessor = new TranscriptPostProcessor({ glossary: normalized.glossary });
         console.log(`[LocalSTT] Initialized mode=${this.mode}, endpoint=${this.endpoint}, model=${this.model || '(none)'}, whisperCppModel=${this.whisperCppModelPath || '(none)'}`);
     }
 
@@ -101,6 +105,7 @@ export class LocalSTT extends EventEmitter {
             model: (rawConfig.model || DEFAULT_LOCAL_STT_MODEL).trim(),
             whisperCppModelPath,
             whisperCppExecutablePath: (rawConfig.whisperCppExecutablePath || LocalSTT.detectWhisperCppExecutablePath() || '').trim(),
+            glossary: (rawConfig.glossary || '').trim(),
         };
     }
 
@@ -186,6 +191,7 @@ export class LocalSTT extends EventEmitter {
         this.model = normalized.model;
         this.whisperCppModelPath = normalized.whisperCppModelPath;
         this.whisperCppExecutablePath = normalized.whisperCppExecutablePath;
+        this.postProcessor = new TranscriptPostProcessor({ glossary: normalized.glossary });
         console.log(`[LocalSTT] Config updated mode=${this.mode}, endpoint=${this.endpoint}, model=${this.model || '(none)'}, whisperCppModel=${this.whisperCppModelPath || '(none)'}`);
     }
 
@@ -286,16 +292,17 @@ export class LocalSTT extends EventEmitter {
         this.isUploading = true;
         try {
             const transcript = await this.transcribeWav(wavBuffer);
-            const cleanedTranscript = transcript.trim();
-            if (cleanedTranscript && !this.shouldDropTranscript(cleanedTranscript)) {
+            const processed = this.postProcessor.process(transcript, { final: true });
+            const cleanedTranscript = processed.text;
+            if (cleanedTranscript && !processed.dropped) {
                 console.log(`[LocalSTT] Transcript: "${cleanedTranscript.substring(0, 60)}..."`);
                 this.emit('transcript', {
                     text: cleanedTranscript,
                     isFinal: true,
                     confidence: 1.0,
                 });
-            } else if (cleanedTranscript) {
-                console.log(`[LocalSTT] Dropping low-information transcript: "${cleanedTranscript.substring(0, 60)}..."`);
+            } else if (transcript.trim()) {
+                console.log(`[LocalSTT] Dropping transcript (${processed.reason || 'filtered'}): "${transcript.trim().substring(0, 60)}..."`);
             }
         } catch (err) {
             console.error('[LocalSTT] Upload error:', err);
@@ -312,6 +319,9 @@ export class LocalSTT extends EventEmitter {
     private async transcribeWav(wavBuffer: Buffer): Promise<string> {
         if (this.mode === 'whisper_cpp') {
             return this.transcribeWithWhisperCpp(wavBuffer);
+        }
+        if (this.mode === 'parakeet_stream') {
+            throw new Error('Parakeet realtime mode is handled by ParakeetStreamingSTT, not LocalSTT.');
         }
         return this.uploadMultipart(wavBuffer);
     }
@@ -404,25 +414,6 @@ export class LocalSTT extends EventEmitter {
             .filter(Boolean)
             .join(' ')
             .trim();
-    }
-
-    private shouldDropTranscript(text: string): boolean {
-        const normalized = text
-            .toLowerCase()
-            .replace(/[.!?,;:…]+/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-
-        if (!normalized) return true;
-
-        return new Set([
-            'you',
-            'thank you',
-            'thanks',
-            'uh',
-            'um',
-            'hmm',
-        ]).has(normalized);
     }
 
     private resampleTo16kHz(raw: Buffer): Buffer {

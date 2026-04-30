@@ -160,6 +160,7 @@ import { MicrophoneCapture } from "./audio/MicrophoneCapture"
 import { GoogleSTT } from "./audio/GoogleSTT"
 import { RestSTT } from "./audio/RestSTT"
 import { LocalSTT } from "./audio/LocalSTT"
+import { ParakeetStreamingSTT } from "./audio/ParakeetStreamingSTT"
 import { DeepgramStreamingSTT } from "./audio/DeepgramStreamingSTT"
 import { SonioxStreamingSTT } from "./audio/SonioxStreamingSTT"
 import { ElevenLabsStreamingSTT } from "./audio/ElevenLabsStreamingSTT"
@@ -171,9 +172,10 @@ import { DatabaseManager } from "./db/DatabaseManager"
 import { warmupIntentClassifier } from "./llm"
 
 /** Unified type for all STT providers with optional extended capabilities */
-type STTProvider = (GoogleSTT | RestSTT | LocalSTT | DeepgramStreamingSTT | SonioxStreamingSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT | NativelyProSTT) & {
+type STTProvider = (GoogleSTT | RestSTT | LocalSTT | ParakeetStreamingSTT | DeepgramStreamingSTT | SonioxStreamingSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT | NativelyProSTT) & {
   finalize?: () => void;
   setAudioChannelCount?: (count: number) => void;
+  setCredentials?: (keyPath: string) => void;
   notifySpeechEnded?: () => void;
 };
 
@@ -892,8 +894,15 @@ export class AppState {
       }
     } else if (sttProvider === 'local') {
       const config = CredentialsManager.getInstance().getLocalSttConfig();
-      console.log(`[Main] Using LocalSTT for ${speaker}: ${config.mode}`);
-      stt = new LocalSTT(config);
+      if (config.mode === 'parakeet_stream') {
+        console.log(`[Main] Using ParakeetStreamingSTT for ${speaker}`);
+        stt = new ParakeetStreamingSTT({
+          glossary: config.glossary,
+        });
+      } else {
+        console.log(`[Main] Using LocalSTT for ${speaker}: ${config.mode}`);
+        stt = new LocalSTT(config);
+      }
     } else if (sttProvider === 'groq' || sttProvider === 'azure' || sttProvider === 'ibmwatson') {
       let apiKey: string | undefined;
       let region: string | undefined;
@@ -1832,13 +1841,8 @@ export class AppState {
     // Set global environment variable so new instances pick it up
     process.env.GOOGLE_APPLICATION_CREDENTIALS = keyPath;
 
-    if (this.googleSTT) {
-      this.googleSTT.setCredentials(keyPath);
-    }
-
-    if (this.googleSTT_User) {
-      this.googleSTT_User.setCredentials(keyPath);
-    }
+    this.googleSTT?.setCredentials?.(keyPath);
+    this.googleSTT_User?.setCredentials?.(keyPath);
   }
 
   public setRecognitionLanguage(key: string): void {

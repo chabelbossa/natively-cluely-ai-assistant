@@ -76,7 +76,7 @@ interface ElectronAPI {
   setClaudeApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   getNativelyUsage: () => Promise<{ ok: boolean; plan?: string; quota?: { transcription: { used: number; limit: number; remaining: number }; ai: { used: number; limit: number; remaining: number }; search: { used: number; limit: number; remaining: number }; resets_at: string }; member_since?: string; error?: string; status?: number }>
-  getStoredCredentials: () => Promise<{ hasGeminiKey: boolean; hasGroqKey: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; hasNativelyKey: boolean; googleServiceAccountPath: string | null; sttProvider: string; groqSttModel?: string; localSttMode?: 'server' | 'whisper_cpp'; localSttEndpoint?: string; localSttModel?: string; localSttWhisperCppModelPath?: string; localSttWhisperCppExecutablePath?: string; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; hasSonioxKey: boolean }>
+  getStoredCredentials: () => Promise<{ hasGeminiKey: boolean; hasGroqKey: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; hasNativelyKey: boolean; googleServiceAccountPath: string | null; sttProvider: string; groqSttModel?: string; localSttMode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; localSttEndpoint?: string; localSttModel?: string; localSttGlossary?: string; localSttWhisperCppModelPath?: string; localSttWhisperCppExecutablePath?: string; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; hasSonioxKey: boolean }>
   // Free Trial
   startTrial:     () => Promise<{ ok: boolean; trial_token?: string; started_at?: string; expires_at?: string; expired?: boolean; already_used?: boolean; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: { duration_ms: number; ai_requests: number; stt_minutes: number; search_requests: number }; error?: string; status?: number }>
   getTrialStatus: () => Promise<{ ok: boolean; expired?: boolean; remaining_ms?: number; started_at?: string; expires_at?: string; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: object; error?: string }>
@@ -97,11 +97,11 @@ interface ElectronAPI {
   setAzureRegion: (region: string) => Promise<{ success: boolean; error?: string }>
   setIbmWatsonApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setGroqSttModel: (model: string) => Promise<{ success: boolean; error?: string }>
-  setLocalSttConfig: (config: { mode?: 'server' | 'whisper_cpp'; endpoint?: string; model?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => Promise<{ success: boolean; error?: string }>
+  setLocalSttConfig: (config: { mode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; endpoint?: string; model?: string; glossary?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => Promise<{ success: boolean; error?: string }>
   setSonioxApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setIbmWatsonRegion: (region: string) => Promise<{ success: boolean; error?: string }>
   testSttConnection: (provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox', apiKey: string, region?: string) => Promise<{ success: boolean; error?: string }>
-  testLocalSttConnection: (config: { mode?: 'server' | 'whisper_cpp'; endpoint?: string; model?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => Promise<{ success: boolean; error?: string }>
+  testLocalSttConnection: (config: { mode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; endpoint?: string; model?: string; glossary?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => Promise<{ success: boolean; error?: string }>
 
   // STT Config Events
   onSttConfigChanged: (callback: (data: { configured: boolean; provider: string }) => void) => () => void
@@ -603,11 +603,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setAzureRegion: (region: string) => ipcRenderer.invoke("set-azure-region", region),
   setIbmWatsonApiKey: (apiKey: string) => ipcRenderer.invoke("set-ibmwatson-api-key", apiKey),
   setGroqSttModel: (model: string) => ipcRenderer.invoke("set-groq-stt-model", model),
-  setLocalSttConfig: (config: { mode?: 'server' | 'whisper_cpp'; endpoint?: string; model?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => ipcRenderer.invoke("set-local-stt-config", config),
+  setLocalSttConfig: (config: { mode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; endpoint?: string; model?: string; glossary?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => ipcRenderer.invoke("set-local-stt-config", config),
   setSonioxApiKey: (apiKey: string) => ipcRenderer.invoke("set-soniox-api-key", apiKey),
   setIbmWatsonRegion: (region: string) => ipcRenderer.invoke("set-ibmwatson-region", region),
   testSttConnection: (provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox', apiKey: string, region?: string) => ipcRenderer.invoke("test-stt-connection", provider, apiKey, region),
-  testLocalSttConnection: (config: { mode?: 'server' | 'whisper_cpp'; endpoint?: string; model?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => ipcRenderer.invoke("test-local-stt-connection", config),
+  testLocalSttConnection: (config: { mode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; endpoint?: string; model?: string; glossary?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => ipcRenderer.invoke("test-local-stt-connection", config),
 
   // STT Config Events (Adapted from public PR #173 — verify premium interaction)
   onSttConfigChanged: (callback: (data: { configured: boolean; provider: string }) => void) => {

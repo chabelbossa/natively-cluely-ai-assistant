@@ -69,47 +69,54 @@ exports.default = async function (context) {
         // Non-fatal: continue to signing
     }
 
-    // ── Step 2: Ad-hoc sign the application ──
+    // ── Step 2: Ad-hoc sign nested code, then seal the app ──
     // Resolve the path to the entitlements file so V8 gets JIT memory permissions
     const entitlementsPath = path.join(context.packager.info.projectDir, 'assets', 'entitlements.mac.plist');
-    
-    // ── Step 2a: Sign the main app bundle with --deep first ──
-    // --deep recurses into nested Mach-O binaries (frameworks, helpers, .node files).
-    // It signs them with --sign - only (no custom entitlements on nested items).
-    // We MUST do this before signing the .node files with entitlements, because
-    // --deep would otherwise overwrite the entitlement-signed .node files.
-    console.log(`[Ad-Hoc Signing] Signing main app ${appPath} with entitlements...`);
+
+    const signWithEntitlements = (targetPath) => {
+        if (!fs.existsSync(targetPath)) return;
+        console.log(`[Ad-Hoc Signing] Signing ${targetPath} with entitlements...`);
+        execSync(`codesign --force --entitlements "${entitlementsPath}" --sign - "${targetPath}"`, { stdio: 'inherit' });
+    };
+
+    // First pass: sign Electron frameworks/helpers and all nested Mach-O files.
+    // The final app seal is intentionally performed again after entitlement-bearing
+    // binaries are re-signed below.
+    console.log(`[Ad-Hoc Signing] Signing nested code in ${appPath}...`);
 
     try {
-        // --force: replace existing signature
-        // --deep: sign nested code (frameworks, helpers, .dylib, .node)
-        // --entitlements: attach entitlements to the top-level app bundle
-        // --sign -: ad-hoc signature
-        execSync(`codesign --force --deep --entitlements "${entitlementsPath}" --sign - "${appPath}"`, { stdio: 'inherit' });
-        console.log('[Ad-Hoc Signing] Successfully signed the application with entitlements.');
+        execSync(`codesign --force --deep --sign - "${appPath}"`, { stdio: 'inherit' });
+        console.log('[Ad-Hoc Signing] Nested signing pass completed.');
     } catch (error) {
-        console.error('[Ad-Hoc Signing] Failed to sign the application:', error);
+        console.error('[Ad-Hoc Signing] Failed during nested signing pass:', error);
         throw error;
     }
 
-    // ── Step 2b: Re-sign .node binaries with entitlements AFTER --deep ──
-    // codesign --deep re-signs nested .node binaries without entitlements (it only
-    // applies entitlements to the top-level item). We re-sign them here AFTER --deep
-    // so the entitlements are not stripped. This ensures the screen-capture entitlement
-    // is present on the native module binary for CoreAudio Tap TCC checks.
+    // Re-sign entitlement-bearing native executables after the deep pass, then seal
+    // the top-level .app without --deep so macOS sees a coherent bundle seal.
+    const parakeetHelperPath = path.join(appPath, 'Contents', 'Resources', 'helpers', 'parakeet-stt-helper');
+    signWithEntitlements(parakeetHelperPath);
+
     const unpackedNativeDir = path.join(appPath, 'Contents', 'Resources', 'app.asar.unpacked', 'native-module');
     if (fs.existsSync(unpackedNativeDir)) {
         const files = fs.readdirSync(unpackedNativeDir);
         for (const file of files) {
             if (file.endsWith('.node')) {
-                const nodePath = path.join(unpackedNativeDir, file);
-                console.log(`[Ad-Hoc Signing] Re-signing ${file} with entitlements (post --deep)...`);
                 try {
-                    execSync(`codesign --force --entitlements "${entitlementsPath}" --sign - "${nodePath}"`, { stdio: 'inherit' });
+                    signWithEntitlements(path.join(unpackedNativeDir, file));
                 } catch (error) {
                     console.error(`[Ad-Hoc Signing] Failed to sign ${file}:`, error);
                 }
             }
         }
+    }
+
+    try {
+        console.log(`[Ad-Hoc Signing] Sealing top-level app ${appPath}...`);
+        execSync(`codesign --force --entitlements "${entitlementsPath}" --sign - "${appPath}"`, { stdio: 'inherit' });
+        console.log('[Ad-Hoc Signing] Successfully sealed the application.');
+    } catch (error) {
+        console.error('[Ad-Hoc Signing] Failed to seal the application:', error);
+        throw error;
     }
 };
