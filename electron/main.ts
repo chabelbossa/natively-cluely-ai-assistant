@@ -107,8 +107,12 @@ function getMacScreenCaptureStatus(): 'granted' | 'denied' | 'not-determined' | 
   
   // In development mode, macOS TCC often falsely reports 'denied' for the electron binary 
   // even if the user has granted permission to their Terminal app.
+  // Still log the REAL status for diagnostic purposes.
   if (!app.isPackaged) {
-    console.log('[Main] Ignoring screen capture permission check in development mode');
+    try {
+      const realStatus = systemPreferences.getMediaAccessStatus('screen');
+      console.log(`[Main] Screen capture permission (dev bypass): real=${realStatus}, returning 'granted'`);
+    } catch { /* ignore in dev */ }
     return 'granted';
   }
 
@@ -833,6 +837,7 @@ export class AppState {
     interviewer: 0,
     user: 0,
   };
+  private _lastSystemAudioLevel: { rms: number; peak: number } | null = null;
 
   private getPcm16Level(chunk: Buffer): { rms: number; peak: number } {
     if (!chunk || chunk.length < 2) return { rms: 0, peak: 0 };
@@ -863,6 +868,11 @@ export class AppState {
     const level = this.getPcm16Level(chunk);
     const label = channel === 'interviewer' ? 'system' : 'mic';
     console.log(`[Main][audio-level] ${label} rms=${level.rms.toFixed(1)} peak=${level.peak}`);
+
+    // Persist last system audio level for the health check
+    if (channel === 'interviewer') {
+      this._lastSystemAudioLevel = level;
+    }
   }
 
   private createSTTProvider(speaker: 'interviewer' | 'user'): STTProvider | null {
@@ -1603,9 +1613,15 @@ export class AppState {
         const message = 'Screen Recording permission denied. Natively cannot separate Speaker from Mic until this is enabled. To fix: System Settings → Privacy & Security → Screen Recording → enable Natively, then quit and relaunch Natively.';
         console.warn('[Main]', message);
         this.broadcast('system-audio-permission-denied', message);
-        if (process.env.NATIVELY_ALLOW_MIC_ONLY !== '1') {
+        const allowMicOnly =
+          process.env.NATIVELY_ALLOW_MIC_ONLY === '1' ||
+          metadata?.allowMicOnly === true ||
+          metadata?.audio?.allowMicOnly === true;
+
+        if (!allowMicOnly) {
           throw new Error(message);
         }
+        console.warn('[Main] Continuing in explicit microphone-only mode. Speaker separation and system audio transcription are disabled for this session.');
       }
       // 'not-determined': Handled at startup. SCK/CoreAudio will trigger the TCC
       // dialog itself when it first attempts to access screen content.
@@ -1669,6 +1685,24 @@ export class AppState {
           console.log(`[Main][debug] Audio pipeline: input=${requestedInput} output=${requestedOutput} backend=${backend} sysRate=${sysRate}Hz micRate=${micRate}Hz`);
         }
         console.log('[Main] Audio pipeline started successfully.');
+
+        // ── System Audio Health Check ──
+        // After 7 seconds, verify the system audio stream is actually
+        // delivering non-zero samples. If silent, the Rust DSP loop will
+        // have already logged a warning, but we also notify the UI so the
+        // user knows Speaker separation is broken before they waste a meeting.
+        setTimeout(() => {
+          if (!this.isMeetingActive) return; // Meeting already ended
+          const level = this._lastSystemAudioLevel;
+          if (level && level.rms === 0 && level.peak === 0) {
+            console.warn('[Main] ⚠️  System audio health check: SILENT after 7s. Speaker channel will not work.');
+            this.broadcast('system-audio-silent', {
+              message: 'System audio is silent — Speaker separation will not work. Check Screen Recording permission in System Settings.',
+              rms: level.rms,
+              peak: level.peak,
+            });
+          }
+        }, 7000);
       } catch (err) {
         console.error('[Main] Error initializing audio pipeline:', err);
         // Notify UI so user knows microphone/audio failed to start

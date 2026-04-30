@@ -243,7 +243,7 @@ export class IntelligenceEngine extends EventEmitter {
                     this.setMode('idle');
                     return "Please configure your API Keys in Settings to use this feature.";
                 }
-                const context = this.session.getFormattedContext(180);
+                const context = this.session.getFormattedActionContext(180);
                 const answer = await this.answerLLM.generate(question || '', context);
                 if (answer) {
                     this.session.addAssistantMessage(answer);
@@ -253,7 +253,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return answer || "Could you repeat that? I want to make sure I address your question properly.";
             }
 
-            const contextItems = this.session.getContext(180);
+            const contextItems = this.session.getActionContext(180);
 
             // Inject latest interim transcript if available
             const lastInterim = this.session.getLastInterimInterviewer();
@@ -287,7 +287,7 @@ export class IntelligenceEngine extends EventEmitter {
                 180
             );
 
-            const lastInterviewerTurn = this.session.getLastInterviewerTurn();
+            const lastInterviewerTurn = this.session.getLastInterviewerTurnForActions();
             const intentResult = await classifyIntent(
                 lastInterviewerTurn,
                 preparedTranscript,
@@ -370,7 +370,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.session.getFormattedContext(60);
+            const context = this.session.getFormattedActionContext(60);
             const refinementRequest = userRequest || intent;
 
             const generationId = ++this.currentGenerationId;
@@ -503,7 +503,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const rawContext = this.session.getFormattedContext(180);
+            const rawContext = this.session.getFormattedActionContext(180);
             // If no transcript yet, use a generic prompt — the LLM will ask a scoping question
             const context = rawContext || '[No transcript available yet. The candidate just joined the interview. Generate an opening clarifying question to understand the scope and constraints of the upcoming problem.]';
 
@@ -567,7 +567,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.session.getFormattedContext(120);
+            const context = this.session.getFormattedActionContext(120);
             if (!context) {
                 console.warn('[IntelligenceEngine] No context available for follow-up questions');
                 this.setMode('idle');
@@ -622,7 +622,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.session.getFormattedContext(120);
+            const context = this.session.getFormattedActionContext(120);
             const answer = await this.answerLLM.generate(question, context);
 
             if (answer) {
@@ -678,7 +678,7 @@ export class IntelligenceEngine extends EventEmitter {
 
             // Pull transcript as fallback context when no question is pinned
             const transcriptContext = questionContext === null
-                ? this.session.getFormattedContext(180)
+                ? this.session.getFormattedActionContext(180)
                 : null;
 
             console.log(`[IntelligenceEngine] Code hint — question source: ${questionContext ? (questionSource ?? 'passed') : 'none'}, transcript lines: ${transcriptContext ? transcriptContext.split('\n').length : 0}, images: ${imagePaths?.length ?? 0}`);
@@ -742,7 +742,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return "Please configure your API Keys in Settings to use this feature.";
             }
 
-            let context = this.session.getFormattedContext(180);
+            let context = this.session.getFormattedActionContext(180);
             // Prepend the problem statement so the LLM knows exactly what to brainstorm
             const resolvedProblem = problemStatement?.trim() ||
                 this.session.getDetectedCodingQuestion().question?.trim();

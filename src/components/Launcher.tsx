@@ -43,10 +43,14 @@ interface Meeting {
 }
 
 interface LauncherProps {
-    onStartMeeting: () => void;
+    onStartMeeting: (options?: { allowMicOnly?: boolean }) => void | Promise<void>;
     onOpenSettings: (tab?: string) => void;
     onOpenModes?: () => void;
     onPageChange?: (isMain: boolean) => void;
+    isStartingMeeting?: boolean;
+    meetingStartError?: string | null;
+    onClearMeetingStartError?: () => void;
+    onOpenScreenRecordingSettings?: () => void;
     ollamaPullStatus?: 'idle' | 'downloading' | 'complete' | 'failed';
     ollamaPullPercent?: number;
     ollamaPullMessage?: string;
@@ -77,7 +81,19 @@ const formatTime = (dateStr: string) => {
     return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
 };
 
-const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onOpenModes, onPageChange, ollamaPullStatus = 'idle', ollamaPullPercent = 0, ollamaPullMessage = '' }) => {
+const Launcher: React.FC<LauncherProps> = ({
+    onStartMeeting,
+    onOpenSettings,
+    onOpenModes,
+    onPageChange,
+    isStartingMeeting = false,
+    meetingStartError = null,
+    onClearMeetingStartError,
+    onOpenScreenRecordingSettings,
+    ollamaPullStatus = 'idle',
+    ollamaPullPercent = 0,
+    ollamaPullMessage = ''
+}) => {
     const [meetings, setMeetings] = useState<Meeting[]>([]);
     const [isDetectable, setIsDetectable] = useState(false);
     const [isMeetingActive, setIsMeetingActive] = useState(false);
@@ -85,6 +101,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
     const [upcomingEvents, setUpcomingEvents] = useState<any[]>([]);
     const [isPrepared, setIsPrepared] = useState(false);
     const [preparedEvent, setPreparedEvent] = useState<any>(null);
+    const [preparedStartError, setPreparedStartError] = useState<string | null>(null);
     const [isCalendarConnected, setIsCalendarConnected] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [showNotification, setShowNotification] = useState(false);
@@ -238,8 +255,9 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
         setIsPrepared(true);
     };
 
-    const handleStartPreparedMeeting = async () => {
+    const handleStartPreparedMeeting = async (allowMicOnly = false) => {
         if (!preparedEvent) return;
+        setPreparedStartError(null);
         analytics.trackCommandExecuted('start_prepared_meeting');
         try {
             const inputDeviceId = localStorage.getItem('preferredInputDeviceId');
@@ -250,15 +268,20 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
                 outputDeviceId = 'sck';
             }
 
-            await window.electronAPI.startMeeting({
+            const result = await window.electronAPI.startMeeting({
                 title: preparedEvent.title,
                 calendarEventId: preparedEvent.id,
                 source: 'calendar',
-                audio: { inputDeviceId, outputDeviceId }
+                audio: { inputDeviceId, outputDeviceId, allowMicOnly }
             });
-            setIsPrepared(false);
+            if (result?.success) {
+                setIsPrepared(false);
+            } else {
+                setPreparedStartError(result?.error || 'Failed to start recording.');
+            }
         } catch (e) {
             console.error("Failed to start prepared meeting", e);
+            setPreparedStartError(e instanceof Error ? e.message : 'Failed to start recording.');
         }
     };
 
@@ -292,6 +315,13 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
         // Approximation for others: parse date
         return new Date(b).getTime() - new Date(a).getTime();
     });
+
+    const activeStartError = preparedStartError || meetingStartError;
+    const isScreenRecordingError = !!activeStartError && activeStartError.toLowerCase().includes('screen recording');
+    const clearStartError = () => {
+        setPreparedStartError(null);
+        onClearMeetingStartError?.();
+    };
 
 
     const [forwardMeeting, setForwardMeeting] = useState<Meeting | null>(null);
@@ -685,6 +715,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
                                         {/* Unified CTA pill — same jelly shape, morphs between idle and active-meeting state */}
                                         <motion.button
                                             onClick={() => {
+                                                if (isStartingMeeting) return;
                                                 if (isMeetingActive) {
                                                     // inactive=true: overlay appears on top but doesn't activate
                                                     // the Natively app or steal OS focus — preserves stealth.
@@ -698,10 +729,11 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
                                                     analytics.trackCommandExecuted('start_natively_cta');
                                                 }
                                             }}
+                                            disabled={isStartingMeeting && !isMeetingActive}
                                             whileHover={{ scale: 1.01, filter: 'brightness(1.1)' }}
                                             whileTap={{ scale: 0.99 }}
                                             transition={{ duration: 0.18, ease: 'easeOut' }}
-                                            className="group relative overflow-hidden text-white px-6 py-3 rounded-full font-celeb font-medium tracking-normal flex items-center justify-center gap-3 backdrop-blur-xl shrink-0"
+                                            className={`group relative overflow-hidden text-white px-6 py-3 rounded-full font-celeb font-medium tracking-normal flex items-center justify-center gap-3 backdrop-blur-xl shrink-0 ${isStartingMeeting && !isMeetingActive ? 'cursor-wait opacity-80' : ''}`}
                                             style={{
                                                 boxShadow: isMeetingActive
                                                     ? 'inset 0 1px 1px rgba(255,255,255,0.7), inset 0 -1px 2px rgba(0,0,0,0.1), 0 2px 10px rgba(16,185,129,0.45), 0 0 0 1px rgba(255,255,255,0.15)'
@@ -754,13 +786,73 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
                                                             className="flex items-center gap-3"
                                                         >
                                                             <img src={icon} alt="Logo" className="w-[18px] h-[18px] object-contain brightness-0 invert drop-shadow-[0_1px_2px_rgba(0,0,0,0.1)] opacity-90" />
-                                                            <span className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.1)] text-[20px] leading-none">Start Natively</span>
+                                                            <span className="drop-shadow-[0_1px_1px_rgba(0,0,0,0.1)] text-[20px] leading-none">
+                                                                {isStartingMeeting ? 'Starting...' : 'Start Natively'}
+                                                            </span>
                                                         </motion.div>
                                                     )}
                                                 </AnimatePresence>
                                             </div>
                                         </motion.button>
                                     </div>
+
+                                    <AnimatePresence>
+                                        {activeStartError && (
+                                            <motion.div
+                                                initial={{ opacity: 0, y: -8, scale: 0.98 }}
+                                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                                exit={{ opacity: 0, y: -6, scale: 0.98 }}
+                                                transition={{ duration: 0.18, ease: 'easeOut' }}
+                                                className={`rounded-xl border px-4 py-3 flex items-start gap-3 ${isLight ? 'bg-amber-50 border-amber-200 text-amber-950' : 'bg-amber-500/10 border-amber-400/25 text-amber-100'}`}
+                                            >
+                                                <AlertCircle size={18} className="text-amber-400 shrink-0 mt-0.5" />
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="text-sm font-semibold">
+                                                        {isScreenRecordingError ? 'Screen Recording permission is blocking start' : 'Recording could not start'}
+                                                    </div>
+                                                    <p className={`mt-1 text-xs leading-relaxed ${isLight ? 'text-amber-900/80' : 'text-amber-100/75'}`}>
+                                                        {activeStartError}
+                                                    </p>
+                                                    {isScreenRecordingError && (
+                                                        <p className={`mt-2 text-xs leading-relaxed ${isLight ? 'text-amber-900/75' : 'text-amber-100/70'}`}>
+                                                            For calls, enable Screen Recording and relaunch Natively to capture the other speaker. Microphone-only mode is available for quick local tests, but it cannot separate speakers.
+                                                        </p>
+                                                    )}
+                                                </div>
+                                                <div className="flex items-center gap-2 shrink-0">
+                                                    {isScreenRecordingError && (
+                                                        <>
+                                                            <button
+                                                                onClick={onOpenScreenRecordingSettings}
+                                                                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${isLight ? 'bg-amber-900 text-white hover:bg-amber-800' : 'bg-amber-300 text-amber-950 hover:bg-amber-200'}`}
+                                                            >
+                                                                Open Settings
+                                                            </button>
+                                                            <button
+                                                                onClick={() => {
+                                                                    clearStartError();
+                                                                    if (isPrepared && preparedEvent) {
+                                                                        handleStartPreparedMeeting(true);
+                                                                    } else {
+                                                                        onStartMeeting({ allowMicOnly: true });
+                                                                    }
+                                                                }}
+                                                                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${isLight ? 'bg-black/5 text-amber-950 hover:bg-black/10' : 'bg-white/10 text-amber-100 hover:bg-white/15'}`}
+                                                            >
+                                                                Mic only
+                                                            </button>
+                                                        </>
+                                                    )}
+                                                    <button
+                                                        onClick={clearStartError}
+                                                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${isLight ? 'text-amber-900 hover:bg-black/5' : 'text-amber-100/75 hover:bg-white/10'}`}
+                                                    >
+                                                        Dismiss
+                                                    </button>
+                                                </div>
+                                            </motion.div>
+                                        )}
+                                    </AnimatePresence>
 
                                     {/* 2. Hero Section Cards */}
                                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3 h-[198px]">
@@ -785,7 +877,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
 
                                                     <div className="flex items-center gap-3 justify-center">
                                                         <button
-                                                            onClick={handleStartPreparedMeeting}
+                                                            onClick={() => handleStartPreparedMeeting()}
                                                             className="bg-emerald-500 hover:bg-emerald-400 text-white px-8 py-3 rounded-xl text-sm font-semibold transition-all shadow-lg hover:shadow-emerald-500/25 active:scale-95 flex items-center gap-2"
                                                         >
                                                             Start Meeting
@@ -842,7 +934,7 @@ const Launcher: React.FC<LauncherProps> = ({ onStartMeeting, onOpenSettings, onO
                                                             Prepare
                                                         </button>
                                                         <button
-                                                            onClick={onStartMeeting}
+                                                            onClick={() => onStartMeeting()}
                                                             className={`px-4 py-2 rounded-lg text-xs font-medium text-text-secondary hover:text-text-primary transition-all ${isLight ? 'hover:bg-bg-item-surface' : 'hover:bg-white/5'}`}
                                                         >
                                                             Start now

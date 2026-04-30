@@ -392,12 +392,59 @@ export class SessionTracker {
     }
 
     /**
+     * Explicit action buttons should use what the user can see in the transcript
+     * panel. Passive context intentionally ignores mic-only audio, but buttons
+     * like What to answer, Clarify, Follow-up and Answer are deliberate user
+     * requests, so they can safely fall back to the persisted visible transcript.
+     */
+    getActionContext(lastSeconds: number = 120): ContextItem[] {
+        const trustedContext = this.getContext(lastSeconds);
+        const recordedContext = this.getRecordedTranscriptContext(lastSeconds);
+
+        if (recordedContext.length === 0) {
+            return trustedContext;
+        }
+
+        const hasTrustedInterviewer = trustedContext.some(item => item.role === 'interviewer');
+        const hasRecordedInterviewer = recordedContext.some(item => item.role === 'interviewer');
+        const shouldTreatMicAsHeardConversation = !hasTrustedInterviewer && !hasRecordedInterviewer;
+
+        const actionRecordedContext = shouldTreatMicAsHeardConversation
+            ? recordedContext.map(item => item.role === 'user'
+                ? { ...item, role: 'interviewer' as const }
+                : item)
+            : recordedContext;
+
+        return this.mergeContextItems(trustedContext, actionRecordedContext);
+    }
+
+    getFormattedActionContext(lastSeconds: number = 120): string {
+        const items = this.getActionContext(lastSeconds);
+        return items.map(item => {
+            const label = item.role === 'interviewer' ? 'INTERVIEWER' :
+                item.role === 'user' ? 'ME' :
+                    'ASSISTANT (PREVIOUS SUGGESTION)';
+            return `[${label}]: ${item.text}`;
+        }).join('\n');
+    }
+
+    /**
      * Get the last interviewer turn
      */
     getLastInterviewerTurn(): string | null {
         for (let i = this.contextItems.length - 1; i >= 0; i--) {
             if (this.contextItems[i].role === 'interviewer') {
                 return this.contextItems[i].text;
+            }
+        }
+        return null;
+    }
+
+    getLastInterviewerTurnForActions(lastSeconds: number = 180): string | null {
+        const actionContext = this.getActionContext(lastSeconds);
+        for (let i = actionContext.length - 1; i >= 0; i--) {
+            if (actionContext[i].role === 'interviewer') {
+                return actionContext[i].text;
             }
         }
         return null;
@@ -546,6 +593,37 @@ export class SessionTracker {
         }
 
         this.fullTranscript.push(next);
+    }
+
+    private getRecordedTranscriptContext(lastSeconds: number): ContextItem[] {
+        const cutoff = Date.now() - (lastSeconds * 1000);
+        return this.fullTranscript
+            .filter(segment => segment.final && segment.timestamp >= cutoff)
+            .map(segment => ({
+                role: this.mapSpeakerToRole(segment.speaker),
+                text: segment.text.trim(),
+                timestamp: segment.timestamp
+            }))
+            .filter(item => item.text.length > 0);
+    }
+
+    private mergeContextItems(primary: ContextItem[], secondary: ContextItem[]): ContextItem[] {
+        const merged: ContextItem[] = [];
+
+        for (const item of [...primary, ...secondary].sort((a, b) => a.timestamp - b.timestamp)) {
+            const normalizedText = this.normalizeTranscriptForComparison(item.text);
+            const duplicate = merged.some(existing =>
+                existing.role === item.role &&
+                Math.abs(existing.timestamp - item.timestamp) < 1000 &&
+                this.normalizeTranscriptForComparison(existing.text) === normalizedText
+            );
+
+            if (!duplicate) {
+                merged.push(item);
+            }
+        }
+
+        return merged;
     }
 
     private normalizeTranscriptForComparison(text: string): string {

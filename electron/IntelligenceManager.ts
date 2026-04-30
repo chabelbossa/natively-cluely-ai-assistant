@@ -117,6 +117,10 @@ export class IntelligenceManager extends EventEmitter {
         return this.session.getFormattedContext(lastSeconds);
     }
 
+    getFormattedActionContext(lastSeconds: number = 120): string {
+        return this.session.getFormattedActionContext(lastSeconds);
+    }
+
     getLastInterviewerTurn(): string | null {
         return this.session.getLastInterviewerTurn();
     }

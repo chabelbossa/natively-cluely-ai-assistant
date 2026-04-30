@@ -437,6 +437,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("gemini-chat-stream", async (event, message: string, imagePaths?: string[], context?: string, options?: { skipSystemPrompt?: boolean, ignoreKnowledgeMode?: boolean }) => {
     try {
       console.log("[IPC] gemini-chat-stream started using LLMHelper.streamChat");
+      await appState.flushPendingSttTranscripts?.('chat_stream');
       const llmHelper = appState.processingHelper.getLLMHelper();
 
       // Claim a new stream ID — any prior stream will detect this and stop emitting.
@@ -458,7 +459,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         // User requested 100 seconds of context for the answer button
         // Logic: If no explicit context provided (like from manual override), auto-inject from IntelligenceManager
         try {
-          const autoContext = intelligenceManager.getFormattedContext(100);
+          const autoContext = intelligenceManager.getFormattedActionContext(100);
           if (autoContext && autoContext.trim().length > 0) {
             context = autoContext;
             console.log(`[IPC] Auto - injected 100s context for gemini - chat - stream(${context.length} chars)`);

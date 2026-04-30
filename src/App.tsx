@@ -125,6 +125,8 @@ const App: React.FC = () => {
   
   // API check
   const [hasNativelyApi, setHasNativelyApi] = useState<boolean>(false);
+  const [meetingStartError, setMeetingStartError] = useState<string | null>(null);
+  const [isStartingMeeting, setIsStartingMeeting] = useState(false);
 
   // ── Onboarding / promo toasters ───────────────────────────
   const [showPermissionsToaster, setShowPermissionsToaster] = useState(false);
@@ -347,7 +349,9 @@ const App: React.FC = () => {
     }
   };
 
-  const handleStartMeeting = async () => {
+  const handleStartMeeting = async (options?: { allowMicOnly?: boolean }) => {
+    setMeetingStartError(null);
+    setIsStartingMeeting(true);
     try {
       localStorage.setItem('natively_last_meeting_start', Date.now().toString());
       const inputDeviceId = localStorage.getItem('preferredInputDeviceId');
@@ -365,7 +369,7 @@ const App: React.FC = () => {
       }
 
       const result = await window.electronAPI.startMeeting({
-        audio: { inputDeviceId, outputDeviceId }
+        audio: { inputDeviceId, outputDeviceId, allowMicOnly: options?.allowMicOnly === true }
       });
       if (result.success) {
         analytics.trackMeetingStarted();
@@ -377,9 +381,13 @@ const App: React.FC = () => {
         await window.electronAPI.setWindowMode('overlay');
       } else {
         console.error("Failed to start meeting:", result.error);
+        setMeetingStartError(result.error || 'Failed to start recording.');
       }
     } catch (err) {
       console.error("Failed to start meeting:", err);
+      setMeetingStartError(err instanceof Error ? err.message : 'Failed to start recording.');
+    } finally {
+      setIsStartingMeeting(false);
     }
   };
 
@@ -498,6 +506,12 @@ const App: React.FC = () => {
                 <div id="launcher-container" className="h-full w-full relative">
                   <Launcher
                     onStartMeeting={handleStartMeeting}
+                    isStartingMeeting={isStartingMeeting}
+                    meetingStartError={meetingStartError}
+                    onClearMeetingStartError={() => setMeetingStartError(null)}
+                    onOpenScreenRecordingSettings={() => {
+                      window.electronAPI?.openExternal?.('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+                    }}
                     onOpenSettings={(tab = 'general') => {
                       setSettingsInitialTab(tab);
                       setIsSettingsOpen(true);

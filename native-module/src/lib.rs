@@ -145,6 +145,15 @@ impl SystemAudioCapture {
             let mut frame_buffer: Vec<i16> = Vec::with_capacity(chunk_size * 4);
             let mut raw_batch: Vec<f32> = Vec::with_capacity(4096);
 
+            // ── Silence diagnostic ──
+            // Track consecutive polls that produce zero non-zero samples.
+            // After ~5 seconds of silence, log a prominent warning — this almost
+            // always means the macOS Screen Recording permission is denied or the
+            // Helper binary is missing the com.apple.security.screen-capture entitlement.
+            let mut total_samples_received: u64 = 0;
+            let mut total_nonzero_samples: u64 = 0;
+            let mut silence_diag_logged = false;
+            let diag_threshold_samples = (native_rate as u64) * 5; // ~5 seconds
             loop {
                 if stop_signal.load(Ordering::Relaxed) {
                     break;
@@ -158,10 +167,40 @@ impl SystemAudioCapture {
                 // Convert f32 -> i16 at native sample rate
                 if !raw_batch.is_empty() {
                     for &f in &raw_batch {
+                        total_samples_received += 1;
+                        if f.abs() > 1e-7 {
+                            total_nonzero_samples += 1;
+                        }
                         let scaled = (f * 32767.0).clamp(-32768.0, 32767.0);
                         frame_buffer.push(scaled as i16);
                     }
                     raw_batch.clear();
+
+                    // Silence diagnostic: after ~5s of samples, check if ALL were zero
+                    if !silence_diag_logged && total_samples_received >= diag_threshold_samples {
+                        silence_diag_logged = true;
+                        if total_nonzero_samples == 0 {
+                            eprintln!("╔══════════════════════════════════════════════════════════════╗");
+                            eprintln!("║ [SystemAudioCapture] ⚠️  SILENT AUDIO DETECTED              ║");
+                            eprintln!("║                                                              ║");
+                            eprintln!("║ {} samples received, ALL zero.                   ║", total_samples_received);
+                            eprintln!("║                                                              ║");
+                            eprintln!("║ Most likely cause: macOS Screen Recording permission         ║");
+                            eprintln!("║ is denied, or the Electron Helper binary is missing          ║");
+                            eprintln!("║ com.apple.security.screen-capture entitlement.               ║");
+                            eprintln!("║                                                              ║");
+                            eprintln!("║ Fix: System Settings → Privacy → Screen Recording            ║");
+                            eprintln!("║      → enable Natively → quit and relaunch.                  ║");
+                            eprintln!("╚══════════════════════════════════════════════════════════════╝");
+                        } else {
+                            println!(
+                                "[SystemAudioCapture] Audio health OK: {}/{} samples non-zero ({:.1}%)",
+                                total_nonzero_samples,
+                                total_samples_received,
+                                (total_nonzero_samples as f64 / total_samples_received as f64) * 100.0
+                            );
+                        }
+                    }
                 }
 
                 // Process in 20ms chunks through the two-stage gate

@@ -69,33 +69,64 @@ exports.default = async function (context) {
         // Non-fatal: continue to signing
     }
 
-    // ── Step 2: Ad-hoc sign nested code, then seal the app ──
-    // Resolve the path to the entitlements file so V8 gets JIT memory permissions
+    // ── Step 2: Ad-hoc sign all code inside-out with entitlements ──
+    //
+    // macOS codesign requires INSIDE-OUT signing: innermost binaries first,
+    // then enclosing .app bundles, then the top-level .app. Each outer seal
+    // records hashes of inner signatures — if you sign outer first, then
+    // re-sign inner, the outer seal is invalidated.
+    //
+    // CRITICAL: ALL executables that call ScreenCaptureKit or CoreAudio Tap
+    // MUST have the com.apple.security.screen-capture entitlement. The Rust
+    // native module (index.*.node) runs inside "Natively Helper.app", so both
+    // the .node binary AND the Helper .app must carry the entitlement.
+    // Without it, macOS TCC silently blocks audio capture (rms=0.0).
+
     const entitlementsPath = path.join(context.packager.info.projectDir, 'assets', 'entitlements.mac.plist');
 
-    const signWithEntitlements = (targetPath) => {
-        if (!fs.existsSync(targetPath)) return;
-        console.log(`[Ad-Hoc Signing] Signing ${targetPath} with entitlements...`);
+    if (!fs.existsSync(entitlementsPath)) {
+        throw new Error(`[Ad-Hoc Signing] Entitlements file not found: ${entitlementsPath}`);
+    }
+
+    const signWithEntitlements = (targetPath, label) => {
+        if (!fs.existsSync(targetPath)) {
+            console.log(`[Ad-Hoc Signing] Skipping (not found): ${label || targetPath}`);
+            return;
+        }
+        console.log(`[Ad-Hoc Signing] Signing with entitlements: ${label || path.basename(targetPath)}`);
         execSync(`codesign --force --entitlements "${entitlementsPath}" --sign - "${targetPath}"`, { stdio: 'inherit' });
     };
 
-    // First pass: sign Electron frameworks/helpers and all nested Mach-O files.
-    // The final app seal is intentionally performed again after entitlement-bearing
-    // binaries are re-signed below.
-    console.log(`[Ad-Hoc Signing] Signing nested code in ${appPath}...`);
+    const verifyEntitlement = (targetPath, label) => {
+        if (!fs.existsSync(targetPath)) return;
+        try {
+            const output = execSync(`codesign -d --entitlements - "${targetPath}" 2>&1`, { encoding: 'utf8' });
+            if (output.includes('screen-capture')) {
+                console.log(`[Ad-Hoc Signing] ✅ ${label}: screen-capture entitlement present`);
+            } else {
+                console.error(`[Ad-Hoc Signing] ⚠️  ${label}: screen-capture entitlement MISSING!`);
+            }
+        } catch (err) {
+            console.warn(`[Ad-Hoc Signing] Could not verify ${label}:`, err.message);
+        }
+    };
+
+    // ── Step 2a: Deep sign (baseline — no entitlements) ──
+    // This signs all nested Mach-O files, dylibs, and frameworks with a plain
+    // ad-hoc signature. We then OVERRIDE specific binaries with entitlements.
+    console.log(`[Ad-Hoc Signing] Deep-signing all nested code in ${appPath}...`);
 
     try {
         execSync(`codesign --force --deep --sign - "${appPath}"`, { stdio: 'inherit' });
-        console.log('[Ad-Hoc Signing] Nested signing pass completed.');
+        console.log('[Ad-Hoc Signing] Baseline deep sign completed.');
     } catch (error) {
-        console.error('[Ad-Hoc Signing] Failed during nested signing pass:', error);
+        console.error('[Ad-Hoc Signing] Failed during deep signing pass:', error);
         throw error;
     }
 
-    // Re-sign entitlement-bearing native executables after the deep pass, then seal
-    // the top-level .app without --deep so macOS sees a coherent bundle seal.
+    // ── Step 2b: Re-sign native binaries with entitlements (innermost first) ──
     const parakeetHelperPath = path.join(appPath, 'Contents', 'Resources', 'helpers', 'parakeet-stt-helper');
-    signWithEntitlements(parakeetHelperPath);
+    signWithEntitlements(parakeetHelperPath, 'parakeet-stt-helper');
 
     const unpackedNativeDir = path.join(appPath, 'Contents', 'Resources', 'app.asar.unpacked', 'native-module');
     if (fs.existsSync(unpackedNativeDir)) {
@@ -103,7 +134,7 @@ exports.default = async function (context) {
         for (const file of files) {
             if (file.endsWith('.node')) {
                 try {
-                    signWithEntitlements(path.join(unpackedNativeDir, file));
+                    signWithEntitlements(path.join(unpackedNativeDir, file), file);
                 } catch (error) {
                     console.error(`[Ad-Hoc Signing] Failed to sign ${file}:`, error);
                 }
@@ -111,6 +142,19 @@ exports.default = async function (context) {
         }
     }
 
+    // ── Step 2c: Re-sign ALL Electron Helper apps with entitlements ──
+    // The Rust native module (.node) is loaded by "Natively Helper.app" (Electron's
+    // main process). Without screen-capture entitlement on the Helper, macOS TCC
+    // silently blocks ScreenCaptureKit and CoreAudio Tap — producing rms=0.0.
+    const frameworksDir = path.join(appPath, 'Contents', 'Frameworks');
+    for (const suffix of HELPER_SUFFIXES) {
+        const helperName = `${appName} Helper${suffix}`;
+        const helperPath = path.join(frameworksDir, `${helperName}.app`);
+        signWithEntitlements(helperPath, helperName);
+    }
+
+    // ── Step 2d: Seal the top-level .app bundle ──
+    // This must be LAST — it records hashes of all inner signatures.
     try {
         console.log(`[Ad-Hoc Signing] Sealing top-level app ${appPath}...`);
         execSync(`codesign --force --entitlements "${entitlementsPath}" --sign - "${appPath}"`, { stdio: 'inherit' });
@@ -118,5 +162,14 @@ exports.default = async function (context) {
     } catch (error) {
         console.error('[Ad-Hoc Signing] Failed to seal the application:', error);
         throw error;
+    }
+
+    // ── Step 3: Verify entitlements on critical binaries ──
+    console.log('[Ad-Hoc Signing] Verifying entitlements...');
+    verifyEntitlement(path.join(appPath, 'Contents', 'MacOS', appName), 'Main executable');
+    verifyEntitlement(path.join(frameworksDir, `${appName} Helper.app`), 'Main Helper');
+    const nodeFiles = fs.existsSync(unpackedNativeDir) ? fs.readdirSync(unpackedNativeDir).filter(f => f.endsWith('.node')) : [];
+    for (const file of nodeFiles) {
+        verifyEntitlement(path.join(unpackedNativeDir, file), file);
     }
 };
