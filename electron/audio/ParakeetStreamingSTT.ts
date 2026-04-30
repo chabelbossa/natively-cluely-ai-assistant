@@ -5,6 +5,7 @@ import { RECOGNITION_LANGUAGES } from '../config/languages';
 
 export interface ParakeetStreamingConfig {
     glossary?: string;
+    speechEndDebounceMs?: number;
 }
 
 export class ParakeetStreamingSTT extends EventEmitter {
@@ -18,12 +19,19 @@ export class ParakeetStreamingSTT extends EventEmitter {
     private languageKey = 'auto';
     private pendingChunks: Buffer[] = [];
     private readonly maxPendingChunks = 200;
+    private readonly speechEndDebounceMs: number;
+    private finalizeTimer: NodeJS.Timeout | null = null;
+    private finalizeGeneration = 0;
+    private samplesSinceLastFinal = 0;
+    private lastFinalText = '';
+    private lastFinalAt = 0;
     private readonly sessionListener: (event: ParakeetBridgeEvent) => void;
 
     constructor(config: ParakeetStreamingConfig = {}) {
         super();
         this.sessionId = `parakeet_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         this.postProcessor = new TranscriptPostProcessor({ glossary: config.glossary });
+        this.speechEndDebounceMs = this.normalizeDebounceMs(config.speechEndDebounceMs);
         this.sessionListener = (event: ParakeetBridgeEvent) => this.handleBridgeEvent(event);
         this.bridge.on(`session:${this.sessionId}`, this.sessionListener);
     }
@@ -49,6 +57,10 @@ export class ParakeetStreamingSTT extends EventEmitter {
         this.active = true;
         this.ready = false;
         this.pendingChunks = [];
+        this.clearFinalizeTimer();
+        this.samplesSinceLastFinal = 0;
+        this.lastFinalText = '';
+        this.lastFinalAt = 0;
 
         void this.bridge.startSession(this.sessionId, { language: this.getIsoLanguage() || 'auto' })
             .then(() => {
@@ -69,16 +81,20 @@ export class ParakeetStreamingSTT extends EventEmitter {
         this.active = false;
         this.ready = false;
         this.pendingChunks = [];
+        this.clearFinalizeTimer();
         this.bridge.stopSession(this.sessionId);
     }
 
     finalize(): void {
-        this.notifySpeechEnded();
+        this.finalizeNow();
     }
 
     write(audioData: Buffer): void {
         if (!this.active || !audioData?.length) return;
+        this.clearFinalizeTimer();
         const pcm16k = this.resampleTo16kHz(audioData);
+        if (pcm16k.length === 0) return;
+        this.samplesSinceLastFinal += Math.floor(pcm16k.length / 2);
 
         if (!this.ready) {
             this.pendingChunks.push(pcm16k);
@@ -93,11 +109,16 @@ export class ParakeetStreamingSTT extends EventEmitter {
 
     notifySpeechEnded(): void {
         if (!this.active || !this.ready) return;
-        this.flushPendingChunks();
-        this.bridge.speechEnd(this.sessionId);
+        const generation = ++this.finalizeGeneration;
+        this.clearFinalizeTimer();
+        this.finalizeTimer = setTimeout(() => {
+            if (!this.active || !this.ready || generation !== this.finalizeGeneration) return;
+            this.finalizeNow();
+        }, this.speechEndDebounceMs);
     }
 
     removeAllListeners(eventName?: string | symbol): this {
+        this.clearFinalizeTimer();
         this.bridge.off(`session:${this.sessionId}`, this.sessionListener);
         return super.removeAllListeners(eventName);
     }
@@ -106,14 +127,22 @@ export class ParakeetStreamingSTT extends EventEmitter {
         if (event.type === 'partial' || event.type === 'final') {
             const rawText = String(event.text || '');
             const final = event.type === 'final';
-            const result = this.postProcessor.process(rawText, { final });
+            const confidence = typeof event.confidence === 'number' ? event.confidence : 0.9;
+            const result = this.postProcessor.process(rawText, { final, confidence });
             if (result.dropped) return;
+            if (final && this.shouldDropRepeatedFinal(result.text)) return;
 
             this.emit('transcript', {
                 text: result.text,
                 isFinal: final,
-                confidence: typeof event.confidence === 'number' ? event.confidence : 0.9,
+                confidence,
             });
+
+            if (final) {
+                this.samplesSinceLastFinal = 0;
+                this.lastFinalText = this.normalizeForComparison(result.text);
+                this.lastFinalAt = Date.now();
+            }
             return;
         }
 
@@ -129,6 +158,37 @@ export class ParakeetStreamingSTT extends EventEmitter {
         for (const chunk of chunks) {
             this.bridge.sendAudio(this.sessionId, chunk);
         }
+    }
+
+    private finalizeNow(): void {
+        if (!this.active || !this.ready) return;
+        this.clearFinalizeTimer();
+        this.finalizeGeneration++;
+        this.flushPendingChunks();
+        if (this.samplesSinceLastFinal <= 0) return;
+        this.bridge.speechEnd(this.sessionId);
+    }
+
+    private clearFinalizeTimer(): void {
+        if (!this.finalizeTimer) return;
+        clearTimeout(this.finalizeTimer);
+        this.finalizeTimer = null;
+    }
+
+    private shouldDropRepeatedFinal(text: string): boolean {
+        const normalized = this.normalizeForComparison(text);
+        if (!normalized) return true;
+        const now = Date.now();
+        if (normalized === this.lastFinalText && now - this.lastFinalAt < 10_000) return true;
+        return false;
+    }
+
+    private normalizeForComparison(text: string): string {
+        return text
+            .toLowerCase()
+            .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
     }
 
     private getIsoLanguage(): string | undefined {
@@ -172,5 +232,11 @@ export class ParakeetStreamingSTT extends EventEmitter {
         }
         return Buffer.from(outS16.buffer);
     }
-}
 
+    private normalizeDebounceMs(value?: number): number {
+        const envValue = Number(process.env.NATIVELY_PARAKEET_SPEECH_END_DEBOUNCE_MS || '');
+        const requested = Number.isFinite(value) ? value : envValue;
+        if (!Number.isFinite(requested) || requested <= 0) return 2200;
+        return Math.max(800, Math.min(5000, Math.round(requested)));
+    }
+}
