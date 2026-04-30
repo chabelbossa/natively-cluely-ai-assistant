@@ -31,6 +31,7 @@ const providerLabel = (provider?: string): string => {
         ibmwatson: 'IBM Watson',
         soniox: 'Soniox',
         natively: 'Natively Pro',
+        local: 'Local STT',
     };
     return labels[provider.toLowerCase()] || provider;
 };

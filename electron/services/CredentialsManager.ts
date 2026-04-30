@@ -22,6 +22,8 @@ export interface CurlProvider {
     responsePath: string; // e.g. "choices[0].message.content"
 }
 
+export type StoredSttProvider = 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local';
+
 export interface StoredCredentials {
     geminiApiKey?: string;
     groqApiKey?: string;
@@ -33,9 +35,11 @@ export interface StoredCredentials {
     defaultModel?: string;
     nativelyApiKey?: string;
     // STT Provider settings
-    sttProvider?: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively';
+    sttProvider?: StoredSttProvider;
     groqSttApiKey?: string;
     groqSttModel?: string;
+    localSttEndpoint?: string;
+    localSttModel?: string;
     openAiSttApiKey?: string;
     deepgramApiKey?: string;
     elevenLabsApiKey?: string;
@@ -112,7 +116,7 @@ export class CredentialsManager {
         return this.credentials.customProviders || [];
     }
 
-    public getSttProvider(): 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' {
+    public getSttProvider(): StoredSttProvider {
         const provider = this.credentials.sttProvider || 'none';
         // Self-heal: if provider is 'none' but a Natively key exists, the user is in a
         // broken state (key cleared then re-entered via a path that skipped auto-promote,
@@ -136,6 +140,14 @@ export class CredentialsManager {
 
     public getGroqSttModel(): string {
         return this.credentials.groqSttModel || 'whisper-large-v3-turbo';
+    }
+
+    public getLocalSttEndpoint(): string {
+        return this.credentials.localSttEndpoint || 'http://127.0.0.1:8000/v1/audio/transcriptions';
+    }
+
+    public getLocalSttModel(): string {
+        return this.credentials.localSttModel || 'whisper-large-v3-turbo';
     }
 
     public getOpenAiSttApiKey(): string | undefined {
@@ -223,7 +235,7 @@ export class CredentialsManager {
         console.log('[CredentialsManager] Google Service Account path updated');
     }
 
-    public setSttProvider(provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively'): void {
+    public setSttProvider(provider: StoredSttProvider): void {
         this.credentials.sttProvider = provider;
         this.saveCredentials();
         console.log(`[CredentialsManager] STT Provider set to: ${provider}`);
@@ -251,6 +263,13 @@ export class CredentialsManager {
         this.credentials.groqSttModel = model;
         this.saveCredentials();
         console.log(`[CredentialsManager] Groq STT Model set to: ${model}`);
+    }
+
+    public setLocalSttConfig(endpoint: string, model: string): void {
+        this.credentials.localSttEndpoint = endpoint.trim() || 'http://127.0.0.1:8000/v1/audio/transcriptions';
+        this.credentials.localSttModel = model.trim() || 'whisper-large-v3-turbo';
+        this.saveCredentials();
+        console.log(`[CredentialsManager] Local STT config set to: ${this.credentials.localSttEndpoint} (${this.credentials.localSttModel})`);
     }
 
     public setElevenLabsApiKey(key: string): void {

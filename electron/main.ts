@@ -159,6 +159,7 @@ import { SystemAudioCapture } from "./audio/SystemAudioCapture"
 import { MicrophoneCapture } from "./audio/MicrophoneCapture"
 import { GoogleSTT } from "./audio/GoogleSTT"
 import { RestSTT } from "./audio/RestSTT"
+import { LocalSTT } from "./audio/LocalSTT"
 import { DeepgramStreamingSTT } from "./audio/DeepgramStreamingSTT"
 import { SonioxStreamingSTT } from "./audio/SonioxStreamingSTT"
 import { ElevenLabsStreamingSTT } from "./audio/ElevenLabsStreamingSTT"
@@ -170,7 +171,7 @@ import { DatabaseManager } from "./db/DatabaseManager"
 import { warmupIntentClassifier } from "./llm"
 
 /** Unified type for all STT providers with optional extended capabilities */
-type STTProvider = (GoogleSTT | RestSTT | DeepgramStreamingSTT | SonioxStreamingSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT | NativelyProSTT) & {
+type STTProvider = (GoogleSTT | RestSTT | LocalSTT | DeepgramStreamingSTT | SonioxStreamingSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT | NativelyProSTT) & {
   finalize?: () => void;
   setAudioChannelCount?: (count: number) => void;
   notifySpeechEnded?: () => void;
@@ -889,6 +890,11 @@ export class AppState {
         console.warn(`[Main] No API key for OpenAI STT, falling back to GoogleSTT`);
         stt = new GoogleSTT(speaker);
       }
+    } else if (sttProvider === 'local') {
+      const endpoint = CredentialsManager.getInstance().getLocalSttEndpoint();
+      const model = CredentialsManager.getInstance().getLocalSttModel();
+      console.log(`[Main] Using LocalSTT for ${speaker}: ${endpoint} (${model})`);
+      stt = new LocalSTT(endpoint, model);
     } else if (sttProvider === 'groq' || sttProvider === 'azure' || sttProvider === 'ibmwatson') {
       let apiKey: string | undefined;
       let region: string | undefined;
@@ -1801,6 +1807,20 @@ export class AppState {
       if (win) {
         win.webContents.send('intelligence-error', { error: error.message, mode })
       }
+    })
+
+    this.intelligenceManager.on('copilot_suggestion', (decision: any) => {
+      const helper = this.getWindowHelper();
+      helper.getLauncherWindow()?.webContents.send('copilot-suggestion', decision);
+      helper.getOverlayWindow()?.webContents.send('copilot-suggestion', decision);
+    })
+
+    this.intelligenceManager.on('copilot_error', (error: Error) => {
+      console.warn('[CopilotDecisionEngine] Error:', error.message)
+      const helper = this.getWindowHelper();
+      const payload = { error: error.message };
+      helper.getLauncherWindow()?.webContents.send('copilot-error', payload);
+      helper.getOverlayWindow()?.webContents.send('copilot-error', payload);
     })
   }
 

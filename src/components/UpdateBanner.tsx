@@ -11,6 +11,8 @@ const UpdateBanner: React.FC = () => {
     const [instructionsArch, setInstructionsArch] = useState<'arm64' | 'x64' | null>(null);
 
     useEffect(() => {
+        if (!window.electronAPI) return;
+
         // Listen for update available
         const unsubAvailable = window.electronAPI.onUpdateAvailable((info: any) => {
             console.log('[UpdateBanner] Update available:', info);
@@ -65,7 +67,7 @@ const UpdateBanner: React.FC = () => {
             if (e.metaKey && !e.shiftKey && e.key.toLowerCase() === 'i') {
                 e.preventDefault();
                 console.log("[UpdateBanner] Cmd+I pressed: Triggering Test Release Fetch...");
-                window.electronAPI.testReleaseFetch().catch(console.error);
+                window.electronAPI?.testReleaseFetch?.().catch(console.error);
             }
             
             if (e.metaKey && !e.shiftKey && e.key.toLowerCase() === 'j') {
@@ -82,6 +84,8 @@ const UpdateBanner: React.FC = () => {
     }, []);
 
     const handleInstall = async () => {
+        if (!window.electronAPI) return;
+
         if (window.electronAPI.platform === 'darwin') {
             try {
                 const arch = await window.electronAPI.getArch();

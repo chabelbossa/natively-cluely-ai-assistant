@@ -1416,6 +1416,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         googleServiceAccountPath: creds.googleServiceAccountPath || null,
         sttProvider: creds.sttProvider || 'none',
         groqSttModel: creds.groqSttModel || 'whisper-large-v3-turbo',
+        localSttEndpoint: creds.localSttEndpoint || 'http://127.0.0.1:8000/v1/audio/transcriptions',
+        localSttModel: creds.localSttModel || 'whisper-large-v3-turbo',
         hasSttGroqKey: hasKey(creds.groqSttApiKey),
         hasSttOpenaiKey: hasKey(creds.openAiSttApiKey),
         hasDeepgramKey: hasKey(creds.deepgramApiKey),
@@ -1443,7 +1445,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         claudePreferredModel: creds.claudePreferredModel || undefined,
       };
     } catch (error: any) {
-      return { hasGeminiKey: false, hasGroqKey: false, hasOpenaiKey: false, hasClaudeKey: false, hasNativelyKey: false, googleServiceAccountPath: null, sttProvider: 'none', groqSttModel: 'whisper-large-v3-turbo', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasTavilyKey: false, sttGroqKey: '', sttOpenaiKey: '', sttDeepgramKey: '', sttElevenLabsKey: '', sttAzureKey: '', sttIbmKey: '', sttSonioxKey: '' };
+      return { hasGeminiKey: false, hasGroqKey: false, hasOpenaiKey: false, hasClaudeKey: false, hasNativelyKey: false, googleServiceAccountPath: null, sttProvider: 'none', groqSttModel: 'whisper-large-v3-turbo', localSttEndpoint: 'http://127.0.0.1:8000/v1/audio/transcriptions', localSttModel: 'whisper-large-v3-turbo', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasTavilyKey: false, sttGroqKey: '', sttOpenaiKey: '', sttDeepgramKey: '', sttElevenLabsKey: '', sttAzureKey: '', sttIbmKey: '', sttSonioxKey: '' };
     }
   });
 
@@ -1491,7 +1493,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // STT Provider Management Handlers
   // ==========================================
 
-  safeHandle("set-stt-provider", async (_, provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively') => {
+  safeHandle("set-stt-provider", async (_, provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local') => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       CredentialsManager.getInstance().setSttProvider(provider);
@@ -1573,6 +1575,24 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { success: true };
     } catch (error: any) {
       console.error("Error setting Groq STT model:", error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  safeHandle("set-local-stt-config", async (_, config: { endpoint?: string; model?: string }) => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      CredentialsManager.getInstance().setLocalSttConfig(config?.endpoint || '', config?.model || '');
+
+      await appState.reconfigureSttProvider();
+
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) win.webContents.send('credentials-changed');
+      });
+
+      return { success: true };
+    } catch (error: any) {
+      console.error("Error setting Local STT config:", error);
       return { success: false, error: error.message };
     }
   });
@@ -1662,6 +1682,54 @@ export function initializeIpcHandlers(appState: AppState): void {
     // Remove patterns like ": sk-***...***" or ": sdasdada***...dwwC"
     return msg.replace(/:\s*[a-zA-Z0-9*]+\*+[a-zA-Z0-9*]+\.?$/g, '').trim();
   };
+
+  safeHandle("test-local-stt-connection", async (_, config: { endpoint?: string; model?: string }) => {
+    console.log(`[IPC] Received test-local-stt-connection request`);
+    try {
+      const axios = require('axios');
+      const FormData = require('form-data');
+      const { LocalSTT, DEFAULT_LOCAL_STT_MODEL } = require('./audio/LocalSTT');
+
+      const endpoint = LocalSTT.normalizeEndpoint(config?.endpoint);
+      const model = (config?.model || DEFAULT_LOCAL_STT_MODEL).trim();
+
+      const numSamples = 8000;
+      const pcmData = Buffer.alloc(numSamples * 2);
+      const wavHeader = Buffer.alloc(44);
+      wavHeader.write('RIFF', 0);
+      wavHeader.writeUInt32LE(36 + pcmData.length, 4);
+      wavHeader.write('WAVE', 8);
+      wavHeader.write('fmt ', 12);
+      wavHeader.writeUInt32LE(16, 16);
+      wavHeader.writeUInt16LE(1, 20);
+      wavHeader.writeUInt16LE(1, 22);
+      wavHeader.writeUInt32LE(16000, 24);
+      wavHeader.writeUInt32LE(32000, 28);
+      wavHeader.writeUInt16LE(2, 32);
+      wavHeader.writeUInt16LE(16, 34);
+      wavHeader.write('data', 36);
+      wavHeader.writeUInt32LE(pcmData.length, 40);
+      const testWav = Buffer.concat([wavHeader, pcmData]);
+
+      const form = new FormData();
+      form.append('file', testWav, { filename: 'test.wav', contentType: 'audio/wav' });
+      if (model) form.append('model', model);
+      form.append('response_format', 'json');
+
+      await axios.post(endpoint, form, {
+        headers: form.getHeaders(),
+        timeout: 15000,
+      });
+
+      return { success: true };
+    } catch (error: any) {
+      const respData = error?.response?.data;
+      const rawMsg = respData?.error?.message || respData?.detail?.message || respData?.message || error.message || 'Connection failed';
+      const msg = sanitizeErrorMessage(rawMsg);
+      console.error("Local STT connection test failed:", msg);
+      return { success: false, error: msg };
+    }
+  });
 
   safeHandle("test-stt-connection", async (_, provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox', apiKey: string, region?: string) => {
     console.log(`[IPC] Received test - stt - connection request for provider: ${provider} `);
@@ -2341,6 +2409,25 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const intelligenceManager = appState.getIntelligenceManager();
       intelligenceManager.reset();
+      return { success: true };
+    } catch (error: any) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  safeHandle("submit-copilot-feedback", async (_, feedback: { decisionId: string; rating: string; mode?: string }) => {
+    try {
+      const allowedRatings = new Set(['useful', 'too_early', 'not_relevant', 'already_discussed']);
+      if (!feedback?.decisionId || !allowedRatings.has(feedback.rating)) {
+        return { success: false, error: 'invalid_feedback' };
+      }
+
+      appState.getIntelligenceManager().submitCopilotFeedback({
+        decisionId: feedback.decisionId,
+        rating: feedback.rating as any,
+        mode: feedback.mode as any,
+        timestamp: Date.now()
+      });
       return { success: true };
     } catch (error: any) {
       return { success: false, error: error.message };
@@ -3155,7 +3242,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           { name: 'Text & Documents', extensions: ['txt', 'md', 'pdf', 'docx', 'doc'] },
           { name: 'All Files', extensions: ['*'] },
         ],
-      });
+      }) as unknown as Electron.OpenDialogReturnValue;
       if (result.canceled || !result.filePaths.length) {
         return { success: false, cancelled: true };
       }
@@ -3258,4 +3345,3 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 }
-

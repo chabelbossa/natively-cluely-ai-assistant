@@ -852,8 +852,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     const [useExperimentalSck, setUseExperimentalSck] = useState(false);
 
     // STT Provider settings
-    const [sttProvider, setSttProvider] = useState<'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively'>('none');
+    const [sttProvider, setSttProvider] = useState<'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local'>('none');
     const [groqSttModel, setGroqSttModel] = useState('whisper-large-v3-turbo');
+    const [localSttEndpoint, setLocalSttEndpoint] = useState('http://127.0.0.1:8000/v1/audio/transcriptions');
+    const [localSttModel, setLocalSttModel] = useState('whisper-large-v3-turbo');
     const [sttGroqKey, setSttGroqKey] = useState('');
     const [sttOpenaiKey, setSttOpenaiKey] = useState('');
     const [sttDeepgramKey, setSttDeepgramKey] = useState('');
@@ -900,6 +902,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                 if (creds) {
                     setSttProvider(creds.sttProvider || 'none');
                     if (creds.groqSttModel) setGroqSttModel(creds.groqSttModel);
+                    if (creds.localSttEndpoint) setLocalSttEndpoint(creds.localSttEndpoint);
+                    if (creds.localSttModel) setLocalSttModel(creds.localSttModel);
                     setGoogleServiceAccountPath(creds.googleServiceAccountPath);
                     setHasStoredSttGroqKey(creds.hasSttGroqKey);
                     setHasStoredSttOpenaiKey(creds.hasSttOpenaiKey);
@@ -939,6 +943,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                     if (!creds) return;
                     setSttProvider(creds.sttProvider || 'none');
                     if (creds.groqSttModel) setGroqSttModel(creds.groqSttModel);
+                    if (creds.localSttEndpoint) setLocalSttEndpoint(creds.localSttEndpoint);
+                    if (creds.localSttModel) setLocalSttModel(creds.localSttModel);
                     setHasNativelyKey(creds.hasNativelyKey || false);
                     setHasStoredSttGroqKey(creds.hasSttGroqKey);
                     setHasStoredSttOpenaiKey(creds.hasSttOpenaiKey);
@@ -953,7 +959,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
         return () => unsubscribe();
     }, []); // mount-once: isOpen is checked inside the callback
 
-    const handleSttProviderChange = async (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively') => {
+    const handleSttProviderChange = async (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local') => {
         setSttProvider(provider);
         setIsSttDropdownOpen(false);
         setSttTestStatus('idle');
@@ -963,6 +969,34 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             await window.electronAPI?.setSttProvider?.(provider);
         } catch (e) {
             console.error('Failed to set STT provider:', e);
+        }
+    };
+
+    const handleLocalSttConfigSave = async () => {
+        setSttSaving(true);
+        setSttTestStatus('idle');
+        setSttTestError('');
+
+        try {
+            const result = await window.electronAPI?.setLocalSttConfig?.({
+                endpoint: localSttEndpoint.trim(),
+                model: localSttModel.trim(),
+            });
+
+            if (!result?.success) {
+                setSttTestStatus('error');
+                setSttTestError(result?.error || 'Failed to save Local STT settings');
+                return;
+            }
+
+            setSttSaved(true);
+            setTimeout(() => setSttSaved(false), 2000);
+        } catch (e: any) {
+            console.error('Failed to save Local STT settings:', e);
+            setSttTestStatus('error');
+            setSttTestError(e.message || 'Failed to save Local STT settings');
+        } finally {
+            setSttSaving(false);
         }
     };
 
@@ -1093,6 +1127,27 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
 
     const handleTestSttConnection = async () => {
         if (sttProvider === 'none' || sttProvider === 'google' || sttProvider === 'natively') return;
+        if (sttProvider === 'local') {
+            setSttTestStatus('testing');
+            setSttTestError('');
+            try {
+                const result = await window.electronAPI?.testLocalSttConnection?.({
+                    endpoint: localSttEndpoint.trim(),
+                    model: localSttModel.trim(),
+                });
+                if (result?.success) {
+                    setSttTestStatus('success');
+                    setTimeout(() => setSttTestStatus('idle'), 3000);
+                } else {
+                    setSttTestStatus('error');
+                    setSttTestError(result?.error || 'Connection failed');
+                }
+            } catch (e: any) {
+                setSttTestStatus('error');
+                setSttTestError(e.message || 'Test failed');
+            }
+            return;
+        }
         const keyMap: Record<string, string> = {
             groq: sttGroqKey, openai: sttOpenaiKey, deepgram: sttDeepgramKey,
             elevenlabs: sttElevenLabsKey, azure: sttAzureKey, ibmwatson: sttIbmKey,
@@ -2948,6 +3003,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         onChange={(val) => handleSttProviderChange(val as any)}
                                                         options={[
                                                             ...(hasNativelyKey ? [{ id: 'natively', label: 'Natively API', badge: 'Saved' as const, recommended: true, desc: 'Managed transcription via Natively backend', color: 'blue', icon: <Mic size={14} /> }] : []),
+                                                            { id: 'local', label: 'Local STT', badge: localSttEndpoint ? 'Ready' : null, recommended: true, desc: 'Local Whisper, Parakeet, or OpenAI-compatible endpoint', color: 'green', icon: <Mic size={14} /> },
                                                             { id: 'google', label: 'Google Cloud', badge: googleServiceAccountPath ? 'Saved' : null, recommended: true, desc: 'gRPC streaming via Service Account', color: 'blue', icon: <Mic size={14} /> },
                                                             { id: 'groq', label: 'Groq Whisper', badge: hasStoredSttGroqKey ? 'Saved' : null, recommended: true, desc: 'Ultra-fast REST transcription', color: 'orange', icon: <Mic size={14} /> },
                                                             { id: 'openai', label: 'OpenAI Whisper', badge: hasStoredSttOpenaiKey ? 'Saved' : null, desc: 'OpenAI-compatible Whisper API', color: 'green', icon: <Mic size={14} /> },
@@ -2995,6 +3051,63 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 </div>
                                             )}
 
+                                            {/* Local STT Endpoint */}
+                                            {sttProvider === 'local' && (
+                                                <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-3">
+                                                    <div>
+                                                        <label className="text-xs font-medium text-text-secondary mb-2 block">Local Endpoint</label>
+                                                        <input
+                                                            type="text"
+                                                            value={localSttEndpoint}
+                                                            onChange={(e) => setLocalSttEndpoint(e.target.value)}
+                                                            placeholder="http://127.0.0.1:8000/v1/audio/transcriptions"
+                                                            className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary transition-colors"
+                                                        />
+                                                        <p className="text-[10px] text-text-tertiary mt-1.5">
+                                                            Use an OpenAI-compatible local transcription endpoint. If you enter only a host, Natively will use /v1/audio/transcriptions.
+                                                        </p>
+                                                    </div>
+                                                    <div>
+                                                        <label className="text-xs font-medium text-text-secondary mb-2 block">Model</label>
+                                                        <input
+                                                            type="text"
+                                                            value={localSttModel}
+                                                            onChange={(e) => setLocalSttModel(e.target.value)}
+                                                            placeholder="whisper-large-v3-turbo, whisper-large-v3, parakeet-v3"
+                                                            className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary transition-colors"
+                                                        />
+                                                    </div>
+                                                    <div className="flex items-center gap-3">
+                                                        <button
+                                                            onClick={handleLocalSttConfigSave}
+                                                            disabled={sttSaving || !localSttEndpoint.trim()}
+                                                            className={`px-5 py-2.5 rounded-lg text-xs font-medium transition-colors ${sttSaved
+                                                                ? 'bg-green-500/20 text-green-400'
+                                                                : 'bg-bg-input hover:bg-bg-input/80 border border-border-subtle text-text-primary disabled:opacity-50'
+                                                                }`}
+                                                        >
+                                                            {sttSaving ? 'Saving...' : sttSaved ? 'Saved!' : 'Save'}
+                                                        </button>
+                                                        <button
+                                                            onClick={handleTestSttConnection}
+                                                            disabled={sttTestStatus === 'testing' || !localSttEndpoint.trim()}
+                                                            className="text-xs bg-bg-input hover:bg-bg-elevated text-text-primary px-3 py-2.5 rounded-lg transition-colors flex items-center gap-2 disabled:opacity-50"
+                                                        >
+                                                            {sttTestStatus === 'testing' ? (
+                                                                <><RefreshCw size={12} className="animate-spin" /> Testing...</>
+                                                            ) : sttTestStatus === 'success' ? (
+                                                                <><Check size={12} className="text-green-500" /> Connected</>
+                                                            ) : (
+                                                                <>Test Connection</>
+                                                            )}
+                                                        </button>
+                                                        {sttTestStatus === 'error' && (
+                                                            <span className="text-xs text-red-400">{sttTestError}</span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            )}
+
                                             {/* Google Cloud Service Account */}
                                             {sttProvider === 'google' && (
                                                 <div className="bg-bg-card rounded-xl border border-border-subtle p-4">
@@ -3024,8 +3137,8 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 </div>
                                             )}
 
-                                            {/* API Key Input (non-Google providers) */}
-                                            {sttProvider !== 'google' && (
+                                            {/* API Key Input (cloud key-based providers) */}
+                                            {sttProvider !== 'google' && sttProvider !== 'local' && sttProvider !== 'natively' && sttProvider !== 'none' && (
                                                 <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-3">
                                                     <label className="text-xs font-medium text-text-secondary block">
                                                         {sttProvider === 'groq' ? 'Groq' : sttProvider === 'openai' ? 'OpenAI STT' : sttProvider === 'elevenlabs' ? 'ElevenLabs' : sttProvider === 'azure' ? 'Azure' : sttProvider === 'ibmwatson' ? 'IBM Watson' : sttProvider === 'soniox' ? 'Soniox' : 'Deepgram'} API Key
@@ -3078,6 +3191,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                                 const keyMap: Record<string, string> = {
                                                                     groq: sttGroqKey, openai: sttOpenaiKey, deepgram: sttDeepgramKey,
                                                                     elevenlabs: sttElevenLabsKey, azure: sttAzureKey, ibmwatson: sttIbmKey,
+                                                                    soniox: sttSonioxKey,
                                                                 };
                                                                 handleSttKeySubmit(sttProvider as any, keyMap[sttProvider] || '');
                                                             }}

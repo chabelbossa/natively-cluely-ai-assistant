@@ -3,7 +3,7 @@
  * Configuration for STT providers (Google gRPC, REST, WebSocket)
  */
 
-export type SttProviderId = 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'natively';
+export type SttProviderId = 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'natively' | 'local';
 
 export interface SttProviderConfig {
     id: SttProviderId;
@@ -123,9 +123,26 @@ export const STT_PROVIDERS: Record<SttProviderId, SttProviderConfig> = {
         authHeader: () => ({}),
         responseContentPath: '',
     },
+    local: {
+        id: 'local',
+        name: 'Local STT',
+        description: 'Local OpenAI-compatible transcription endpoint',
+        endpoint: 'http://127.0.0.1:8000/v1/audio/transcriptions',
+        model: 'whisper-large-v3-turbo',
+        uploadType: 'multipart',
+        availableModels: [
+            { id: 'whisper-large-v3-turbo', label: 'Whisper Large V3 Turbo' },
+            { id: 'whisper-large-v3', label: 'Whisper Large V3' },
+            { id: 'parakeet-v3', label: 'Parakeet V3' },
+        ],
+        authHeader: () => ({}),
+        responseContentPath: 'text',
+        extraFormFields: {
+            response_format: 'json',
+        },
+    },
 };
 
 export const STT_PROVIDER_OPTIONS = Object.values(STT_PROVIDERS);
 
 export const DEFAULT_STT_PROVIDER: SttProviderId = 'google';
-

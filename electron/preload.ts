@@ -1,5 +1,20 @@
 import { contextBridge, ipcRenderer } from "electron"
 
+type CopilotFeedbackRating = 'useful' | 'too_early' | 'not_relevant' | 'already_discussed'
+
+interface CopilotDecisionPayload {
+  id: string
+  mode: string
+  action: string
+  confidence: number
+  topic?: string
+  reason: string
+  suggestionType?: string
+  suggestion?: string
+  createdAt: number
+  sourceSegmentIds: string[]
+}
+
 // Types for the exposed Electron API
 interface ElectronAPI {
   updateContentDimensions: (dimensions: {
@@ -61,7 +76,7 @@ interface ElectronAPI {
   setClaudeApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   getNativelyUsage: () => Promise<{ ok: boolean; plan?: string; quota?: { transcription: { used: number; limit: number; remaining: number }; ai: { used: number; limit: number; remaining: number }; search: { used: number; limit: number; remaining: number }; resets_at: string }; member_since?: string; error?: string; status?: number }>
-  getStoredCredentials: () => Promise<{ hasGeminiKey: boolean; hasGroqKey: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; hasNativelyKey: boolean; googleServiceAccountPath: string | null; sttProvider: string; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; hasSonioxKey: boolean }>
+  getStoredCredentials: () => Promise<{ hasGeminiKey: boolean; hasGroqKey: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; hasNativelyKey: boolean; googleServiceAccountPath: string | null; sttProvider: string; groqSttModel?: string; localSttEndpoint?: string; localSttModel?: string; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; hasSonioxKey: boolean }>
   // Free Trial
   startTrial:     () => Promise<{ ok: boolean; trial_token?: string; started_at?: string; expires_at?: string; expired?: boolean; already_used?: boolean; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: { duration_ms: number; ai_requests: number; stt_minutes: number; search_requests: number }; error?: string; status?: number }>
   getTrialStatus: () => Promise<{ ok: boolean; expired?: boolean; remaining_ms?: number; started_at?: string; expires_at?: string; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: object; error?: string }>
@@ -72,7 +87,7 @@ interface ElectronAPI {
   onModesActiveCleared: (cb: () => void) => () => void
 
   // STT Provider Management
-  setSttProvider: (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively') => Promise<{ success: boolean; error?: string }>
+  setSttProvider: (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local') => Promise<{ success: boolean; error?: string }>
   getSttProvider: () => Promise<string>
   setGroqSttApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setOpenAiSttApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
@@ -82,9 +97,11 @@ interface ElectronAPI {
   setAzureRegion: (region: string) => Promise<{ success: boolean; error?: string }>
   setIbmWatsonApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setGroqSttModel: (model: string) => Promise<{ success: boolean; error?: string }>
+  setLocalSttConfig: (config: { endpoint?: string; model?: string }) => Promise<{ success: boolean; error?: string }>
   setSonioxApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setIbmWatsonRegion: (region: string) => Promise<{ success: boolean; error?: string }>
   testSttConnection: (provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox', apiKey: string, region?: string) => Promise<{ success: boolean; error?: string }>
+  testLocalSttConnection: (config: { endpoint?: string; model?: string }) => Promise<{ success: boolean; error?: string }>
 
   // STT Config Events
   onSttConfigChanged: (callback: (data: { configured: boolean; provider: string }) => void) => () => void
@@ -120,6 +137,7 @@ interface ElectronAPI {
   submitManualQuestion: (question: string) => Promise<{ answer: string | null; question: string }>
   getIntelligenceContext: () => Promise<{ context: string; lastAssistantMessage: string | null; activeMode: string }>
   resetIntelligence: () => Promise<{ success: boolean; error?: string }>
+  submitCopilotFeedback: (feedback: { decisionId: string; rating: CopilotFeedbackRating; mode?: string }) => Promise<{ success: boolean; error?: string }>
 
   // Meeting Lifecycle
   startMeeting: (metadata?: any) => Promise<{ success: boolean; error?: string }>
@@ -142,6 +160,8 @@ interface ElectronAPI {
   onIntelligenceManualResult: (callback: (data: { answer: string; question: string }) => void) => () => void
   onIntelligenceModeChanged: (callback: (data: { mode: string }) => void) => () => void
   onIntelligenceError: (callback: (data: { error: string; mode: string }) => void) => () => void
+  onCopilotSuggestion: (callback: (data: CopilotDecisionPayload) => void) => () => void
+  onCopilotError: (callback: (data: { error: string }) => void) => () => void
 
   // Model Management
   getDefaultModel: () => Promise<{ model: string }>
@@ -573,7 +593,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   // STT Provider Management
-  setSttProvider: (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively') => ipcRenderer.invoke("set-stt-provider", provider),
+  setSttProvider: (provider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local') => ipcRenderer.invoke("set-stt-provider", provider),
   getSttProvider: () => ipcRenderer.invoke("get-stt-provider"),
   setGroqSttApiKey: (apiKey: string) => ipcRenderer.invoke("set-groq-stt-api-key", apiKey),
   setOpenAiSttApiKey: (apiKey: string) => ipcRenderer.invoke("set-openai-stt-api-key", apiKey),
@@ -583,9 +603,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setAzureRegion: (region: string) => ipcRenderer.invoke("set-azure-region", region),
   setIbmWatsonApiKey: (apiKey: string) => ipcRenderer.invoke("set-ibmwatson-api-key", apiKey),
   setGroqSttModel: (model: string) => ipcRenderer.invoke("set-groq-stt-model", model),
+  setLocalSttConfig: (config: { endpoint?: string; model?: string }) => ipcRenderer.invoke("set-local-stt-config", config),
   setSonioxApiKey: (apiKey: string) => ipcRenderer.invoke("set-soniox-api-key", apiKey),
   setIbmWatsonRegion: (region: string) => ipcRenderer.invoke("set-ibmwatson-region", region),
   testSttConnection: (provider: 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox', apiKey: string, region?: string) => ipcRenderer.invoke("test-stt-connection", provider, apiKey, region),
+  testLocalSttConnection: (config: { endpoint?: string; model?: string }) => ipcRenderer.invoke("test-local-stt-connection", config),
 
   // STT Config Events (Adapted from public PR #173 — verify premium interaction)
   onSttConfigChanged: (callback: (data: { configured: boolean; provider: string }) => void) => {
@@ -690,6 +712,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   submitManualQuestion: (question: string) => ipcRenderer.invoke("submit-manual-question", question),
   getIntelligenceContext: () => ipcRenderer.invoke("get-intelligence-context"),
   resetIntelligence: () => ipcRenderer.invoke("reset-intelligence"),
+  submitCopilotFeedback: (feedback: { decisionId: string; rating: CopilotFeedbackRating; mode?: string }) =>
+    ipcRenderer.invoke("submit-copilot-feedback", feedback),
 
   // Action Button Mode (Dynamic Recap / Brainstorm toggle)
   getActionButtonMode: () => ipcRenderer.invoke("get-action-button-mode"),
@@ -831,6 +855,20 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("intelligence-error", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-error", subscription)
+    }
+  },
+  onCopilotSuggestion: (callback: (data: CopilotDecisionPayload) => void) => {
+    const subscription = (_: any, data: any) => callback(data)
+    ipcRenderer.on("copilot-suggestion", subscription)
+    return () => {
+      ipcRenderer.removeListener("copilot-suggestion", subscription)
+    }
+  },
+  onCopilotError: (callback: (data: { error: string }) => void) => {
+    const subscription = (_: any, data: any) => callback(data)
+    ipcRenderer.on("copilot-error", subscription)
+    return () => {
+      ipcRenderer.removeListener("copilot-error", subscription)
     }
   },
   onSessionReset: (callback: () => void) => {

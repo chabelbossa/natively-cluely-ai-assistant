@@ -12,10 +12,12 @@ import { LLMHelper } from './LLMHelper';
 import { SessionTracker } from './SessionTracker';
 import { IntelligenceEngine } from './IntelligenceEngine';
 import { MeetingPersistence } from './MeetingPersistence';
+import { CopilotDecisionEngine, CopilotDecision, CopilotFeedback, CopilotTranscriptSegment } from './copilot';
 
 // Re-export types for backward compatibility
 export type { TranscriptSegment, SuggestionTrigger, ContextItem } from './SessionTracker';
 export type { IntelligenceMode, IntelligenceModeEvents } from './IntelligenceEngine';
+export type { CopilotDecision, CopilotFeedback } from './copilot';
 
 export const GEMINI_FLASH_MODEL = "gemini-3.1-flash-lite-preview";
 
@@ -31,12 +33,14 @@ export class IntelligenceManager extends EventEmitter {
     private session: SessionTracker;
     private engine: IntelligenceEngine;
     private persistence: MeetingPersistence;
+    private copilot: CopilotDecisionEngine;
 
     constructor(llmHelper: LLMHelper) {
         super();
         this.session = new SessionTracker();
         this.engine = new IntelligenceEngine(llmHelper, this.session);
         this.persistence = new MeetingPersistence(this.session, llmHelper);
+        this.copilot = new CopilotDecisionEngine(llmHelper);
 
         // Forward all engine events through the facade
         this.forwardEngineEvents();
@@ -93,6 +97,7 @@ export class IntelligenceManager extends EventEmitter {
         } else {
             // Let the engine handle transcript + refinement detection
             this.engine.handleTranscript(segment, false);
+            this.processCopilotTranscript(segment);
         }
     }
 
@@ -126,10 +131,15 @@ export class IntelligenceManager extends EventEmitter {
 
     handleTranscript(segment: import('./SessionTracker').TranscriptSegment): void {
         this.engine.handleTranscript(segment);
+        this.processCopilotTranscript(segment);
     }
 
     async handleSuggestionTrigger(trigger: import('./SessionTracker').SuggestionTrigger): Promise<void> {
         return this.engine.handleSuggestionTrigger(trigger);
+    }
+
+    submitCopilotFeedback(feedback: CopilotFeedback): void {
+        this.copilot.submitFeedback(feedback);
     }
 
     // ============================================
@@ -226,5 +236,29 @@ export class IntelligenceManager extends EventEmitter {
     reset(): void {
         this.session.reset();
         this.engine.reset();
+        this.copilot.reset();
+    }
+
+    private processCopilotTranscript(segment: import('./SessionTracker').TranscriptSegment): void {
+        const copilotSegment: CopilotTranscriptSegment = {
+            id: `segment_${segment.timestamp}_${Math.random().toString(36).slice(2, 8)}`,
+            speaker: segment.speaker,
+            text: segment.text,
+            timestamp: segment.timestamp,
+            final: segment.final,
+            confidence: segment.confidence
+        };
+
+        void this.copilot.handleTranscript(copilotSegment)
+            .then((decision: CopilotDecision | null) => {
+                if (!decision) return;
+                this.emit('copilot_decision', decision);
+                if (decision.suggestion) {
+                    this.emit('copilot_suggestion', decision);
+                }
+            })
+            .catch((error: Error) => {
+                this.emit('copilot_error', error);
+            });
     }
 }

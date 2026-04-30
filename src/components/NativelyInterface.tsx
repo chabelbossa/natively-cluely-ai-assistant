@@ -27,7 +27,11 @@ import {
     Code,
     Copy,
     Check,
-    PointerOff
+    PointerOff,
+    ThumbsUp,
+    Clock3,
+    CircleSlash,
+    CheckCircle2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -72,12 +76,28 @@ interface NativelyInterfaceProps {
     overlayOpacity?: number;
 }
 
+interface CopilotSuggestion {
+    id: string;
+    mode: string;
+    action: string;
+    confidence: number;
+    topic?: string;
+    reason: string;
+    suggestionType?: string;
+    suggestion?: string;
+    createdAt: number;
+    sourceSegmentIds: string[];
+}
+
+type CopilotFeedbackRating = 'useful' | 'too_early' | 'not_relevant' | 'already_discussed';
+
 const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, overlayOpacity = OVERLAY_OPACITY_DEFAULT }) => {
     const isLightTheme = useResolvedTheme() === 'light';
     const [isExpanded, setIsExpanded] = useState(true);
     const [inputValue, setInputValue] = useState('');
     const { shortcuts, isShortcutPressed } = useShortcuts();
     const [messages, setMessages] = useState<Message[]>([]);
+    const [copilotSuggestion, setCopilotSuggestion] = useState<CopilotSuggestion | null>(null);
     const [isConnected, setIsConnected] = useState(false);
     const [sttUserStatus, setSttUserStatus] = useState<'connected' | 'reconnecting' | 'failed'>('connected');
     const [sttUserError, setSttUserError] = useState<string>('');
@@ -204,6 +224,18 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         // Session-only: update runtime but don't persist as default
         window.electronAPI.setModel(modelId)
             .catch((err: any) => console.error("Failed to set model:", err));
+    };
+
+    const handleCopilotFeedback = (rating: CopilotFeedbackRating) => {
+        const current = copilotSuggestion;
+        if (!current) return;
+
+        setCopilotSuggestion(null);
+        window.electronAPI?.submitCopilotFeedback?.({
+            decisionId: current.id,
+            rating,
+            mode: current.mode
+        }).catch((err: any) => console.warn('[Copilot] Failed to submit feedback:', err));
     };
 
     // Listen for default model changes from Settings
@@ -386,6 +418,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             setMessages([]);
             setInputValue('');
             setAttachedContext([]);
+            setCopilotSuggestion(null);
             setManualTranscript('');
             setVoiceInput('');
             setIsProcessing(false);
@@ -525,6 +558,18 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 text: `Error: ${err.error}`
             }]);
         }));
+
+        const cleanupCopilotSuggestion = window.electronAPI.onCopilotSuggestion?.((data) => {
+            if (!data?.suggestion) return;
+            setCopilotSuggestion(data);
+            setIsExpanded(true);
+        });
+        if (cleanupCopilotSuggestion) cleanups.push(cleanupCopilotSuggestion);
+
+        const cleanupCopilotError = window.electronAPI.onCopilotError?.((data) => {
+            console.warn('[Copilot] Error:', data.error);
+        });
+        if (cleanupCopilotError) cleanups.push(cleanupCopilotError);
 
 
 
@@ -1435,6 +1480,7 @@ Provide only the answer, nothing else.`;
 
     const clearChat = () => {
         setMessages([]);
+        setCopilotSuggestion(null);
     };
 
 
@@ -1806,6 +1852,7 @@ Provide only the answer, nothing else.`;
                 await window.electronAPI.resetIntelligence();
                 setMessages([]);
                 setAttachedContext([]);
+                setCopilotSuggestion(null);
                 setInputValue('');
             }
         },
@@ -1847,6 +1894,7 @@ Provide only the answer, nothing else.`;
                 await window.electronAPI.resetIntelligence();
                 setMessages([]);
                 setAttachedContext([]);
+                setCopilotSuggestion(null);
                 setInputValue('');
             }
         },
@@ -2137,6 +2185,68 @@ Provide only the answer, nothing else.`;
                                     onCopyDiagnostics={copyDiagnostics}
                                 />
                             ) : null}
+
+                            {copilotSuggestion?.suggestion && (
+                                <div className={`mx-4 mt-3 mb-1 px-3.5 py-3 rounded-[12px] border no-drag ${subtleSurfaceClass}`} style={appearance.subtleStyle}>
+                                    <div className="flex items-start gap-2.5">
+                                        <div className="mt-0.5 shrink-0 p-1.5 rounded-full overlay-icon-surface overlay-text-interactive" style={appearance.iconStyle}>
+                                            <Lightbulb className="w-3.5 h-3.5" />
+                                        </div>
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex items-center justify-between gap-2 mb-1.5">
+                                                <div className="text-[10px] font-semibold uppercase tracking-wide overlay-text-muted">
+                                                    Suggested question
+                                                </div>
+                                                <button
+                                                    onClick={() => setCopilotSuggestion(null)}
+                                                    className="p-1 rounded-md overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive"
+                                                    title="Dismiss"
+                                                    style={appearance.iconStyle}
+                                                >
+                                                    <X className="w-3 h-3" />
+                                                </button>
+                                            </div>
+                                            <p className="text-[13px] leading-snug overlay-text-primary pr-1">
+                                                {copilotSuggestion.suggestion}
+                                            </p>
+                                            <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
+                                                <button
+                                                    onClick={() => handleCopilotFeedback('useful')}
+                                                    className={`flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-medium border transition-all active:scale-95 ${quickActionClass}`}
+                                                    title="Useful"
+                                                    style={appearance.chipStyle}
+                                                >
+                                                    <ThumbsUp className="w-3 h-3" /> Useful
+                                                </button>
+                                                <button
+                                                    onClick={() => handleCopilotFeedback('too_early')}
+                                                    className={`flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-medium border transition-all active:scale-95 ${quickActionClass}`}
+                                                    title="Too early"
+                                                    style={appearance.chipStyle}
+                                                >
+                                                    <Clock3 className="w-3 h-3" /> Too early
+                                                </button>
+                                                <button
+                                                    onClick={() => handleCopilotFeedback('not_relevant')}
+                                                    className={`flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-medium border transition-all active:scale-95 ${quickActionClass}`}
+                                                    title="Not relevant"
+                                                    style={appearance.chipStyle}
+                                                >
+                                                    <CircleSlash className="w-3 h-3" /> Not relevant
+                                                </button>
+                                                <button
+                                                    onClick={() => handleCopilotFeedback('already_discussed')}
+                                                    className={`flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-medium border transition-all active:scale-95 ${quickActionClass}`}
+                                                    title="Already discussed"
+                                                    style={appearance.chipStyle}
+                                                >
+                                                    <CheckCircle2 className="w-3 h-3" /> Already discussed
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
 
                             {/* Chat History - Only show if there are messages OR active states */}
                             {(messages.length > 0 || isManualRecording || isProcessing) && (

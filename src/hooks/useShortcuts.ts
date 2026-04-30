@@ -135,6 +135,8 @@ export const useShortcuts = () => {
 
     // Load from Main Process on mount
     useEffect(() => {
+        if (!window.electronAPI) return;
+
         const fetchKeybinds = async () => {
             try {
                 const keybinds = await window.electronAPI.getKeybinds();
@@ -194,6 +196,7 @@ export const useShortcuts = () => {
 
         if (backendId) {
             try {
+                if (!window.electronAPI) return;
                 await window.electronAPI.setKeybind(backendId, accelerator);
             } catch (error) {
                 console.error(`Failed to set keybind for ${actionId}:`, error);
@@ -204,6 +207,10 @@ export const useShortcuts = () => {
     // Function to reset all shortcuts to defaults
     const resetShortcuts = useCallback(async () => {
         try {
+            if (!window.electronAPI) {
+                setShortcuts(buildDefaultShortcuts());
+                return;
+            }
             const defaults = await window.electronAPI.resetKeybinds();
             mapBackendToFrontend(defaults);
         } catch (error) {
