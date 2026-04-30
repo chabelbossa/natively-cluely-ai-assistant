@@ -2,28 +2,49 @@
  * LocalSTT - OpenAI-compatible local Speech-to-Text adapter.
  *
  * This provider keeps Natively's existing audio capture pipeline intact and
- * sends flushed WAV chunks to a user-configured local endpoint, typically:
+ * sends flushed WAV chunks either to whisper.cpp directly or to a user-
+ * configured local endpoint, typically:
  *   http://127.0.0.1:8000/v1/audio/transcriptions
  *
- * It is intentionally generic so it can work with local Whisper, Parakeet, or
- * another model as long as a small local server exposes a compatible endpoint.
+ * The direct whisper.cpp path reuses an existing ggml .bin model. Other local
+ * engines remain supported through the OpenAI-compatible endpoint mode.
  */
 
 import { EventEmitter } from 'events';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import axios from 'axios';
 import FormData from 'form-data';
 import { RECOGNITION_LANGUAGES } from '../config/languages';
 
 export const DEFAULT_LOCAL_STT_ENDPOINT = 'http://127.0.0.1:8000/v1/audio/transcriptions';
 export const DEFAULT_LOCAL_STT_MODEL = 'whisper-large-v3-turbo';
+export const DEFAULT_LOCAL_STT_WHISPER_CPP_MODEL = 'ggml-large-v3-turbo-q5_0';
+export type LocalSttMode = 'server' | 'whisper_cpp';
 
-const MIN_BUFFER_BYTES = 4000;
-const SAFETY_NET_INTERVAL_MS = 10000;
-const SILENCE_RMS_THRESHOLD = 50;
+export interface LocalSttConfig {
+    mode?: LocalSttMode;
+    endpoint?: string;
+    model?: string;
+    whisperCppModelPath?: string;
+    whisperCppExecutablePath?: string;
+}
+
+const execFileAsync = promisify(execFile);
+
+const MIN_SPEECH_DURATION_MS = 650;
+const SAFETY_NET_INTERVAL_MS = 4000;
+const SILENCE_RMS_THRESHOLD = 80;
 
 export class LocalSTT extends EventEmitter {
+    private mode: LocalSttMode;
     private endpoint: string;
     private model: string;
+    private whisperCppModelPath: string;
+    private whisperCppExecutablePath: string;
     private languageKey = 'auto';
 
     private chunks: Buffer[] = [];
@@ -37,11 +58,15 @@ export class LocalSTT extends EventEmitter {
     private numChannels = 1;
     private bitsPerSample = 16;
 
-    constructor(endpoint?: string, model?: string) {
+    constructor(config?: LocalSttConfig | string, model?: string) {
         super();
-        this.endpoint = LocalSTT.normalizeEndpoint(endpoint);
-        this.model = (model || DEFAULT_LOCAL_STT_MODEL).trim();
-        console.log(`[LocalSTT] Initialized endpoint=${this.endpoint}, model=${this.model || '(none)'}`);
+        const normalized = LocalSTT.normalizeConfig(config, model);
+        this.mode = normalized.mode;
+        this.endpoint = normalized.endpoint;
+        this.model = normalized.model;
+        this.whisperCppModelPath = normalized.whisperCppModelPath;
+        this.whisperCppExecutablePath = normalized.whisperCppExecutablePath;
+        console.log(`[LocalSTT] Initialized mode=${this.mode}, endpoint=${this.endpoint}, model=${this.model || '(none)'}, whisperCppModel=${this.whisperCppModelPath || '(none)'}`);
     }
 
     public static normalizeEndpoint(endpoint?: string): string {
@@ -61,10 +86,107 @@ export class LocalSTT extends EventEmitter {
         }
     }
 
-    public setConfig(endpoint?: string, model?: string): void {
-        this.endpoint = LocalSTT.normalizeEndpoint(endpoint);
-        this.model = (model || DEFAULT_LOCAL_STT_MODEL).trim();
-        console.log(`[LocalSTT] Config updated endpoint=${this.endpoint}, model=${this.model || '(none)'}`);
+    public static normalizeConfig(config?: LocalSttConfig | string, model?: string): Required<LocalSttConfig> {
+        const rawConfig: LocalSttConfig = typeof config === 'string'
+            ? { endpoint: config, model }
+            : (config || {});
+
+        const detectedModelPath = LocalSTT.detectDefaultWhisperCppModelPath();
+        const whisperCppModelPath = (rawConfig.whisperCppModelPath || detectedModelPath || '').trim();
+        const mode = rawConfig.mode || (whisperCppModelPath ? 'whisper_cpp' : 'server');
+
+        return {
+            mode,
+            endpoint: LocalSTT.normalizeEndpoint(rawConfig.endpoint),
+            model: (rawConfig.model || DEFAULT_LOCAL_STT_MODEL).trim(),
+            whisperCppModelPath,
+            whisperCppExecutablePath: (rawConfig.whisperCppExecutablePath || LocalSTT.detectWhisperCppExecutablePath() || '').trim(),
+        };
+    }
+
+    public static detectWhisperCppExecutablePath(): string {
+        const pathCandidates = [
+            '/opt/homebrew/bin/whisper-cli',
+            '/usr/local/bin/whisper-cli',
+        ];
+
+        for (const candidate of pathCandidates) {
+            if (LocalSTT.isExecutableFile(candidate)) return candidate;
+        }
+
+        for (const directory of (process.env.PATH || '').split(path.delimiter)) {
+            const candidate = path.join(directory, 'whisper-cli');
+            if (LocalSTT.isExecutableFile(candidate)) return candidate;
+        }
+
+        return '';
+    }
+
+    public static detectDefaultWhisperCppModelPath(): string {
+        const home = os.homedir();
+        const modelDirs = [
+            path.join(home, 'Library/Application Support/com.prakashjoshipax.VoiceInk/WhisperModels'),
+            path.join(home, 'Library/Application Support/com.voiceinkapp.transcribe/WhisperModels'),
+        ];
+
+        const preferredNames = [
+            `${DEFAULT_LOCAL_STT_WHISPER_CPP_MODEL}.bin`,
+            'ggml-large-v3-turbo.bin',
+            'ggml-large-v3.bin',
+        ];
+
+        for (const dir of modelDirs) {
+            for (const name of preferredNames) {
+                const candidate = path.join(dir, name);
+                if (LocalSTT.isReadableFile(candidate)) return candidate;
+            }
+        }
+
+        for (const dir of modelDirs) {
+            try {
+                const modelFiles = fs.readdirSync(dir)
+                    .filter(name => name.endsWith('.bin'))
+                    .sort((a, b) => {
+                        const score = (name: string) => name.includes('turbo') ? 0 : name.includes('large') ? 1 : 2;
+                        return score(a) - score(b) || a.localeCompare(b);
+                    });
+                if (modelFiles[0]) return path.join(dir, modelFiles[0]);
+            } catch {
+                // Ignore missing app support folders.
+            }
+        }
+
+        return '';
+    }
+
+    public static isReadableFile(filePath?: string): boolean {
+        if (!filePath) return false;
+        try {
+            fs.accessSync(filePath, fs.constants.R_OK);
+            return fs.statSync(filePath).isFile();
+        } catch {
+            return false;
+        }
+    }
+
+    public static isExecutableFile(filePath?: string): boolean {
+        if (!filePath) return false;
+        try {
+            fs.accessSync(filePath, fs.constants.X_OK);
+            return fs.statSync(filePath).isFile();
+        } catch {
+            return false;
+        }
+    }
+
+    public setConfig(config?: LocalSttConfig | string, model?: string): void {
+        const normalized = LocalSTT.normalizeConfig(config, model);
+        this.mode = normalized.mode;
+        this.endpoint = normalized.endpoint;
+        this.model = normalized.model;
+        this.whisperCppModelPath = normalized.whisperCppModelPath;
+        this.whisperCppExecutablePath = normalized.whisperCppExecutablePath;
+        console.log(`[LocalSTT] Config updated mode=${this.mode}, endpoint=${this.endpoint}, model=${this.model || '(none)'}, whisperCppModel=${this.whisperCppModelPath || '(none)'}`);
     }
 
     public setCredentials(_keyFilePath: string): void {
@@ -129,7 +251,7 @@ export class LocalSTT extends EventEmitter {
     }
 
     private async flushAndUpload(): Promise<void> {
-        if (this.chunks.length === 0 || this.totalBufferedBytes < MIN_BUFFER_BYTES) return;
+        if (this.chunks.length === 0 || this.totalBufferedBytes < this.getMinBufferedBytes()) return;
 
         if (this.isUploading) {
             this.flushPending = true;
@@ -163,14 +285,17 @@ export class LocalSTT extends EventEmitter {
 
         this.isUploading = true;
         try {
-            const transcript = await this.uploadMultipart(wavBuffer);
-            if (transcript && transcript.trim().length > 0) {
-                console.log(`[LocalSTT] Transcript: "${transcript.substring(0, 60)}..."`);
+            const transcript = await this.transcribeWav(wavBuffer);
+            const cleanedTranscript = transcript.trim();
+            if (cleanedTranscript && !this.shouldDropTranscript(cleanedTranscript)) {
+                console.log(`[LocalSTT] Transcript: "${cleanedTranscript.substring(0, 60)}..."`);
                 this.emit('transcript', {
-                    text: transcript.trim(),
+                    text: cleanedTranscript,
                     isFinal: true,
                     confidence: 1.0,
                 });
+            } else if (cleanedTranscript) {
+                console.log(`[LocalSTT] Dropping low-information transcript: "${cleanedTranscript.substring(0, 60)}..."`);
             }
         } catch (err) {
             console.error('[LocalSTT] Upload error:', err);
@@ -181,6 +306,43 @@ export class LocalSTT extends EventEmitter {
                 this.flushPending = false;
                 this.flushAndUpload();
             }
+        }
+    }
+
+    private async transcribeWav(wavBuffer: Buffer): Promise<string> {
+        if (this.mode === 'whisper_cpp') {
+            return this.transcribeWithWhisperCpp(wavBuffer);
+        }
+        return this.uploadMultipart(wavBuffer);
+    }
+
+    private async transcribeWithWhisperCpp(wavBuffer: Buffer): Promise<string> {
+        if (!LocalSTT.isExecutableFile(this.whisperCppExecutablePath)) {
+            throw new Error(`whisper-cli not found or not executable: ${this.whisperCppExecutablePath || '(empty)'}`);
+        }
+        if (!LocalSTT.isReadableFile(this.whisperCppModelPath)) {
+            throw new Error(`Whisper.cpp model not found or not readable: ${this.whisperCppModelPath || '(empty)'}`);
+        }
+
+        const tempPath = path.join(os.tmpdir(), `natively-local-stt-${Date.now()}-${Math.random().toString(16).slice(2)}.wav`);
+        fs.writeFileSync(tempPath, wavBuffer);
+
+        try {
+            const args = [
+                '-m', this.whisperCppModelPath,
+                '-f', tempPath,
+                '-nt',
+                '-np',
+                '-sns',
+                '-l', this.getWhisperCppLanguage(),
+            ];
+            const { stdout } = await execFileAsync(this.whisperCppExecutablePath, args, {
+                timeout: 120000,
+                maxBuffer: 1024 * 1024,
+            });
+            return this.cleanWhisperCppOutput(stdout);
+        } finally {
+            fs.rmSync(tempPath, { force: true });
         }
     }
 
@@ -224,6 +386,43 @@ export class LocalSTT extends EventEmitter {
     private getIsoLanguage(): string | undefined {
         if (!this.languageKey || this.languageKey === 'auto') return undefined;
         return RECOGNITION_LANGUAGES[this.languageKey]?.iso639;
+    }
+
+    private getWhisperCppLanguage(): string {
+        if (!this.languageKey || this.languageKey === 'auto') return 'auto';
+        const language = RECOGNITION_LANGUAGES[this.languageKey]?.iso639 || 'auto';
+        // The default app language is english-us, which makes French local dictation
+        // degrade into common hallucinations ("thank you", "hello"). Let whisper.cpp
+        // auto-detect unless the user explicitly chooses a non-English language.
+        return language === 'en' ? 'auto' : language;
+    }
+
+    private cleanWhisperCppOutput(stdout: string): string {
+        return stdout
+            .split('\n')
+            .map(line => line.replace(/\[[^\]]+\]\s*/g, '').trim())
+            .filter(Boolean)
+            .join(' ')
+            .trim();
+    }
+
+    private shouldDropTranscript(text: string): boolean {
+        const normalized = text
+            .toLowerCase()
+            .replace(/[.!?,;:…]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        if (!normalized) return true;
+
+        return new Set([
+            'you',
+            'thank you',
+            'thanks',
+            'uh',
+            'um',
+            'hmm',
+        ]).has(normalized);
     }
 
     private resampleTo16kHz(raw: Buffer): Buffer {
@@ -280,6 +479,11 @@ export class LocalSTT extends EventEmitter {
         if (count === 0) return true;
         const rms = Math.sqrt(sum / count);
         return rms < SILENCE_RMS_THRESHOLD;
+    }
+
+    private getMinBufferedBytes(): number {
+        const bytesPerSecond = this.sampleRate * this.numChannels * (this.bitsPerSample / 8);
+        return Math.max(4000, Math.floor(bytesPerSecond * (MIN_SPEECH_DURATION_MS / 1000)));
     }
 
     private addWavHeader(samples: Buffer, sampleRate = 16_000, channels = 1): Buffer {

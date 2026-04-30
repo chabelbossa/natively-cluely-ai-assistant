@@ -91,6 +91,16 @@ interface CopilotSuggestion {
 
 type CopilotFeedbackRating = 'useful' | 'too_early' | 'not_relevant' | 'already_discussed';
 
+interface LiveTranscriptTurn {
+    id: string;
+    speaker: 'interviewer' | 'user';
+    text: string;
+    final: boolean;
+    timestamp: number;
+}
+
+const MAX_LIVE_TRANSCRIPT_TURNS = 12;
+
 const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, overlayOpacity = OVERLAY_OPACITY_DEFAULT }) => {
     const isLightTheme = useResolvedTheme() === 'light';
     const [isExpanded, setIsExpanded] = useState(true);
@@ -131,12 +141,15 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     }, []);
 
     const [rollingTranscript, setRollingTranscript] = useState('');  // For interviewer rolling text bar
+    const [liveTranscriptTurns, setLiveTranscriptTurns] = useState<LiveTranscriptTurn[]>([]);
+    const [pendingLiveTranscript, setPendingLiveTranscript] = useState<Partial<Record<LiveTranscriptTurn['speaker'], LiveTranscriptTurn>>>({});
     const [isInterviewerSpeaking, setIsInterviewerSpeaking] = useState(false);  // Track if actively speaking
     const [voiceInput, setVoiceInput] = useState('');  // Accumulated user voice input
     const voiceInputRef = useRef<string>('');  // Ref for capturing in async handlers
     const textInputRef = useRef<HTMLInputElement>(null); // Ref for input focus
     const isStealthRef = useRef<boolean>(false); // Tracks if the next expansion should be stealthy
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const liveTranscriptEndRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     // Captures data from onCaptureAndProcess before the React state flush so
@@ -420,6 +433,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             setAttachedContext([]);
             setCopilotSuggestion(null);
             setManualTranscript('');
+            setLiveTranscriptTurns([]);
+            setPendingLiveTranscript({});
+            setRollingTranscript('');
             setVoiceInput('');
             setIsProcessing(false);
             // Optionally reset connection status if needed, but connection persists
@@ -442,6 +458,57 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             return updated.slice(-5); // Keep last 5
         });
     };
+
+    const recordLiveTranscript = (transcript: { speaker: string; text: string; final: boolean }) => {
+        const text = transcript.text?.trim();
+        if (!text) return;
+
+        const speaker: LiveTranscriptTurn['speaker'] = transcript.speaker === 'user' ? 'user' : 'interviewer';
+        const timestamp = Date.now();
+
+        if (!transcript.final) {
+            setPendingLiveTranscript(prev => ({
+                ...prev,
+                [speaker]: {
+                    id: `pending-${speaker}`,
+                    speaker,
+                    text,
+                    final: false,
+                    timestamp,
+                },
+            }));
+            return;
+        }
+
+        setPendingLiveTranscript(prev => {
+            if (!prev[speaker]) return prev;
+            const next = { ...prev };
+            delete next[speaker];
+            return next;
+        });
+
+        setLiveTranscriptTurns(prev => {
+            const last = prev[prev.length - 1];
+            if (last && last.speaker === speaker && last.text === text && timestamp - last.timestamp < 5000) {
+                return prev;
+            }
+
+            return [
+                ...prev,
+                {
+                    id: `${speaker}-${timestamp}-${Math.random().toString(16).slice(2)}`,
+                    speaker,
+                    text,
+                    final: true,
+                    timestamp,
+                },
+            ].slice(-MAX_LIVE_TRANSCRIPT_TURNS);
+        });
+    };
+
+    useEffect(() => {
+        liveTranscriptEndRef.current?.scrollIntoView({ block: 'end' });
+    }, [liveTranscriptTurns, pendingLiveTranscript]);
 
     // STT Status listener — must survive isExpanded changes.
     // If registered inside the [isExpanded] effect, events are dropped during cleanup.
@@ -479,6 +546,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
         // Real-time Transcripts
         cleanups.push(window.electronAPI.onNativeAudioTranscript((transcript) => {
+            recordLiveTranscript(transcript);
+
             // When Answer button is active, capture USER transcripts for voice input
             // Use ref to avoid stale closure issue
             if (isRecordingRef.current && transcript.speaker === 'user') {
@@ -499,8 +568,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 return;  // Don't add to messages while recording
             }
 
-            // Ignore user mic transcripts when not recording
-            // Only interviewer (system audio) transcripts should appear in chat
+            // User mic transcripts are shown in the live transcript feed above.
+            // They stay out of the chat unless the user is explicitly dictating an answer.
             if (transcript.speaker === 'user') {
                 return;  // Skip user mic input - only relevant when Answer button is active
             }
@@ -2034,6 +2103,8 @@ Provide only the answer, nothing else.`;
     const interviewerSttIndicatorStatus = sttInterviewerStatus;
     // Strip consecutive error count from display — show only in expanded diagnostics
     const interviewerSttIndicatorError = sttInterviewerError?.replace(/\s*\(\d+ consecutive errors\):?/gi, '');
+    const pendingLiveTranscriptTurns = Object.values(pendingLiveTranscript).filter(Boolean) as LiveTranscriptTurn[];
+    const hasLiveTranscript = showTranscript && (liveTranscriptTurns.length > 0 || pendingLiveTranscriptTurns.length > 0);
 
     const copyDiagnostics = async () => {
         const version = import.meta.env.VITE_APP_VERSION || 'unknown';
@@ -2185,6 +2256,39 @@ Provide only the answer, nothing else.`;
                                     onCopyDiagnostics={copyDiagnostics}
                                 />
                             ) : null}
+
+                            {hasLiveTranscript && (
+                                <div className={`mx-4 mt-2 mb-1 rounded-[12px] border no-drag overflow-hidden ${subtleSurfaceClass}`} style={appearance.subtleStyle}>
+                                    <div className="flex items-center justify-between gap-3 px-3.5 pt-2.5 pb-1.5">
+                                        <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wide overlay-text-muted">
+                                            <Mic className="w-3 h-3" />
+                                            Live transcript
+                                        </div>
+                                        <div className="flex items-center gap-1.5 text-[10px] overlay-text-muted">
+                                            {(pendingLiveTranscript.user || pendingLiveTranscript.interviewer) && (
+                                                <>
+                                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                                    <span>Listening</span>
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div className="max-h-[132px] overflow-y-auto px-3.5 pb-3 space-y-2" style={{ scrollbarWidth: 'none' }}>
+                                        {[...liveTranscriptTurns, ...pendingLiveTranscriptTurns].map((turn) => (
+                                            <div key={turn.id} className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 text-[12px] leading-snug">
+                                                <div className={`font-semibold ${turn.speaker === 'user' ? 'text-emerald-400' : 'overlay-text-muted'}`}>
+                                                    {turn.speaker === 'user' ? 'Me' : 'Speaker'}
+                                                </div>
+                                                <div className={`min-w-0 ${turn.final ? 'overlay-text-primary' : 'overlay-text-muted italic'}`}>
+                                                    {turn.text}
+                                                    {!turn.final && <span className="inline-block ml-1 w-1 h-1 rounded-full bg-emerald-400 align-middle animate-pulse" />}
+                                                </div>
+                                            </div>
+                                        ))}
+                                        <div ref={liveTranscriptEndRef} />
+                                    </div>
+                                </div>
+                            )}
 
                             {copilotSuggestion?.suggestion && (
                                 <div className={`mx-4 mt-3 mb-1 px-3.5 py-3 rounded-[12px] border no-drag ${subtleSurfaceClass}`} style={appearance.subtleStyle}>

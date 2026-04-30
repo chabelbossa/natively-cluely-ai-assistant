@@ -242,6 +242,13 @@ interface ProviderSelectProps {
     onChange: (value: string) => void;
 }
 
+type LocalSttMode = 'server' | 'whisper_cpp';
+
+const DEFAULT_LOCAL_STT_ENDPOINT = 'http://127.0.0.1:8000/v1/audio/transcriptions';
+const DEFAULT_LOCAL_STT_MODEL = 'whisper-large-v3-turbo';
+const DEFAULT_WHISPER_CPP_EXECUTABLE_PATH = '/opt/homebrew/bin/whisper-cli';
+const DEFAULT_VOICEINK_WHISPER_MODEL_PATH = '/Users/user/Library/Application Support/com.prakashjoshipax.VoiceInk/WhisperModels/ggml-large-v3-turbo-q5_0.bin';
+
 const ProviderSelect: React.FC<ProviderSelectProps> = ({ value, options, onChange }) => {
     const isLight = useResolvedTheme() === 'light';
     const [isOpen, setIsOpen] = useState(false);
@@ -854,8 +861,11 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
     // STT Provider settings
     const [sttProvider, setSttProvider] = useState<'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local'>('none');
     const [groqSttModel, setGroqSttModel] = useState('whisper-large-v3-turbo');
-    const [localSttEndpoint, setLocalSttEndpoint] = useState('http://127.0.0.1:8000/v1/audio/transcriptions');
-    const [localSttModel, setLocalSttModel] = useState('whisper-large-v3-turbo');
+    const [localSttMode, setLocalSttMode] = useState<LocalSttMode>('whisper_cpp');
+    const [localSttEndpoint, setLocalSttEndpoint] = useState(DEFAULT_LOCAL_STT_ENDPOINT);
+    const [localSttModel, setLocalSttModel] = useState(DEFAULT_LOCAL_STT_MODEL);
+    const [localSttWhisperCppModelPath, setLocalSttWhisperCppModelPath] = useState(DEFAULT_VOICEINK_WHISPER_MODEL_PATH);
+    const [localSttWhisperCppExecutablePath, setLocalSttWhisperCppExecutablePath] = useState(DEFAULT_WHISPER_CPP_EXECUTABLE_PATH);
     const [sttGroqKey, setSttGroqKey] = useState('');
     const [sttOpenaiKey, setSttOpenaiKey] = useState('');
     const [sttDeepgramKey, setSttDeepgramKey] = useState('');
@@ -902,8 +912,11 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                 if (creds) {
                     setSttProvider(creds.sttProvider || 'none');
                     if (creds.groqSttModel) setGroqSttModel(creds.groqSttModel);
+                    if (creds.localSttMode) setLocalSttMode(creds.localSttMode);
                     if (creds.localSttEndpoint) setLocalSttEndpoint(creds.localSttEndpoint);
                     if (creds.localSttModel) setLocalSttModel(creds.localSttModel);
+                    if (creds.localSttWhisperCppModelPath) setLocalSttWhisperCppModelPath(creds.localSttWhisperCppModelPath);
+                    if (creds.localSttWhisperCppExecutablePath) setLocalSttWhisperCppExecutablePath(creds.localSttWhisperCppExecutablePath);
                     setGoogleServiceAccountPath(creds.googleServiceAccountPath);
                     setHasStoredSttGroqKey(creds.hasSttGroqKey);
                     setHasStoredSttOpenaiKey(creds.hasSttOpenaiKey);
@@ -943,8 +956,11 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                     if (!creds) return;
                     setSttProvider(creds.sttProvider || 'none');
                     if (creds.groqSttModel) setGroqSttModel(creds.groqSttModel);
+                    if (creds.localSttMode) setLocalSttMode(creds.localSttMode);
                     if (creds.localSttEndpoint) setLocalSttEndpoint(creds.localSttEndpoint);
                     if (creds.localSttModel) setLocalSttModel(creds.localSttModel);
+                    if (creds.localSttWhisperCppModelPath) setLocalSttWhisperCppModelPath(creds.localSttWhisperCppModelPath);
+                    if (creds.localSttWhisperCppExecutablePath) setLocalSttWhisperCppExecutablePath(creds.localSttWhisperCppExecutablePath);
                     setHasNativelyKey(creds.hasNativelyKey || false);
                     setHasStoredSttGroqKey(creds.hasSttGroqKey);
                     setHasStoredSttOpenaiKey(creds.hasSttOpenaiKey);
@@ -972,16 +988,21 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
         }
     };
 
+    const buildLocalSttConfig = () => ({
+        mode: localSttMode,
+        endpoint: localSttEndpoint.trim(),
+        model: localSttModel.trim(),
+        whisperCppModelPath: localSttWhisperCppModelPath.trim(),
+        whisperCppExecutablePath: localSttWhisperCppExecutablePath.trim(),
+    });
+
     const handleLocalSttConfigSave = async () => {
         setSttSaving(true);
         setSttTestStatus('idle');
         setSttTestError('');
 
         try {
-            const result = await window.electronAPI?.setLocalSttConfig?.({
-                endpoint: localSttEndpoint.trim(),
-                model: localSttModel.trim(),
-            });
+            const result = await window.electronAPI?.setLocalSttConfig?.(buildLocalSttConfig());
 
             if (!result?.success) {
                 setSttTestStatus('error');
@@ -1131,10 +1152,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             setSttTestStatus('testing');
             setSttTestError('');
             try {
-                const result = await window.electronAPI?.testLocalSttConnection?.({
-                    endpoint: localSttEndpoint.trim(),
-                    model: localSttModel.trim(),
-                });
+                const result = await window.electronAPI?.testLocalSttConnection?.(buildLocalSttConfig());
                 if (result?.success) {
                     setSttTestStatus('success');
                     setTimeout(() => setSttTestStatus('idle'), 3000);
@@ -1324,6 +1342,10 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
             });
         }
     }, [isOpen, activeTab, selectedInput]);
+
+    const isLocalSttConfigReady = localSttMode === 'whisper_cpp'
+        ? Boolean(localSttWhisperCppModelPath.trim() && localSttWhisperCppExecutablePath.trim())
+        : Boolean(localSttEndpoint.trim());
 
     return (
         <AnimatePresence>
@@ -3003,7 +3025,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         onChange={(val) => handleSttProviderChange(val as any)}
                                                         options={[
                                                             ...(hasNativelyKey ? [{ id: 'natively', label: 'Natively API', badge: 'Saved' as const, recommended: true, desc: 'Managed transcription via Natively backend', color: 'blue', icon: <Mic size={14} /> }] : []),
-                                                            { id: 'local', label: 'Local STT', badge: localSttEndpoint ? 'Ready' : null, recommended: true, desc: 'Local Whisper, Parakeet, or OpenAI-compatible endpoint', color: 'green', icon: <Mic size={14} /> },
+                                                            { id: 'local', label: 'Local STT', badge: isLocalSttConfigReady ? (localSttMode === 'whisper_cpp' ? 'Local file' : 'Endpoint') : null, recommended: true, desc: 'VoiceInk whisper.cpp model or OpenAI-compatible endpoint', color: 'green', icon: <Mic size={14} /> },
                                                             { id: 'google', label: 'Google Cloud', badge: googleServiceAccountPath ? 'Saved' : null, recommended: true, desc: 'gRPC streaming via Service Account', color: 'blue', icon: <Mic size={14} /> },
                                                             { id: 'groq', label: 'Groq Whisper', badge: hasStoredSttGroqKey ? 'Saved' : null, recommended: true, desc: 'Ultra-fast REST transcription', color: 'orange', icon: <Mic size={14} /> },
                                                             { id: 'openai', label: 'OpenAI Whisper', badge: hasStoredSttOpenaiKey ? 'Saved' : null, desc: 'OpenAI-compatible Whisper API', color: 'green', icon: <Mic size={14} /> },
@@ -3051,36 +3073,102 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                 </div>
                                             )}
 
-                                            {/* Local STT Endpoint */}
+                                            {/* Local STT */}
                                             {sttProvider === 'local' && (
                                                 <div className="bg-bg-card rounded-xl border border-border-subtle p-4 space-y-3">
                                                     <div>
-                                                        <label className="text-xs font-medium text-text-secondary mb-2 block">Local Endpoint</label>
-                                                        <input
-                                                            type="text"
-                                                            value={localSttEndpoint}
-                                                            onChange={(e) => setLocalSttEndpoint(e.target.value)}
-                                                            placeholder="http://127.0.0.1:8000/v1/audio/transcriptions"
-                                                            className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary transition-colors"
-                                                        />
-                                                        <p className="text-[10px] text-text-tertiary mt-1.5">
-                                                            Use an OpenAI-compatible local transcription endpoint. If you enter only a host, Natively will use /v1/audio/transcriptions.
-                                                        </p>
+                                                        <label className="text-xs font-medium text-text-secondary mb-2 block">Local Mode</label>
+                                                        <div className="grid grid-cols-2 gap-2">
+                                                            {[
+                                                                {
+                                                                    id: 'whisper_cpp' as const,
+                                                                    label: 'Whisper.cpp file',
+                                                                    desc: 'Uses your VoiceInk .bin model',
+                                                                    icon: <Terminal size={13} />,
+                                                                },
+                                                                {
+                                                                    id: 'server' as const,
+                                                                    label: 'HTTP endpoint',
+                                                                    desc: 'Uses an OpenAI-compatible server',
+                                                                    icon: <Globe size={13} />,
+                                                                },
+                                                            ].map((mode) => (
+                                                                <button
+                                                                    key={mode.id}
+                                                                    onClick={() => {
+                                                                        setLocalSttMode(mode.id);
+                                                                        setSttTestStatus('idle');
+                                                                        setSttTestError('');
+                                                                    }}
+                                                                    className={`rounded-lg px-3 py-2.5 text-left transition-all duration-200 ease-in-out active:scale-[0.98] ${localSttMode === mode.id
+                                                                        ? 'bg-green-600 text-white shadow-md'
+                                                                        : 'bg-bg-input hover:bg-bg-elevated text-text-primary'
+                                                                        }`}
+                                                                >
+                                                                    <span className="text-sm font-medium flex items-center gap-2">{mode.icon}{mode.label}</span>
+                                                                    <span className={`text-[11px] block mt-1 ${localSttMode === mode.id ? 'text-white/70' : 'text-text-tertiary'}`}>{mode.desc}</span>
+                                                                </button>
+                                                            ))}
+                                                        </div>
                                                     </div>
-                                                    <div>
-                                                        <label className="text-xs font-medium text-text-secondary mb-2 block">Model</label>
-                                                        <input
-                                                            type="text"
-                                                            value={localSttModel}
-                                                            onChange={(e) => setLocalSttModel(e.target.value)}
-                                                            placeholder="whisper-large-v3-turbo, whisper-large-v3, parakeet-v3"
-                                                            className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary transition-colors"
-                                                        />
-                                                    </div>
+
+                                                    {localSttMode === 'whisper_cpp' ? (
+                                                        <>
+                                                            <div>
+                                                                <label className="text-xs font-medium text-text-secondary mb-2 block">Whisper.cpp Model File</label>
+                                                                <input
+                                                                    type="text"
+                                                                    value={localSttWhisperCppModelPath}
+                                                                    onChange={(e) => setLocalSttWhisperCppModelPath(e.target.value)}
+                                                                    placeholder="/Users/user/Library/Application Support/.../ggml-large-v3-turbo-q5_0.bin"
+                                                                    className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary transition-colors"
+                                                                />
+                                                                <p className="text-[10px] text-text-tertiary mt-1.5">
+                                                                    Detected from VoiceInk. This reuses the downloaded ggml .bin model instead of downloading another copy.
+                                                                </p>
+                                                            </div>
+                                                            <div>
+                                                                <label className="text-xs font-medium text-text-secondary mb-2 block">Whisper.cpp Executable</label>
+                                                                <input
+                                                                    type="text"
+                                                                    value={localSttWhisperCppExecutablePath}
+                                                                    onChange={(e) => setLocalSttWhisperCppExecutablePath(e.target.value)}
+                                                                    placeholder="/opt/homebrew/bin/whisper-cli"
+                                                                    className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary transition-colors"
+                                                                />
+                                                            </div>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <div>
+                                                                <label className="text-xs font-medium text-text-secondary mb-2 block">Local Endpoint</label>
+                                                                <input
+                                                                    type="text"
+                                                                    value={localSttEndpoint}
+                                                                    onChange={(e) => setLocalSttEndpoint(e.target.value)}
+                                                                    placeholder={DEFAULT_LOCAL_STT_ENDPOINT}
+                                                                    className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary transition-colors"
+                                                                />
+                                                                <p className="text-[10px] text-text-tertiary mt-1.5">
+                                                                    Use an OpenAI-compatible local transcription endpoint. If you enter only a host, Natively will use /v1/audio/transcriptions.
+                                                                </p>
+                                                            </div>
+                                                            <div>
+                                                                <label className="text-xs font-medium text-text-secondary mb-2 block">Model</label>
+                                                                <input
+                                                                    type="text"
+                                                                    value={localSttModel}
+                                                                    onChange={(e) => setLocalSttModel(e.target.value)}
+                                                                    placeholder="whisper-large-v3-turbo, whisper-large-v3, parakeet-v3"
+                                                                    className="w-full bg-bg-input border border-border-subtle rounded-lg px-3 py-2 text-sm text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent-primary transition-colors"
+                                                                />
+                                                            </div>
+                                                        </>
+                                                    )}
                                                     <div className="flex items-center gap-3">
                                                         <button
                                                             onClick={handleLocalSttConfigSave}
-                                                            disabled={sttSaving || !localSttEndpoint.trim()}
+                                                            disabled={sttSaving || !isLocalSttConfigReady}
                                                             className={`px-5 py-2.5 rounded-lg text-xs font-medium transition-colors ${sttSaved
                                                                 ? 'bg-green-500/20 text-green-400'
                                                                 : 'bg-bg-input hover:bg-bg-input/80 border border-border-subtle text-text-primary disabled:opacity-50'
@@ -3090,7 +3178,7 @@ const SettingsOverlay: React.FC<SettingsOverlayProps> = ({ isOpen, onClose, init
                                                         </button>
                                                         <button
                                                             onClick={handleTestSttConnection}
-                                                            disabled={sttTestStatus === 'testing' || !localSttEndpoint.trim()}
+                                                            disabled={sttTestStatus === 'testing' || !isLocalSttConfigReady}
                                                             className="text-xs bg-bg-input hover:bg-bg-elevated text-text-primary px-3 py-2.5 rounded-lg transition-colors flex items-center gap-2 disabled:opacity-50"
                                                         >
                                                             {sttTestStatus === 'testing' ? (

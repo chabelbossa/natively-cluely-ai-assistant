@@ -891,10 +891,9 @@ export class AppState {
         stt = new GoogleSTT(speaker);
       }
     } else if (sttProvider === 'local') {
-      const endpoint = CredentialsManager.getInstance().getLocalSttEndpoint();
-      const model = CredentialsManager.getInstance().getLocalSttModel();
-      console.log(`[Main] Using LocalSTT for ${speaker}: ${endpoint} (${model})`);
-      stt = new LocalSTT(endpoint, model);
+      const config = CredentialsManager.getInstance().getLocalSttConfig();
+      console.log(`[Main] Using LocalSTT for ${speaker}: ${config.mode}`);
+      stt = new LocalSTT(config);
     } else if (sttProvider === 'groq' || sttProvider === 'azure' || sttProvider === 'ibmwatson') {
       let apiKey: string | undefined;
       let region: string | undefined;

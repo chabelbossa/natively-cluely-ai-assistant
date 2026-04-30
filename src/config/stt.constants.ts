@@ -126,7 +126,7 @@ export const STT_PROVIDERS: Record<SttProviderId, SttProviderConfig> = {
     local: {
         id: 'local',
         name: 'Local STT',
-        description: 'Local OpenAI-compatible transcription endpoint',
+        description: 'Local whisper.cpp model file or OpenAI-compatible endpoint',
         endpoint: 'http://127.0.0.1:8000/v1/audio/transcriptions',
         model: 'whisper-large-v3-turbo',
         uploadType: 'multipart',

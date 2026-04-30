@@ -1403,6 +1403,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const creds = CredentialsManager.getInstance().getAllCredentials();
+      const localSttConfig = CredentialsManager.getInstance().getLocalSttConfig();
 
       // Return masked versions for security (just indicate if set)
       const hasKey = (key?: string) => !!(key && key.trim().length > 0);
@@ -1416,8 +1417,11 @@ export function initializeIpcHandlers(appState: AppState): void {
         googleServiceAccountPath: creds.googleServiceAccountPath || null,
         sttProvider: creds.sttProvider || 'none',
         groqSttModel: creds.groqSttModel || 'whisper-large-v3-turbo',
-        localSttEndpoint: creds.localSttEndpoint || 'http://127.0.0.1:8000/v1/audio/transcriptions',
-        localSttModel: creds.localSttModel || 'whisper-large-v3-turbo',
+        localSttMode: localSttConfig.mode,
+        localSttEndpoint: localSttConfig.endpoint,
+        localSttModel: localSttConfig.model,
+        localSttWhisperCppModelPath: localSttConfig.whisperCppModelPath,
+        localSttWhisperCppExecutablePath: localSttConfig.whisperCppExecutablePath,
         hasSttGroqKey: hasKey(creds.groqSttApiKey),
         hasSttOpenaiKey: hasKey(creds.openAiSttApiKey),
         hasDeepgramKey: hasKey(creds.deepgramApiKey),
@@ -1445,7 +1449,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         claudePreferredModel: creds.claudePreferredModel || undefined,
       };
     } catch (error: any) {
-      return { hasGeminiKey: false, hasGroqKey: false, hasOpenaiKey: false, hasClaudeKey: false, hasNativelyKey: false, googleServiceAccountPath: null, sttProvider: 'none', groqSttModel: 'whisper-large-v3-turbo', localSttEndpoint: 'http://127.0.0.1:8000/v1/audio/transcriptions', localSttModel: 'whisper-large-v3-turbo', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasTavilyKey: false, sttGroqKey: '', sttOpenaiKey: '', sttDeepgramKey: '', sttElevenLabsKey: '', sttAzureKey: '', sttIbmKey: '', sttSonioxKey: '' };
+      return { hasGeminiKey: false, hasGroqKey: false, hasOpenaiKey: false, hasClaudeKey: false, hasNativelyKey: false, googleServiceAccountPath: null, sttProvider: 'none', groqSttModel: 'whisper-large-v3-turbo', localSttMode: 'whisper_cpp', localSttEndpoint: 'http://127.0.0.1:8000/v1/audio/transcriptions', localSttModel: 'whisper-large-v3-turbo', localSttWhisperCppModelPath: path.join(app.getPath('home'), 'Library/Application Support/com.prakashjoshipax.VoiceInk/WhisperModels/ggml-large-v3-turbo-q5_0.bin'), localSttWhisperCppExecutablePath: '/opt/homebrew/bin/whisper-cli', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasTavilyKey: false, sttGroqKey: '', sttOpenaiKey: '', sttDeepgramKey: '', sttElevenLabsKey: '', sttAzureKey: '', sttIbmKey: '', sttSonioxKey: '' };
     }
   });
 
@@ -1579,10 +1583,10 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle("set-local-stt-config", async (_, config: { endpoint?: string; model?: string }) => {
+  safeHandle("set-local-stt-config", async (_, config: { mode?: 'server' | 'whisper_cpp'; endpoint?: string; model?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
-      CredentialsManager.getInstance().setLocalSttConfig(config?.endpoint || '', config?.model || '');
+      CredentialsManager.getInstance().setLocalSttConfig(config || {});
 
       await appState.reconfigureSttProvider();
 
@@ -1683,15 +1687,11 @@ export function initializeIpcHandlers(appState: AppState): void {
     return msg.replace(/:\s*[a-zA-Z0-9*]+\*+[a-zA-Z0-9*]+\.?$/g, '').trim();
   };
 
-  safeHandle("test-local-stt-connection", async (_, config: { endpoint?: string; model?: string }) => {
+  safeHandle("test-local-stt-connection", async (_, config: { mode?: 'server' | 'whisper_cpp'; endpoint?: string; model?: string; whisperCppModelPath?: string; whisperCppExecutablePath?: string }) => {
     console.log(`[IPC] Received test-local-stt-connection request`);
     try {
-      const axios = require('axios');
-      const FormData = require('form-data');
       const { LocalSTT, DEFAULT_LOCAL_STT_MODEL } = require('./audio/LocalSTT');
-
-      const endpoint = LocalSTT.normalizeEndpoint(config?.endpoint);
-      const model = (config?.model || DEFAULT_LOCAL_STT_MODEL).trim();
+      const localConfig = LocalSTT.normalizeConfig(config || {});
 
       const numSamples = 8000;
       const pcmData = Buffer.alloc(numSamples * 2);
@@ -1710,6 +1710,42 @@ export function initializeIpcHandlers(appState: AppState): void {
       wavHeader.write('data', 36);
       wavHeader.writeUInt32LE(pcmData.length, 40);
       const testWav = Buffer.concat([wavHeader, pcmData]);
+
+      if (localConfig.mode === 'whisper_cpp') {
+        if (!LocalSTT.isExecutableFile(localConfig.whisperCppExecutablePath)) {
+          return { success: false, error: `whisper-cli not found: ${localConfig.whisperCppExecutablePath || '(empty)'}` };
+        }
+        if (!LocalSTT.isReadableFile(localConfig.whisperCppModelPath)) {
+          return { success: false, error: `Whisper model not found: ${localConfig.whisperCppModelPath || '(empty)'}` };
+        }
+
+        const fs = require('fs');
+        const os = require('os');
+        const path = require('path');
+        const { execFile } = require('child_process');
+        const tempPath = path.join(os.tmpdir(), `natively-local-stt-test-${Date.now()}.wav`);
+        fs.writeFileSync(tempPath, testWav);
+
+        try {
+          await new Promise<void>((resolve, reject) => {
+            execFile(
+              localConfig.whisperCppExecutablePath,
+              ['-m', localConfig.whisperCppModelPath, '-f', tempPath, '-nt', '-np', '-sns', '-l', 'auto'],
+              { timeout: 60000, maxBuffer: 1024 * 1024 },
+              (error: Error | null) => error ? reject(error) : resolve()
+            );
+          });
+        } finally {
+          fs.rmSync(tempPath, { force: true });
+        }
+
+        return { success: true };
+      }
+
+      const axios = require('axios');
+      const FormData = require('form-data');
+      const endpoint = localConfig.endpoint;
+      const model = (localConfig.model || DEFAULT_LOCAL_STT_MODEL).trim();
 
       const form = new FormData();
       form.append('file', testWav, { filename: 'test.wav', contentType: 'audio/wav' });
