@@ -81,6 +81,8 @@ export const AIProvidersSettings: React.FC = () => {
     // --- Standard Providers ---
     const [apiKey, setApiKey] = useState('');
     const [groqApiKey, setGroqApiKey] = useState('');
+    const [deepInfraApiKey, setDeepInfraApiKey] = useState('');
+    const [openCodeGoApiKey, setOpenCodeGoApiKey] = useState('');
     const [openaiApiKey, setOpenaiApiKey] = useState('');
     const [claudeApiKey, setClaudeApiKey] = useState('');
 
@@ -130,6 +132,8 @@ export const AIProvidersSettings: React.FC = () => {
                     setHasStoredKey({
                         gemini: creds.hasGeminiKey,
                         groq: creds.hasGroqKey,
+                        deepinfra: !!creds.hasDeepInfraKey,
+                        opencode_go: !!creds.hasOpenCodeGoKey,
                         openai: creds.hasOpenaiKey,
                         claude: creds.hasClaudeKey,
                         natively: creds.hasNativelyKey || false
@@ -138,6 +142,8 @@ export const AIProvidersSettings: React.FC = () => {
                     const pm: Record<string, string> = {};
                     if (creds.geminiPreferredModel) pm.gemini = creds.geminiPreferredModel;
                     if (creds.groqPreferredModel) pm.groq = creds.groqPreferredModel;
+                    if (creds.deepinfraPreferredModel) pm.deepinfra = creds.deepinfraPreferredModel;
+                    if (creds.openCodeGoPreferredModel) pm.opencode_go = creds.openCodeGoPreferredModel;
                     if (creds.openaiPreferredModel) pm.openai = creds.openaiPreferredModel;
                     if (creds.claudePreferredModel) pm.claude = creds.claudePreferredModel;
                     setPreferredModels(pm);
@@ -281,6 +287,10 @@ export const AIProvidersSettings: React.FC = () => {
             // @ts-ignore
             if (provider === 'groq') result = await window.electronAPI.setGroqApiKey(key);
             // @ts-ignore
+            if (provider === 'deepinfra') result = await window.electronAPI.setDeepInfraApiKey(key);
+            // @ts-ignore
+            if (provider === 'opencode_go') result = await window.electronAPI.setOpenCodeGoApiKey(key);
+            // @ts-ignore
             if (provider === 'openai') result = await window.electronAPI.setOpenaiApiKey(key);
             // @ts-ignore
             if (provider === 'claude') result = await window.electronAPI.setClaudeApiKey(key);
@@ -306,6 +316,10 @@ export const AIProvidersSettings: React.FC = () => {
             if (provider === 'gemini') result = await window.electronAPI.setGeminiApiKey('');
             // @ts-ignore
             if (provider === 'groq') result = await window.electronAPI.setGroqApiKey('');
+            // @ts-ignore
+            if (provider === 'deepinfra') result = await window.electronAPI.setDeepInfraApiKey('');
+            // @ts-ignore
+            if (provider === 'opencode_go') result = await window.electronAPI.setOpenCodeGoApiKey('');
             // @ts-ignore
             if (provider === 'openai') result = await window.electronAPI.setOpenaiApiKey('');
             // @ts-ignore
@@ -348,6 +362,8 @@ export const AIProvidersSettings: React.FC = () => {
         const urls: Record<string, string> = {
             gemini: 'https://aistudio.google.com/app/apikey',
             groq: 'https://console.groq.com/keys',
+            deepinfra: 'https://deepinfra.com/dash/api_keys',
+            opencode_go: 'https://opencode.ai/docs/go/',
             openai: 'https://platform.openai.com/api-keys',
             claude: 'https://console.anthropic.com/settings/keys'
         };
@@ -556,6 +572,46 @@ export const AIProvidersSettings: React.FC = () => {
                         keyPlaceholder="gsk_..."
                         keyUrl="https://console.groq.com/keys"
                         onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, groq: model }))}
+                    />
+
+                    {/* DeepInfra */}
+                    <ProviderCard
+                        providerId="deepinfra"
+                        providerName="DeepInfra"
+                        apiKey={deepInfraApiKey}
+                        preferredModel={preferredModels.deepinfra}
+                        hasStoredKey={!!hasStoredKey.deepinfra}
+                        onKeyChange={setDeepInfraApiKey}
+                        onSaveKey={async () => { await handleSaveKey('deepinfra', deepInfraApiKey, setDeepInfraApiKey); }}
+                        onRemoveKey={() => handleRemoveKey('deepinfra', setDeepInfraApiKey)}
+                        onTestConnection={() => handleTestConnection('deepinfra', deepInfraApiKey)}
+                        testStatus={testStatus.deepinfra || 'idle'}
+                        testError={testError.deepinfra}
+                        savingStatus={!!savingStatus.deepinfra}
+                        savedStatus={!!savedStatus.deepinfra}
+                        keyPlaceholder="DeepInfra API key"
+                        keyUrl="https://deepinfra.com/dash/api_keys"
+                        onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, deepinfra: model }))}
+                    />
+
+                    {/* OpenCode Go */}
+                    <ProviderCard
+                        providerId="opencode_go"
+                        providerName="OpenCode Go"
+                        apiKey={openCodeGoApiKey}
+                        preferredModel={preferredModels.opencode_go}
+                        hasStoredKey={!!hasStoredKey.opencode_go}
+                        onKeyChange={setOpenCodeGoApiKey}
+                        onSaveKey={async () => { await handleSaveKey('opencode_go', openCodeGoApiKey, setOpenCodeGoApiKey); }}
+                        onRemoveKey={() => handleRemoveKey('opencode_go', setOpenCodeGoApiKey)}
+                        onTestConnection={() => handleTestConnection('opencode_go', openCodeGoApiKey)}
+                        testStatus={testStatus.opencode_go || 'idle'}
+                        testError={testError.opencode_go}
+                        savingStatus={!!savingStatus.opencode_go}
+                        savedStatus={!!savedStatus.opencode_go}
+                        keyPlaceholder="OpenCode Go API key"
+                        keyUrl="https://opencode.ai/docs/go/"
+                        onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, opencode_go: model }))}
                     />
 
                     {/* OpenAI */}

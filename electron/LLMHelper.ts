@@ -29,11 +29,25 @@ interface OllamaResponse {
 // Model constant for Gemini 3 Flash
 const GEMINI_FLASH_MODEL = "gemini-3.1-flash-lite-preview"
 const GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
-const GROQ_MODEL = "llama-3.3-70b-versatile"
+const GROQ_MODEL = "llama-3.1-8b-instant"
 const OPENAI_MODEL = "gpt-5.4"
 const CLAUDE_MODEL = "claude-sonnet-4-6"
+const DEEPINFRA_MODEL = "deepinfra:stepfun-ai/Step-3.5-Flash"
+const OPENCODE_GO_MODEL = "opencode-go/deepseek-v4-flash"
+const DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
+const OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 const MAX_OUTPUT_TOKENS = 65536
 const CLAUDE_MAX_OUTPUT_TOKENS = 64000
+
+type RotatingLlmProvider = 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude';
+
+const parseApiKeyList = (value?: string | null): string[] => {
+  if (!value) return [];
+  return value
+    .split(/[\s,;]+/)
+    .map(key => key.trim())
+    .filter(Boolean);
+};
 
 // Simple prompt for image analysis (not interview copilot - kept separate)
 const IMAGE_ANALYSIS_PROMPT = `Analyze concisely. Be direct. No markdown formatting. Return plain text only.`
@@ -41,12 +55,24 @@ const IMAGE_ANALYSIS_PROMPT = `Analyze concisely. Be direct. No markdown formatt
 export class LLMHelper {
   private client: GoogleGenAI | null = null
   private groqClient: Groq | null = null
+  private deepInfraClient: OpenAI | null = null
+  private openCodeGoClient: OpenAI | null = null
   private openaiClient: OpenAI | null = null
   private claudeClient: Anthropic | null = null
   private apiKey: string | null = null
   private groqApiKey: string | null = null
+  private deepInfraApiKey: string | null = null
+  private openCodeGoApiKey: string | null = null
   private openaiApiKey: string | null = null
   private claudeApiKey: string | null = null
+  private providerKeyRings: Record<RotatingLlmProvider, { keys: string[]; index: number }> = {
+    gemini: { keys: [], index: 0 },
+    groq: { keys: [], index: 0 },
+    deepinfra: { keys: [], index: 0 },
+    opencode_go: { keys: [], index: 0 },
+    openai: { keys: [], index: 0 },
+    claude: { keys: [], index: 0 },
+  };
   private useOllama: boolean = false
   private ollamaModel: string = "llama3.2"
   private ollamaUrl: string = "http://localhost:11434"
@@ -67,7 +93,7 @@ export class LLMHelper {
   // Self-improving model version manager for vision analysis
   private modelVersionManager: ModelVersionManager;
 
-  constructor(apiKey?: string, useOllama: boolean = false, ollamaModel?: string, ollamaUrl?: string, groqApiKey?: string, openaiApiKey?: string, claudeApiKey?: string) {
+  constructor(apiKey?: string, useOllama: boolean = false, ollamaModel?: string, ollamaUrl?: string, groqApiKey?: string, openaiApiKey?: string, claudeApiKey?: string, deepInfraApiKey?: string, openCodeGoApiKey?: string) {
     this.useOllama = useOllama
 
     // Initialize rate limiters
@@ -78,22 +104,29 @@ export class LLMHelper {
 
     // Initialize Groq client if API key provided
     if (groqApiKey) {
-      this.groqApiKey = groqApiKey
-      this.groqClient = new Groq({ apiKey: groqApiKey })
+      this.configureProviderKeys('groq', groqApiKey)
       console.log(`[LLMHelper] Groq client initialized with model: ${GROQ_MODEL}`)
+    }
+
+    if (deepInfraApiKey) {
+      this.configureProviderKeys('deepinfra', deepInfraApiKey)
+      console.log(`[LLMHelper] DeepInfra client initialized with model: ${DEEPINFRA_MODEL}`)
+    }
+
+    if (openCodeGoApiKey) {
+      this.configureProviderKeys('opencode_go', openCodeGoApiKey)
+      console.log(`[LLMHelper] OpenCode Go client initialized with model: ${OPENCODE_GO_MODEL}`)
     }
 
     // Initialize OpenAI client if API key provided
     if (openaiApiKey) {
-      this.openaiApiKey = openaiApiKey
-      this.openaiClient = new OpenAI({ apiKey: openaiApiKey })
+      this.configureProviderKeys('openai', openaiApiKey)
       console.log(`[LLMHelper] OpenAI client initialized with model: ${OPENAI_MODEL}`)
     }
 
     // Initialize Claude client if API key provided
     if (claudeApiKey) {
-      this.claudeApiKey = claudeApiKey
-      this.claudeClient = new Anthropic({ apiKey: claudeApiKey })
+      this.configureProviderKeys('claude', claudeApiKey)
       console.log(`[LLMHelper] Claude client initialized with model: ${CLAUDE_MODEL}`)
     }
 
@@ -105,42 +138,135 @@ export class LLMHelper {
       // Auto-detect and use first available model if specified model doesn't exist
       this.initializeOllamaModel()
     } else if (apiKey) {
-      this.apiKey = apiKey
-      // Initialize with v1alpha API version for Gemini 3 support
-      this.client = new GoogleGenAI({
-        apiKey: apiKey,
-        httpOptions: { apiVersion: "v1alpha" }
-      })
+      this.configureProviderKeys('gemini', apiKey)
       // console.log(`[LLMHelper] Using Google Gemini 3 with model: ${this.geminiModel} (v1alpha API)`)
     } else {
       console.warn("[LLMHelper] No API key provided. Client will be uninitialized until key is set.")
     }
   }
 
+  private getActiveProviderKey(provider: RotatingLlmProvider): string | null {
+    const ring = this.providerKeyRings[provider];
+    return ring.keys[ring.index] || null;
+  }
+
+  private applyActiveProviderKey(provider: RotatingLlmProvider): void {
+    const key = this.getActiveProviderKey(provider);
+    switch (provider) {
+      case 'gemini':
+        this.apiKey = key;
+        this.client = key ? new GoogleGenAI({ apiKey: key, httpOptions: { apiVersion: "v1alpha" } }) : null;
+        break;
+      case 'groq':
+        this.groqApiKey = key;
+        this.groqClient = key ? new Groq({ apiKey: key }) : null;
+        break;
+      case 'deepinfra':
+        this.deepInfraApiKey = key;
+        this.deepInfraClient = key ? new OpenAI({ apiKey: key, baseURL: DEEPINFRA_BASE_URL }) : null;
+        break;
+      case 'opencode_go':
+        this.openCodeGoApiKey = key;
+        this.openCodeGoClient = key ? new OpenAI({ apiKey: key, baseURL: OPENCODE_GO_BASE_URL }) : null;
+        break;
+      case 'openai':
+        this.openaiApiKey = key;
+        this.openaiClient = key ? new OpenAI({ apiKey: key }) : null;
+        break;
+      case 'claude':
+        this.claudeApiKey = key;
+        this.claudeClient = key ? new Anthropic({ apiKey: key }) : null;
+        break;
+    }
+  }
+
+  private configureProviderKeys(provider: RotatingLlmProvider, keysText?: string | null): void {
+    const keys = parseApiKeyList(keysText);
+    this.providerKeyRings[provider] = { keys, index: 0 };
+    this.applyActiveProviderKey(provider);
+  }
+
+  private rotateProviderKey(provider: RotatingLlmProvider, reason?: string): boolean {
+    const ring = this.providerKeyRings[provider];
+    if (!ring || ring.keys.length <= 1) return false;
+
+    ring.index = (ring.index + 1) % ring.keys.length;
+    this.applyActiveProviderKey(provider);
+    console.warn(`[LLMHelper] ${provider} API key rotated to ${ring.index + 1}/${ring.keys.length}${reason ? ` after ${reason}` : ''}`);
+    return true;
+  }
+
+  private shouldRotateProviderKey(error: any): boolean {
+    const status = error?.status ?? error?.statusCode ?? error?.response?.status ?? 0;
+    const data = typeof error?.response?.data === 'string'
+      ? error.response.data
+      : JSON.stringify(error?.response?.data || {});
+    const message = `${error?.message || ''} ${data}`.toLowerCase();
+
+    return status === 401
+      || status === 403
+      || status === 429
+      || status === 500
+      || status === 503
+      || status === 529
+      || message.includes('rate limit')
+      || message.includes('rate_limit')
+      || message.includes('quota')
+      || message.includes('resource_exhausted')
+      || message.includes('overloaded')
+      || message.includes('temporarily unavailable')
+      || message.includes('safety')
+      || message.includes('blocked')
+      || message.includes('policy')
+      || message.includes('prohibited');
+  }
+
+  private async withProviderKeyRotation<T>(provider: RotatingLlmProvider, operation: () => Promise<T>): Promise<T> {
+    const attempts = Math.max(1, this.providerKeyRings[provider]?.keys.length || 0);
+    let lastError: any;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        return await operation();
+      } catch (error: any) {
+        lastError = error;
+        if (!this.shouldRotateProviderKey(error) || !this.rotateProviderKey(provider, error?.status || error?.message?.slice(0, 60))) {
+          throw error;
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
   public setApiKey(apiKey: string) {
-    this.apiKey = apiKey;
-    this.client = new GoogleGenAI({
-      apiKey: apiKey,
-      httpOptions: { apiVersion: "v1alpha" }
-    })
-    console.log("[LLMHelper] Gemini API Key updated.");
+    this.configureProviderKeys('gemini', apiKey);
+    console.log(`[LLMHelper] Gemini API Key updated (${this.providerKeyRings.gemini.keys.length} key${this.providerKeyRings.gemini.keys.length === 1 ? '' : 's'}).`);
   }
 
   public setGroqApiKey(apiKey: string) {
-    this.groqClient = new Groq({ apiKey });
-    console.log("[LLMHelper] Groq API Key updated.");
+    this.configureProviderKeys('groq', apiKey);
+    console.log(`[LLMHelper] Groq API Key updated (${this.providerKeyRings.groq.keys.length} key${this.providerKeyRings.groq.keys.length === 1 ? '' : 's'}).`);
+  }
+
+  public setDeepInfraApiKey(apiKey: string) {
+    this.configureProviderKeys('deepinfra', apiKey);
+    console.log(`[LLMHelper] DeepInfra API Key updated (${this.providerKeyRings.deepinfra.keys.length} key${this.providerKeyRings.deepinfra.keys.length === 1 ? '' : 's'}).`);
+  }
+
+  public setOpenCodeGoApiKey(apiKey: string) {
+    this.configureProviderKeys('opencode_go', apiKey);
+    console.log(`[LLMHelper] OpenCode Go API Key updated (${this.providerKeyRings.opencode_go.keys.length} key${this.providerKeyRings.opencode_go.keys.length === 1 ? '' : 's'}).`);
   }
 
   public setOpenaiApiKey(apiKey: string) {
-    this.openaiApiKey = apiKey;
-    this.openaiClient = new OpenAI({ apiKey });
-    console.log("[LLMHelper] OpenAI API Key updated.");
+    this.configureProviderKeys('openai', apiKey);
+    console.log(`[LLMHelper] OpenAI API Key updated (${this.providerKeyRings.openai.keys.length} key${this.providerKeyRings.openai.keys.length === 1 ? '' : 's'}).`);
   }
 
   public setClaudeApiKey(apiKey: string) {
-    this.claudeApiKey = apiKey;
-    this.claudeClient = new Anthropic({ apiKey });
-    console.log("[LLMHelper] Claude API Key updated.");
+    this.configureProviderKeys('claude', apiKey);
+    console.log(`[LLMHelper] Claude API Key updated (${this.providerKeyRings.claude.keys.length} key${this.providerKeyRings.claude.keys.length === 1 ? '' : 's'}).`);
   }
 
   public setNativelyKey(key: string | null): void {
@@ -175,13 +301,20 @@ export class LLMHelper {
   public scrubKeys(): void {
     this.apiKey = null;
     this.groqApiKey = null;
+    this.deepInfraApiKey = null;
+    this.openCodeGoApiKey = null;
     this.openaiApiKey = null;
     this.claudeApiKey = null;
     this.nativelyKey = null;
     this.client = null;
     this.groqClient = null;
+    this.deepInfraClient = null;
+    this.openCodeGoClient = null;
     this.openaiClient = null;
     this.claudeClient = null;
+    for (const provider of Object.keys(this.providerKeyRings) as RotatingLlmProvider[]) {
+      this.providerKeyRings[provider] = { keys: [], index: 0 };
+    }
     // Destroy rate limiters
     if (this.rateLimiters) {
       Object.values(this.rateLimiters).forEach(rl => rl.destroy());
@@ -217,8 +350,45 @@ export class LLMHelper {
     return modelId.startsWith("llama-") || modelId.startsWith("mixtral-") || modelId.startsWith("gemma-") || modelId.startsWith("meta-llama/") || modelId.startsWith("qwen/") || modelId.startsWith("qwen-");
   }
 
+  private isDeepInfraModel(modelId: string): boolean {
+    return modelId.startsWith("deepinfra:");
+  }
+
+  private isOpenCodeGoModel(modelId: string): boolean {
+    return modelId.startsWith("opencode-go/") || modelId.startsWith("opencode-go:");
+  }
+
   private isGeminiModel(modelId: string): boolean {
     return modelId.startsWith("gemini-") || modelId.startsWith("models/");
+  }
+
+  private resolveOpenAICompatibleRoute(modelId: string = this.currentModelId): { provider: 'DeepInfra' | 'OpenCode Go'; client: OpenAI | null; model: string } | null {
+    if (this.isDeepInfraModel(modelId)) {
+      return {
+        provider: 'DeepInfra',
+        client: this.deepInfraClient,
+        model: modelId.replace(/^deepinfra:/, '') || DEEPINFRA_MODEL.replace(/^deepinfra:/, ''),
+      };
+    }
+    if (this.isOpenCodeGoModel(modelId)) {
+      return {
+        provider: 'OpenCode Go',
+        client: this.openCodeGoClient,
+        model: modelId.replace(/^opencode-go[/:]/, '') || OPENCODE_GO_MODEL.replace(/^opencode-go\//, ''),
+      };
+    }
+    return null;
+  }
+
+  private getCurrentFamilyLabel(): string {
+    return this.currentModelId === 'natively' ? 'Natively'
+      : this.isDeepInfraModel(this.currentModelId) ? 'DeepInfra'
+      : this.isOpenCodeGoModel(this.currentModelId) ? 'OpenCode Go'
+      : this.isClaudeModel(this.currentModelId) ? 'Claude'
+      : this.isOpenAiModel(this.currentModelId) ? 'OpenAI'
+      : this.isGroqModel(this.currentModelId) ? 'Groq'
+      : this.isGeminiModel(this.currentModelId) ? 'Gemini'
+      : '';
   }
   // ---------------------------
 
@@ -231,6 +401,8 @@ export class LLMHelper {
     if (modelId === 'gemini-pro') targetModelId = GEMINI_PRO_MODEL;
     if (modelId === 'claude') targetModelId = CLAUDE_MODEL;
     if (modelId === 'llama') targetModelId = GROQ_MODEL;
+    if (modelId === 'deepinfra') targetModelId = DEEPINFRA_MODEL;
+    if (modelId === 'opencode_go' || modelId === 'opencode-go') targetModelId = OPENCODE_GO_MODEL;
 
     if (targetModelId.startsWith('ollama-')) {
       this.useOllama = true;
@@ -368,17 +540,19 @@ export class LLMHelper {
   public async generateWithPro(contents: any[]): Promise<string> {
     if (!this.client) throw new Error("Gemini client not initialized")
 
-    await this.rateLimiters.gemini.acquire();
-    // console.log(`[LLMHelper] Calling ${GEMINI_FLASH_MODEL}...`)
-    const response = await this.client.models.generateContent({
-      model: GEMINI_PRO_MODEL,
-      contents: contents,
-      config: {
-        maxOutputTokens: MAX_OUTPUT_TOKENS,
-        temperature: 0.3,      // Lower = faster, more focused
-      }
-    })
-    return response.text || ""
+    return this.withProviderKeyRotation('gemini', async () => {
+      await this.rateLimiters.gemini.acquire();
+      // console.log(`[LLMHelper] Calling ${GEMINI_FLASH_MODEL}...`)
+      const response = await this.client!.models.generateContent({
+        model: GEMINI_PRO_MODEL,
+        contents: contents,
+        config: {
+          maxOutputTokens: MAX_OUTPUT_TOKENS,
+          temperature: 0.3,      // Lower = faster, more focused
+        }
+      })
+      return response.text || ""
+    });
   }
 
   /**
@@ -388,17 +562,19 @@ export class LLMHelper {
   public async generateWithFlash(contents: any[]): Promise<string> {
     if (!this.client) throw new Error("Gemini client not initialized")
 
-    await this.rateLimiters.gemini.acquire();
-    // console.log(`[LLMHelper] Calling ${GEMINI_FLASH_MODEL}...`)
-    const response = await this.client.models.generateContent({
-      model: GEMINI_FLASH_MODEL,
-      contents: contents,
-      config: {
-        maxOutputTokens: MAX_OUTPUT_TOKENS,
-        temperature: 0.3,      // Lower = faster, more focused
-      }
-    })
-    return response.text || ""
+    return this.withProviderKeyRotation('gemini', async () => {
+      await this.rateLimiters.gemini.acquire();
+      // console.log(`[LLMHelper] Calling ${GEMINI_FLASH_MODEL}...`)
+      const response = await this.client!.models.generateContent({
+        model: GEMINI_FLASH_MODEL,
+        contents: contents,
+        config: {
+          maxOutputTokens: MAX_OUTPUT_TOKENS,
+          temperature: 0.3,      // Lower = faster, more focused
+        }
+      })
+      return response.text || ""
+    });
   }
 
   /**
@@ -431,7 +607,7 @@ export class LLMHelper {
    * Retry logic with exponential backoff
    * Specifically handles 503 Service Unavailable
    */
-  private async withRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
+  private async withRetry<T>(fn: () => Promise<T>, retries = 3, provider?: RotatingLlmProvider): Promise<T> {
     let delay = 400;
     for (let i = 0; i < retries; i++) {
       try {
@@ -442,8 +618,13 @@ export class LLMHelper {
         // Retryable: 503 overloaded (Gemini), 529 overloaded (Claude), 429 rate-limit (OpenAI/Claude), 500 transient
         const isRetryable = msg.includes("503") || msg.includes("overloaded")
           || status === 529 || status === 429 || status === 500
-          || msg.includes("rate_limit") || msg.includes("rate limit");
+          || msg.includes("rate_limit") || msg.includes("rate limit")
+          || this.shouldRotateProviderKey(e);
         if (!isRetryable) throw e;
+
+        if (provider && this.rotateProviderKey(provider, status || msg.slice(0, 40))) {
+          continue;
+        }
 
         console.warn(`[LLMHelper] Transient error (${status || msg.slice(0, 40)}). Retrying in ${delay}ms...`);
         await new Promise(r => setTimeout(r, delay));
@@ -522,12 +703,16 @@ export class LLMHelper {
           return "Response was truncated due to length limit. Please try a shorter question or break it into parts.";
         }
 
+        if (candidate.finishReason && candidate.finishReason !== "STOP") {
+          throw new Error(`Gemini response blocked: ${candidate.finishReason}`);
+        }
+
         return "";
       }
 
       console.log(`[LLMHelper] Extracted text length: ${text.length}`);
       return text;
-    });
+    }, 3, 'gemini');
   }
 
   public async extractProblemFromImages(imagePaths: string[]) {
@@ -972,6 +1157,10 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       if (this.isOpenAiModel(this.currentModelId) && this.openaiClient) {
         return await this.generateWithOpenai(userContent, openaiSystemPrompt, imagePaths);
       }
+      const compatibleRoute = this.resolveOpenAICompatibleRoute(this.currentModelId);
+      if (compatibleRoute?.client && !isMultimodal) {
+        return await this.generateWithOpenAICompatible(compatibleRoute, userContent, openaiSystemPrompt);
+      }
       if (this.isClaudeModel(this.currentModelId) && this.claudeClient) {
         return await this.generateWithClaude(userContent, claudeSystemPrompt, imagePaths);
       }
@@ -1036,6 +1225,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         }
         if (this.groqClient) {
           providers.push({ name: `Groq (${textGroq})`, execute: () => this.generateWithGroq(combinedMessages.groq, textGroq) });
+        }
+        if (this.deepInfraClient) {
+          const route = this.resolveOpenAICompatibleRoute(DEEPINFRA_MODEL)!;
+          providers.push({ name: `DeepInfra (${route.model})`, execute: () => this.generateWithOpenAICompatible(route, userContent, openaiSystemPrompt) });
+        }
+        if (this.openCodeGoClient) {
+          const route = this.resolveOpenAICompatibleRoute(OPENCODE_GO_MODEL)!;
+          providers.push({ name: `OpenCode Go (${route.model})`, execute: () => this.generateWithOpenAICompatible(route, userContent, openaiSystemPrompt) });
         }
         if (this.client) {
           providers.push({
@@ -1249,18 +1446,20 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   private async generateWithGroq(fullMessage: string, modelId: string = GROQ_MODEL): Promise<string> {
     if (!this.groqClient) throw new Error("Groq client not initialized");
 
-    await this.rateLimiters.groq.acquire();
+    return this.withProviderKeyRotation('groq', async () => {
+      await this.rateLimiters.groq.acquire();
 
-    // Non-streaming Groq call
-    const response = await this.groqClient.chat.completions.create({
-      model: modelId,
-      messages: [{ role: "user", content: fullMessage }],
-      temperature: 0.4,
-      max_tokens: 8192,
-      stream: false
+      // Non-streaming Groq call
+      const response = await this.groqClient!.chat.completions.create({
+        model: modelId,
+        messages: [{ role: "user", content: fullMessage }],
+        temperature: 0.4,
+        max_tokens: 8192,
+        stream: false
+      });
+
+      return response.choices[0]?.message?.content || "";
     });
-
-    return response.choices[0]?.message?.content || "";
   }
 
   /**
@@ -1384,9 +1583,35 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         model,
         messages,
         max_completion_tokens: model.toLowerCase().includes('claude') ? CLAUDE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS,
-      })),
+      }), 3, 'openai'),
       60000,
       `OpenAI (${model})`
+    );
+
+    return response.choices[0]?.message?.content || "";
+  }
+
+  private async generateWithOpenAICompatible(route: { provider: 'DeepInfra' | 'OpenCode Go'; client: OpenAI | null; model: string }, userMessage: string, systemPrompt?: string, imagePaths?: string[]): Promise<string> {
+    const rotationProvider: RotatingLlmProvider = route.provider === 'DeepInfra' ? 'deepinfra' : 'opencode_go';
+    const getClient = () => route.provider === 'DeepInfra' ? this.deepInfraClient : this.openCodeGoClient;
+    if (!getClient()) throw new Error(`${route.provider} client not initialized`);
+    if (imagePaths?.length) throw new Error(`${route.provider} text routing does not support screenshots yet`);
+
+    const messages: any[] = [];
+    if (systemPrompt) {
+      messages.push({ role: "system", content: systemPrompt });
+    }
+    messages.push({ role: "user", content: userMessage });
+
+    const response = await this.withTimeout(
+      this.withRetry(() => getClient()!.chat.completions.create({
+        model: route.model,
+        messages,
+        temperature: 0.35,
+        max_tokens: 8192,
+      } as any), 3, rotationProvider),
+      60000,
+      `${route.provider} (${route.model})`
     );
 
     return response.choices[0]?.message?.content || "";
@@ -1491,7 +1716,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         max_tokens: CLAUDE_MAX_OUTPUT_TOKENS,
         ...(systemPrompt ? { system: systemPrompt } : {}),
         messages: [{ role: "user", content }],
-      })),
+      }), 3, 'claude'),
       90000,
       `Claude (${model})`
     );
@@ -1689,31 +1914,33 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   private async generateWithGroqMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string): Promise<string> {
     if (!this.groqClient) throw new Error("Groq client not initialized");
 
-    const messages: any[] = [];
-    if (systemPrompt) {
-      messages.push({ role: "system", content: systemPrompt });
-    }
-
-    const contentParts: any[] = [{ type: "text", text: userMessage }];
-    for (const p of imagePaths) {
-      if (fs.existsSync(p)) {
-        const imageData = await fs.promises.readFile(p);
-        contentParts.push({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${imageData.toString("base64")}` } });
+    return this.withProviderKeyRotation('groq', async () => {
+      const messages: any[] = [];
+      if (systemPrompt) {
+        messages.push({ role: "system", content: systemPrompt });
       }
-    }
-    messages.push({ role: "user", content: contentParts });
 
-    const response = await this.groqClient.chat.completions.create({
-      model: "meta-llama/llama-4-scout-17b-16e-instruct",
-      messages,
-      temperature: 1,
-      max_completion_tokens: 28672,
-      top_p: 1,
-      stream: false,
-      stop: null
+      const contentParts: any[] = [{ type: "text", text: userMessage }];
+      for (const p of imagePaths) {
+        if (fs.existsSync(p)) {
+          const imageData = await fs.promises.readFile(p);
+          contentParts.push({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${imageData.toString("base64")}` } });
+        }
+      }
+      messages.push({ role: "user", content: contentParts });
+
+      const response = await this.groqClient!.chat.completions.create({
+        model: "meta-llama/llama-4-scout-17b-16e-instruct",
+        messages,
+        temperature: 1,
+        max_completion_tokens: 28672,
+        top_p: 1,
+        stream: false,
+        stop: null
+      });
+
+      return response.choices[0]?.message?.content || "";
     });
-
-    return response.choices[0]?.message?.content || "";
   }
 
   /**
@@ -2035,6 +2262,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       if (this.groqClient) {
         providers.push({ name: `Groq (${textGroq})`, execute: () => this.streamWithGroq(combinedMessages.groq, textGroq) });
       }
+      if (this.deepInfraClient) {
+        const route = this.resolveOpenAICompatibleRoute(DEEPINFRA_MODEL)!;
+        providers.push({ name: `DeepInfra (${route.model})`, execute: () => this.streamWithOpenAICompatible(route, userContent, openaiSystemPrompt) });
+      }
+      if (this.openCodeGoClient) {
+        const route = this.resolveOpenAICompatibleRoute(OPENCODE_GO_MODEL)!;
+        providers.push({ name: `OpenCode Go (${route.model})`, execute: () => this.streamWithOpenAICompatible(route, userContent, openaiSystemPrompt) });
+      }
       if (this.openaiClient) {
         providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenai(userContent, openaiSystemPrompt, textOpenAI) });
       }
@@ -2057,12 +2292,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     // Ensure the model the user selected handles the request first
     // before falling back to others.
     // ============================================================
-    const currentFamilyLabel = this.currentModelId === 'natively' ? 'Natively'
-      : this.isClaudeModel(this.currentModelId) ? 'Claude'
-      : this.isOpenAiModel(this.currentModelId) ? 'OpenAI'
-      : this.isGroqModel(this.currentModelId) ? 'Groq'
-      : this.isGeminiModel(this.currentModelId) ? 'Gemini'
-      : '';
+    const currentFamilyLabel = this.getCurrentFamilyLabel();
 
     if (currentFamilyLabel) {
       providers.sort((a, b) => {
@@ -2218,7 +2448,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           const groqSystem = systemPromptOverride || GROQ_SYSTEM_PROMPT;
           const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
           const groqFullMessage = `${finalGroqSystem}\n\n${userContent}`;
-          yield* this.streamWithGroq(groqFullMessage, this.currentModelId);
+          yield* this.streamWithGroq(groqFullMessage, GROQ_MODEL);
           return;
         } catch (e: any) {
           console.warn("[LLMHelper] Groq Fast Text streaming failed, falling back:", e.message);
@@ -2274,6 +2504,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       } else {
         yield* this.streamWithOpenai(userContent, finalOpenAiSystem);
       }
+      return;
+    }
+
+    const compatibleRoute = this.resolveOpenAICompatibleRoute(this.currentModelId);
+    if (compatibleRoute?.client && !isMultimodal) {
+      const openAiSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
+      const finalOpenAiSystem = this.injectLanguageInstruction(openAiSystem);
+      yield* this.streamWithOpenAICompatible(compatibleRoute, userContent, finalOpenAiSystem);
       return;
     }
 
@@ -2476,20 +2714,37 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   private async * streamWithGroq(fullMessage: string, modelId: string = GROQ_MODEL): AsyncGenerator<string, void, unknown> {
     if (!this.groqClient) throw new Error("Groq client not initialized");
 
-    const stream = await this.groqClient.chat.completions.create({
-      model: modelId,
-      messages: [{ role: "user", content: fullMessage }],
-      stream: true,
-      temperature: 0.4,
-      max_tokens: 8192,
-    });
+    const attempts = Math.max(1, this.providerKeyRings.groq.keys.length || 0);
+    let lastError: any;
 
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content;
-      if (content) {
-        yield content;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      let yielded = false;
+      try {
+        const stream = await this.groqClient!.chat.completions.create({
+          model: modelId,
+          messages: [{ role: "user", content: fullMessage }],
+          stream: true,
+          temperature: 0.4,
+          max_tokens: 8192,
+        });
+
+        for await (const chunk of stream) {
+          const content = chunk.choices[0]?.delta?.content;
+          if (content) {
+            yielded = true;
+            yield content;
+          }
+        }
+        return;
+      } catch (error: any) {
+        lastError = error;
+        if (yielded || !this.shouldRotateProviderKey(error) || !this.rotateProviderKey('groq', error?.status || error?.message?.slice(0, 60))) {
+          throw error;
+        }
       }
     }
+
+    throw lastError;
   }
 
   /**
@@ -2498,37 +2753,54 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   private async * streamWithGroqMultimodal(userMessage: string, imagePaths: string[], systemPrompt?: string): AsyncGenerator<string, void, unknown> {
     if (!this.groqClient) throw new Error("Groq client not initialized");
 
-    const messages: any[] = [];
-    if (systemPrompt) {
-      messages.push({ role: "system", content: systemPrompt });
-    }
+    const attempts = Math.max(1, this.providerKeyRings.groq.keys.length || 0);
+    let lastError: any;
 
-    const contentParts: any[] = [{ type: "text", text: userMessage }];
-    for (const p of imagePaths) {
-      if (fs.existsSync(p)) {
-        // Process image: resize to max 1536px + JPEG 80% to stay within Groq's request size limit
-        const { mimeType, data } = await this.processImage(p);
-        contentParts.push({ type: "image_url", image_url: { url: `data:${mimeType};base64,${data}` } });
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      let yielded = false;
+      try {
+        const messages: any[] = [];
+        if (systemPrompt) {
+          messages.push({ role: "system", content: systemPrompt });
+        }
+
+        const contentParts: any[] = [{ type: "text", text: userMessage }];
+        for (const p of imagePaths) {
+          if (fs.existsSync(p)) {
+            // Process image: resize to max 1536px + JPEG 80% to stay within Groq's request size limit
+            const { mimeType, data } = await this.processImage(p);
+            contentParts.push({ type: "image_url", image_url: { url: `data:${mimeType};base64,${data}` } });
+          }
+        }
+        messages.push({ role: "user", content: contentParts });
+
+        const stream = await this.groqClient!.chat.completions.create({
+          model: "meta-llama/llama-4-scout-17b-16e-instruct",
+          messages,
+          stream: true,
+          max_tokens: 8192,
+          temperature: 1,
+          top_p: 1,
+          stop: null
+        });
+
+        for await (const chunk of stream) {
+          const content = chunk.choices[0]?.delta?.content;
+          if (content) {
+            yielded = true;
+            yield content;
+          }
+        }
+        return;
+      } catch (error: any) {
+        lastError = error;
+        if (yielded || !this.shouldRotateProviderKey(error) || !this.rotateProviderKey('groq', error?.status || error?.message?.slice(0, 60))) {
+          throw error;
+        }
       }
     }
-    messages.push({ role: "user", content: contentParts });
 
-    const stream = await this.groqClient.chat.completions.create({
-      model: "meta-llama/llama-4-scout-17b-16e-instruct",
-      messages,
-      stream: true,
-      max_tokens: 8192,
-      temperature: 1,
-      top_p: 1,
-      stop: null
-    });
-
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content;
-      if (content) {
-        yield content;
-      }
-    }
+    throw lastError;
   }
 
   /**
@@ -2539,26 +2811,86 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // Use explicit override, then currentModelId if it's an OpenAI model, else baseline constant
     const model = modelId || (this.isOpenAiModel(this.currentModelId) ? this.currentModelId : OPENAI_MODEL);
+    const attempts = Math.max(1, this.providerKeyRings.openai.keys.length || 0);
+    let lastError: any;
 
-    const messages: any[] = [];
-    if (systemPrompt) {
-      messages.push({ role: "system", content: systemPrompt });
-    }
-    messages.push({ role: "user", content: userMessage });
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      let yielded = false;
+      try {
+        const messages: any[] = [];
+        if (systemPrompt) {
+          messages.push({ role: "system", content: systemPrompt });
+        }
+        messages.push({ role: "user", content: userMessage });
 
-    const stream = await this.openaiClient.chat.completions.create({
-      model,
-      messages,
-      stream: true,
-      max_completion_tokens: model.toLowerCase().includes('claude') ? CLAUDE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS,
-    });
+        const stream = await this.openaiClient!.chat.completions.create({
+          model,
+          messages,
+          stream: true,
+          max_completion_tokens: model.toLowerCase().includes('claude') ? CLAUDE_MAX_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS,
+        });
 
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content;
-      if (content) {
-        yield content;
+        for await (const chunk of stream) {
+          const content = chunk.choices[0]?.delta?.content;
+          if (content) {
+            yielded = true;
+            yield content;
+          }
+        }
+        return;
+      } catch (error: any) {
+        lastError = error;
+        if (yielded || !this.shouldRotateProviderKey(error) || !this.rotateProviderKey('openai', error?.status || error?.message?.slice(0, 60))) {
+          throw error;
+        }
       }
     }
+
+    throw lastError;
+  }
+
+  private async * streamWithOpenAICompatible(route: { provider: 'DeepInfra' | 'OpenCode Go'; client: OpenAI | null; model: string }, userMessage: string, systemPrompt?: string): AsyncGenerator<string, void, unknown> {
+    const rotationProvider: RotatingLlmProvider = route.provider === 'DeepInfra' ? 'deepinfra' : 'opencode_go';
+    const getClient = () => route.provider === 'DeepInfra' ? this.deepInfraClient : this.openCodeGoClient;
+    if (!getClient()) throw new Error(`${route.provider} client not initialized`);
+
+    const attempts = Math.max(1, this.providerKeyRings[rotationProvider].keys.length || 0);
+    let lastError: any;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      let yielded = false;
+      try {
+        const messages: any[] = [];
+        if (systemPrompt) {
+          messages.push({ role: "system", content: systemPrompt });
+        }
+        messages.push({ role: "user", content: userMessage });
+
+        const stream = await getClient()!.chat.completions.create({
+          model: route.model,
+          messages,
+          stream: true,
+          temperature: 0.35,
+          max_tokens: 8192,
+        } as any);
+
+        for await (const chunk of stream as any) {
+          const content = chunk.choices?.[0]?.delta?.content;
+          if (content) {
+            yielded = true;
+            yield content;
+          }
+        }
+        return;
+      } catch (error: any) {
+        lastError = error;
+        if (yielded || !this.shouldRotateProviderKey(error) || !this.rotateProviderKey(rotationProvider, error?.status || error?.message?.slice(0, 60))) {
+          throw error;
+        }
+      }
+    }
+
+    throw lastError;
   }
 
   /**
@@ -2569,19 +2901,35 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
     // Use explicit override, then currentModelId if it's a Claude model, else baseline constant
     const model = modelId || (this.isClaudeModel(this.currentModelId) ? this.currentModelId : CLAUDE_MODEL);
+    const attempts = Math.max(1, this.providerKeyRings.claude.keys.length || 0);
+    let lastError: any;
 
-    const stream = await this.claudeClient.messages.stream({
-      model,
-      max_tokens: CLAUDE_MAX_OUTPUT_TOKENS,
-      ...(systemPrompt ? { system: systemPrompt } : {}),
-      messages: [{ role: "user", content: userMessage }],
-    });
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      let yielded = false;
+      try {
+        const stream = await this.claudeClient!.messages.stream({
+          model,
+          max_tokens: CLAUDE_MAX_OUTPUT_TOKENS,
+          ...(systemPrompt ? { system: systemPrompt } : {}),
+          messages: [{ role: "user", content: userMessage }],
+        });
 
-    for await (const event of stream) {
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        yield event.delta.text;
+        for await (const event of stream) {
+          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+            yielded = true;
+            yield event.delta.text;
+          }
+        }
+        return;
+      } catch (error: any) {
+        lastError = error;
+        if (yielded || !this.shouldRotateProviderKey(error) || !this.rotateProviderKey('claude', error?.status || error?.message?.slice(0, 60))) {
+          throw error;
+        }
       }
     }
+
+    throw lastError;
   }
 
   /**
@@ -2672,46 +3020,63 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   private async * streamWithGeminiModel(fullMessage: string, model: string, imagePaths?: string[]): AsyncGenerator<string, void, unknown> {
     if (!this.client) throw new Error("Gemini client not initialized");
 
-    const contents: any[] = [{ text: fullMessage }];
-    if (imagePaths?.length) {
-      for (const p of imagePaths) {
-        if (fs.existsSync(p)) {
-          const imageData = await fs.promises.readFile(p);
-          contents.push({
-            inlineData: {
-              mimeType: "image/png",
-              data: imageData.toString("base64")
+    const attempts = Math.max(1, this.providerKeyRings.gemini.keys.length || 0);
+    let lastError: any;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      let yielded = false;
+      try {
+        const contents: any[] = [{ text: fullMessage }];
+        if (imagePaths?.length) {
+          for (const p of imagePaths) {
+            if (fs.existsSync(p)) {
+              const imageData = await fs.promises.readFile(p);
+              contents.push({
+                inlineData: {
+                  mimeType: "image/png",
+                  data: imageData.toString("base64")
+                }
+              });
             }
-          });
+          }
+        }
+
+        const streamResult = await this.client!.models.generateContentStream({
+          model: model,
+          contents: contents,
+          config: {
+            maxOutputTokens: MAX_OUTPUT_TOKENS,
+            temperature: 0.4,
+          }
+        });
+
+        // @ts-ignore
+        const stream = streamResult.stream || streamResult;
+
+        for await (const chunk of stream) {
+          let chunkText = "";
+          if (typeof chunk.text === 'function') {
+            chunkText = chunk.text();
+          } else if (typeof chunk.text === 'string') {
+            chunkText = chunk.text;
+          } else if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
+            chunkText = chunk.candidates[0].content.parts[0].text;
+          }
+          if (chunkText) {
+            yielded = true;
+            yield chunkText;
+          }
+        }
+        return;
+      } catch (error: any) {
+        lastError = error;
+        if (yielded || !this.shouldRotateProviderKey(error) || !this.rotateProviderKey('gemini', error?.status || error?.message?.slice(0, 60))) {
+          throw error;
         }
       }
     }
 
-    const streamResult = await this.client.models.generateContentStream({
-      model: model,
-      contents: contents,
-      config: {
-        maxOutputTokens: MAX_OUTPUT_TOKENS,
-        temperature: 0.4,
-      }
-    });
-
-    // @ts-ignore
-    const stream = streamResult.stream || streamResult;
-
-    for await (const chunk of stream) {
-      let chunkText = "";
-      if (typeof chunk.text === 'function') {
-        chunkText = chunk.text();
-      } else if (typeof chunk.text === 'string') {
-        chunkText = chunk.text;
-      } else if (chunk.candidates?.[0]?.content?.parts?.[0]?.text) {
-        chunkText = chunk.candidates[0].content.parts[0].text;
-      }
-      if (chunkText) {
-        yield chunkText;
-      }
-    }
+    throw lastError;
   }
 
   /**
@@ -2741,31 +3106,33 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   private async collectStreamResponse(fullMessage: string, model: string, imagePaths?: string[]): Promise<string> {
     if (!this.client) throw new Error("Gemini client not initialized");
 
-    const contents: any[] = [{ text: fullMessage }];
-    if (imagePaths?.length) {
-      for (const p of imagePaths) {
-        if (fs.existsSync(p)) {
-          const imageData = await fs.promises.readFile(p);
-          contents.push({
-            inlineData: {
-              mimeType: "image/png",
-              data: imageData.toString("base64")
-            }
-          });
+    return this.withProviderKeyRotation('gemini', async () => {
+      const contents: any[] = [{ text: fullMessage }];
+      if (imagePaths?.length) {
+        for (const p of imagePaths) {
+          if (fs.existsSync(p)) {
+            const imageData = await fs.promises.readFile(p);
+            contents.push({
+              inlineData: {
+                mimeType: "image/png",
+                data: imageData.toString("base64")
+              }
+            });
+          }
         }
       }
-    }
 
-    const response = await this.client.models.generateContent({
-      model: model,
-      contents: contents,
-      config: {
-        maxOutputTokens: MAX_OUTPUT_TOKENS,
-        temperature: 0.4,
-      }
+      const response = await this.client!.models.generateContent({
+        model: model,
+        contents: contents,
+        config: {
+          maxOutputTokens: MAX_OUTPUT_TOKENS,
+          temperature: 0.4,
+        }
+      });
+
+      return response.text || "";
     });
-
-    return response.text || "";
   }
 
   // --- OLLAMA STREAMING ---
@@ -3035,9 +3402,16 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
   }
 
-  public getCurrentProvider(): "ollama" | "gemini" | "custom" {
+  public getCurrentProvider(): "ollama" | "gemini" | "groq" | "deepinfra" | "opencode_go" | "openai" | "claude" | "natively" | "custom" {
     if (this.customProvider) return "custom";
-    return this.useOllama ? "ollama" : "gemini";
+    if (this.useOllama) return "ollama";
+    if (this.currentModelId === 'natively') return "natively";
+    if (this.isDeepInfraModel(this.currentModelId)) return "deepinfra";
+    if (this.isOpenCodeGoModel(this.currentModelId)) return "opencode_go";
+    if (this.isGroqModel(this.currentModelId)) return "groq";
+    if (this.isOpenAiModel(this.currentModelId)) return "openai";
+    if (this.isClaudeModel(this.currentModelId)) return "claude";
+    return "gemini";
   }
 
   public getCurrentModel(): string {

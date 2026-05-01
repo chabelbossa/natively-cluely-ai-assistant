@@ -3,7 +3,7 @@ export const STANDARD_CLOUD_MODELS: Record<string, {
     ids: string[];
     names: string[];
     descs: string[];
-    pmKey: 'geminiPreferredModel' | 'openaiPreferredModel' | 'claudePreferredModel' | 'groqPreferredModel';
+    pmKey: 'geminiPreferredModel' | 'groqPreferredModel' | 'deepinfraPreferredModel' | 'openCodeGoPreferredModel' | 'openaiPreferredModel' | 'claudePreferredModel';
 }> = {
     gemini: {
         hasKeyCheck: (creds) => !!creds?.hasGeminiKey,
@@ -11,6 +11,27 @@ export const STANDARD_CLOUD_MODELS: Record<string, {
         names: ['Gemini 3.1 Flash', 'Gemini 3.1 Pro'],
         descs: ['Fastest • Multimodal', 'Reasoning • High Quality'],
         pmKey: 'geminiPreferredModel'
+    },
+    groq: {
+        hasKeyCheck: (creds) => !!creds?.hasGroqKey,
+        ids: ['llama-3.1-8b-instant', 'openai/gpt-oss-20b', 'llama-3.3-70b-versatile'],
+        names: ['Groq Llama 3.1 8B', 'Groq GPT OSS 20B', 'Groq Llama 3.3 70B'],
+        descs: ['Fastest • Lightweight', 'Very fast • Strong', 'Balanced • Larger'],
+        pmKey: 'groqPreferredModel'
+    },
+    deepinfra: {
+        hasKeyCheck: (creds) => !!creds?.hasDeepInfraKey,
+        ids: ['deepinfra:stepfun-ai/Step-3.5-Flash', 'deepinfra:meta-llama/Meta-Llama-3.1-8B-Instruct'],
+        names: ['DeepInfra Step 3.5 Flash', 'DeepInfra Llama 3.1 8B'],
+        descs: ['Flash • Low latency', 'Fast • Open source'],
+        pmKey: 'deepinfraPreferredModel'
+    },
+    opencode_go: {
+        hasKeyCheck: (creds) => !!creds?.hasOpenCodeGoKey,
+        ids: ['opencode-go/deepseek-v4-flash'],
+        names: ['OpenCode Go DeepSeek V4 Flash'],
+        descs: ['Flash • Low latency'],
+        pmKey: 'openCodeGoPreferredModel'
     },
     openai: {
         hasKeyCheck: (creds) => !!creds?.hasOpenaiKey,
@@ -26,16 +47,13 @@ export const STANDARD_CLOUD_MODELS: Record<string, {
         descs: ['Anthropic'],
         pmKey: 'claudePreferredModel'
     },
-    groq: {
-        hasKeyCheck: (creds) => !!creds?.hasGroqKey,
-        ids: ['llama-3.3-70b-versatile'],
-        names: ['Groq Llama 3.3'],
-        descs: ['Ultra Fast'],
-        pmKey: 'groqPreferredModel'
-    },
 };
 
 export const prettifyModelId = (id: string): string => {
     if (!id) return '';
-    return id.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    return id
+        .replace(/^deepinfra:/, '')
+        .replace(/^opencode-go[/:]/, '')
+        .replace(/[\/:_-]/g, ' ')
+        .replace(/\b\w/g, c => c.toUpperCase());
 };

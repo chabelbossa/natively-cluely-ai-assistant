@@ -37,6 +37,8 @@ export interface StoredLocalSttConfig {
 export interface StoredCredentials {
     geminiApiKey?: string;
     groqApiKey?: string;
+    deepInfraApiKey?: string;
+    openCodeGoApiKey?: string;
     openaiApiKey?: string;
     claudeApiKey?: string;
     googleServiceAccountPath?: string;
@@ -69,6 +71,8 @@ export interface StoredCredentials {
     // Dynamic Model Discovery – preferred models per provider
     geminiPreferredModel?: string;
     groqPreferredModel?: string;
+    deepinfraPreferredModel?: string;
+    openCodeGoPreferredModel?: string;
     openaiPreferredModel?: string;
     claudePreferredModel?: string;
     // Free trial state
@@ -77,6 +81,30 @@ export interface StoredCredentials {
     trialStartedAt?: string;   // ISO timestamp
     trialClaimed?:   boolean;  // set true on first claim, never cleared — hides start card permanently
 }
+
+export type StoredLlmProvider = 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude';
+
+const PREFERRED_MODEL_KEYS: Record<StoredLlmProvider, keyof StoredCredentials> = {
+    gemini: 'geminiPreferredModel',
+    groq: 'groqPreferredModel',
+    deepinfra: 'deepinfraPreferredModel',
+    opencode_go: 'openCodeGoPreferredModel',
+    openai: 'openaiPreferredModel',
+    claude: 'claudePreferredModel',
+};
+
+const parseApiKeyList = (value?: string): string[] => {
+    if (!value) return [];
+    return value
+        .split(/[\s,;]+/)
+        .map(key => key.trim())
+        .filter(Boolean);
+};
+
+const serializeApiKeyList = (value: string): string | undefined => {
+    const keys = parseApiKeyList(value);
+    return keys.length > 0 ? keys.join('\n') : undefined;
+};
 
 export class CredentialsManager {
     private static instance: CredentialsManager;
@@ -107,19 +135,51 @@ export class CredentialsManager {
     // =========================================================================
 
     public getGeminiApiKey(): string | undefined {
-        return this.credentials.geminiApiKey;
+        return this.getGeminiApiKeys()[0];
     }
 
     public getGroqApiKey(): string | undefined {
-        return this.credentials.groqApiKey;
+        return this.getGroqApiKeys()[0];
+    }
+
+    public getDeepInfraApiKey(): string | undefined {
+        return this.getDeepInfraApiKeys()[0];
+    }
+
+    public getOpenCodeGoApiKey(): string | undefined {
+        return this.getOpenCodeGoApiKeys()[0];
     }
 
     public getOpenaiApiKey(): string | undefined {
-        return this.credentials.openaiApiKey;
+        return this.getOpenaiApiKeys()[0];
     }
 
     public getClaudeApiKey(): string | undefined {
-        return this.credentials.claudeApiKey;
+        return this.getClaudeApiKeys()[0];
+    }
+
+    public getGeminiApiKeys(): string[] {
+        return parseApiKeyList(this.credentials.geminiApiKey);
+    }
+
+    public getGroqApiKeys(): string[] {
+        return parseApiKeyList(this.credentials.groqApiKey);
+    }
+
+    public getDeepInfraApiKeys(): string[] {
+        return parseApiKeyList(this.credentials.deepInfraApiKey);
+    }
+
+    public getOpenCodeGoApiKeys(): string[] {
+        return parseApiKeyList(this.credentials.openCodeGoApiKey);
+    }
+
+    public getOpenaiApiKeys(): string[] {
+        return parseApiKeyList(this.credentials.openaiApiKey);
+    }
+
+    public getClaudeApiKeys(): string[] {
+        return parseApiKeyList(this.credentials.claudeApiKey);
     }
 
     public getGoogleServiceAccountPath(): string | undefined {
@@ -231,25 +291,37 @@ export class CredentialsManager {
     // =========================================================================
 
     public setGeminiApiKey(key: string): void {
-        this.credentials.geminiApiKey = key;
+        this.credentials.geminiApiKey = serializeApiKeyList(key);
         this.saveCredentials();
         console.log('[CredentialsManager] Gemini API Key updated');
     }
 
     public setGroqApiKey(key: string): void {
-        this.credentials.groqApiKey = key;
+        this.credentials.groqApiKey = serializeApiKeyList(key);
         this.saveCredentials();
         console.log('[CredentialsManager] Groq API Key updated');
     }
 
+    public setDeepInfraApiKey(key: string): void {
+        this.credentials.deepInfraApiKey = serializeApiKeyList(key);
+        this.saveCredentials();
+        console.log('[CredentialsManager] DeepInfra API Key updated');
+    }
+
+    public setOpenCodeGoApiKey(key: string): void {
+        this.credentials.openCodeGoApiKey = serializeApiKeyList(key);
+        this.saveCredentials();
+        console.log('[CredentialsManager] OpenCode Go API Key updated');
+    }
+
     public setOpenaiApiKey(key: string): void {
-        this.credentials.openaiApiKey = key;
+        this.credentials.openaiApiKey = serializeApiKeyList(key);
         this.saveCredentials();
         console.log('[CredentialsManager] OpenAI API Key updated');
     }
 
     public setClaudeApiKey(key: string): void {
-        this.credentials.claudeApiKey = key;
+        this.credentials.claudeApiKey = serializeApiKeyList(key);
         this.saveCredentials();
         console.log('[CredentialsManager] Claude API Key updated');
     }
@@ -413,13 +485,13 @@ export class CredentialsManager {
         console.log('[CredentialsManager] Natively API Key updated');
     }
 
-    public getPreferredModel(provider: 'gemini' | 'groq' | 'openai' | 'claude'): string | undefined {
-        const key = `${provider}PreferredModel` as keyof StoredCredentials;
+    public getPreferredModel(provider: StoredLlmProvider): string | undefined {
+        const key = PREFERRED_MODEL_KEYS[provider];
         return this.credentials[key] as string | undefined;
     }
 
-    public setPreferredModel(provider: 'gemini' | 'groq' | 'openai' | 'claude', modelId: string): void {
-        const key = `${provider}PreferredModel` as keyof StoredCredentials;
+    public setPreferredModel(provider: StoredLlmProvider, modelId: string): void {
+        const key = PREFERRED_MODEL_KEYS[provider];
         (this.credentials as any)[key] = modelId;
         this.saveCredentials();
         console.log(`[CredentialsManager] ${provider} preferred model set to: ${modelId}`);

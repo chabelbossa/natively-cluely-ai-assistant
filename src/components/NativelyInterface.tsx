@@ -71,6 +71,55 @@ interface Message {
     };
 }
 
+const getSuggestedAnswerIntent = (question?: string) => {
+    const normalized = (question || '').toLowerCase();
+    if (normalized.includes('code hint')) return 'code_hint';
+    if (normalized.includes('brainstorm')) return 'brainstorm';
+    return 'what_to_answer';
+};
+
+const appendStreamingMessage = (messages: Message[], intent: string, token: string): Message[] => {
+    const existingIndex = [...messages].reverse().findIndex(msg => msg.isStreaming && msg.intent === intent);
+    if (existingIndex !== -1) {
+        const index = messages.length - 1 - existingIndex;
+        const updated = [...messages];
+        updated[index] = {
+            ...updated[index],
+            text: updated[index].text + token
+        };
+        return updated;
+    }
+
+    return [...messages, {
+        id: `${Date.now()}-${intent}`,
+        role: 'system',
+        text: token,
+        intent,
+        isStreaming: true
+    }];
+};
+
+const finalizeStreamingMessage = (messages: Message[], intent: string, text: string): Message[] => {
+    const existingIndex = [...messages].reverse().findIndex(msg => msg.isStreaming && msg.intent === intent);
+    if (existingIndex !== -1) {
+        const index = messages.length - 1 - existingIndex;
+        const updated = [...messages];
+        updated[index] = {
+            ...updated[index],
+            text,
+            isStreaming: false
+        };
+        return updated;
+    }
+
+    return [...messages, {
+        id: `${Date.now()}-${intent}`,
+        role: 'system',
+        text,
+        intent
+    }];
+};
+
 interface NativelyInterfaceProps {
     onEndMeeting?: () => void;
     overlayOpacity?: number;
@@ -717,145 +766,34 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
 
         cleanups.push(window.electronAPI.onIntelligenceSuggestedAnswerToken((data) => {
-            // Progressive update for 'what_to_answer' mode
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-
-                // If we already have a streaming message for this intent, append
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'what_to_answer') {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = {
-                        ...lastMsg,
-                        text: lastMsg.text + data.token
-                    };
-                    return updated;
-                }
-
-                // Otherwise, start a new one (First token)
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system',
-                    text: data.token,
-                    intent: 'what_to_answer',
-                    isStreaming: true
-                }];
-            });
+            const intent = getSuggestedAnswerIntent(data.question);
+            setMessages(prev => appendStreamingMessage(prev, intent, data.token));
         }));
 
         cleanups.push(window.electronAPI.onIntelligenceSuggestedAnswer((data) => {
             setIsProcessing(false);
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-
-                // If we were streaming, finalize it
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'what_to_answer') {
-                    // Start new array to avoid mutation
-                    const updated = [...prev];
-                    updated[prev.length - 1] = {
-                        ...lastMsg,
-                        text: data.answer, // Ensure final consistency
-                        isStreaming: false
-                    };
-                    return updated;
-                }
-
-                // If we missed the stream (or not streaming), append fresh
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system',
-                    text: data.answer,  // Plain text, no markdown - ready to speak
-                    intent: 'what_to_answer'
-                }];
-            });
+            const intent = getSuggestedAnswerIntent(data.question);
+            setMessages(prev => finalizeStreamingMessage(prev, intent, data.answer));
         }));
 
         // STREAMING: Refinement
         cleanups.push(window.electronAPI.onIntelligenceRefinedAnswerToken((data) => {
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === data.intent) {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = {
-                        ...lastMsg,
-                        text: lastMsg.text + data.token
-                    };
-                    return updated;
-                }
-                // New stream start (e.g. user clicked Shorten)
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system',
-                    text: data.token,
-                    intent: data.intent,
-                    isStreaming: true
-                }];
-            });
+            setMessages(prev => appendStreamingMessage(prev, data.intent, data.token));
         }));
 
         cleanups.push(window.electronAPI.onIntelligenceRefinedAnswer((data) => {
             setIsProcessing(false);
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === data.intent) {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = {
-                        ...lastMsg,
-                        text: data.answer,
-                        isStreaming: false
-                    };
-                    return updated;
-                }
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system',
-                    text: data.answer,
-                    intent: data.intent
-                }];
-            });
+            setMessages(prev => finalizeStreamingMessage(prev, data.intent, data.answer));
         }));
 
         // STREAMING: Recap
         cleanups.push(window.electronAPI.onIntelligenceRecapToken((data) => {
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'recap') {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = {
-                        ...lastMsg,
-                        text: lastMsg.text + data.token
-                    };
-                    return updated;
-                }
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system',
-                    text: data.token,
-                    intent: 'recap',
-                    isStreaming: true
-                }];
-            });
+            setMessages(prev => appendStreamingMessage(prev, 'recap', data.token));
         }));
 
         cleanups.push(window.electronAPI.onIntelligenceRecap((data) => {
             setIsProcessing(false);
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'recap') {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = {
-                        ...lastMsg,
-                        text: data.summary,
-                        isStreaming: false
-                    };
-                    return updated;
-                }
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system',
-                    text: data.summary,
-                    intent: 'recap'
-                }];
-            });
+            setMessages(prev => finalizeStreamingMessage(prev, 'recap', data.summary));
         }));
 
         // STREAMING: Follow-Up Questions (Rendered as message? Or specific UI?)
@@ -871,47 +809,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         // Assuming it's a message for consistency with "Copilot" approach.
 
         cleanups.push(window.electronAPI.onIntelligenceFollowUpQuestionsToken((data) => {
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'follow_up_questions') {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = {
-                        ...lastMsg,
-                        text: lastMsg.text + data.token
-                    };
-                    return updated;
-                }
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system',
-                    text: data.token,
-                    intent: 'follow_up_questions',
-                    isStreaming: true
-                }];
-            });
+            setMessages(prev => appendStreamingMessage(prev, 'follow_up_questions', data.token));
         }));
 
         cleanups.push(window.electronAPI.onIntelligenceFollowUpQuestionsUpdate((data) => {
             // This event name is slightly different ('update' vs 'answer')
             setIsProcessing(false);
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'follow_up_questions') {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = {
-                        ...lastMsg,
-                        text: data.questions,
-                        isStreaming: false
-                    };
-                    return updated;
-                }
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system',
-                    text: data.questions,
-                    intent: 'follow_up_questions'
-                }];
-            });
+            setMessages(prev => finalizeStreamingMessage(prev, 'follow_up_questions', data.questions));
         }));
 
         cleanups.push(window.electronAPI.onIntelligenceManualResult((data) => {
@@ -957,39 +861,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     // orphaning the final 'clarify' event and leaving isProcessing=true forever.
     useEffect(() => {
         const cleanupToken = window.electronAPI.onIntelligenceClarifyToken((data) => {
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'clarify') {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = { ...lastMsg, text: lastMsg.text + data.token };
-                    return updated;
-                }
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system' as const,
-                    text: data.token,
-                    intent: 'clarify',
-                    isStreaming: true
-                }];
-            });
+            setMessages(prev => appendStreamingMessage(prev, 'clarify', data.token));
         });
 
         const cleanupFinal = window.electronAPI.onIntelligenceClarify((data) => {
             setIsProcessing(false);
-            setMessages(prev => {
-                const lastMsg = prev[prev.length - 1];
-                if (lastMsg && lastMsg.isStreaming && lastMsg.intent === 'clarify') {
-                    const updated = [...prev];
-                    updated[prev.length - 1] = { ...lastMsg, text: data.clarification, isStreaming: false };
-                    return updated;
-                }
-                return [...prev, {
-                    id: Date.now().toString(),
-                    role: 'system' as const,
-                    text: data.clarification,
-                    intent: 'clarify'
-                }];
-            });
+            setMessages(prev => finalizeStreamingMessage(prev, 'clarify', data.clarification));
         });
 
         return () => {

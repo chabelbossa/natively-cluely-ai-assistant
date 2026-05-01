@@ -35,6 +35,8 @@ export class ProcessingHelper {
       // Try environment first (for development)
       let apiKey = process.env.GEMINI_API_KEY
       let groqApiKey = process.env.GROQ_API_KEY
+      let deepInfraApiKey = process.env.DEEPINFRA_API_KEY
+      let openCodeGoApiKey = process.env.OPENCODE_GO_API_KEY
       let openaiApiKey = process.env.OPENAI_API_KEY
       let claudeApiKey = process.env.CLAUDE_API_KEY
 
@@ -43,7 +45,7 @@ export class ProcessingHelper {
         console.warn("[ProcessingHelper] GEMINI_API_KEY not found in env. Will try CredentialsManager after ready.")
       }
 
-      this.llmHelper = new LLMHelper(apiKey, false, undefined, undefined, groqApiKey, openaiApiKey, claudeApiKey)
+      this.llmHelper = new LLMHelper(apiKey, false, undefined, undefined, groqApiKey, openaiApiKey, claudeApiKey, deepInfraApiKey, openCodeGoApiKey)
     }
   }
 
@@ -54,10 +56,12 @@ export class ProcessingHelper {
   public loadStoredCredentials(): void {
     const credManager = CredentialsManager.getInstance();
 
-    const geminiKey = credManager.getGeminiApiKey();
-    const groqKey = credManager.getGroqApiKey();
-    const openaiKey = credManager.getOpenaiApiKey();
-    const claudeKey = credManager.getClaudeApiKey();
+    const geminiKey = credManager.getGeminiApiKeys().join('\n');
+    const groqKey = credManager.getGroqApiKeys().join('\n');
+    const deepInfraKey = credManager.getDeepInfraApiKeys().join('\n');
+    const openCodeGoKey = credManager.getOpenCodeGoApiKeys().join('\n');
+    const openaiKey = credManager.getOpenaiApiKeys().join('\n');
+    const claudeKey = credManager.getClaudeApiKeys().join('\n');
 
     if (geminiKey) {
       console.log("[ProcessingHelper] Loading stored Gemini API Key from CredentialsManager");
@@ -67,6 +71,16 @@ export class ProcessingHelper {
     if (groqKey) {
       console.log("[ProcessingHelper] Loading stored Groq API Key from CredentialsManager");
       this.llmHelper.setGroqApiKey(groqKey);
+    }
+
+    if (deepInfraKey) {
+      console.log("[ProcessingHelper] Loading stored DeepInfra API Key from CredentialsManager");
+      this.llmHelper.setDeepInfraApiKey(deepInfraKey);
+    }
+
+    if (openCodeGoKey) {
+      console.log("[ProcessingHelper] Loading stored OpenCode Go API Key from CredentialsManager");
+      this.llmHelper.setOpenCodeGoApiKey(openCodeGoKey);
     }
 
     if (openaiKey) {

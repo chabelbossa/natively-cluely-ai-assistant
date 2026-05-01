@@ -859,6 +859,42 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  safeHandle("set-deepinfra-api-key", async (_, apiKey: string) => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      CredentialsManager.getInstance().setDeepInfraApiKey(apiKey);
+
+      const llmHelper = appState.processingHelper.getLLMHelper();
+      llmHelper.setDeepInfraApiKey(apiKey);
+
+      appState.getIntelligenceManager().resetEngine();
+      appState.getIntelligenceManager().initializeLLMs();
+
+      return { success: true };
+    } catch (error: any) {
+      console.error("Error saving DeepInfra API key:", error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  safeHandle("set-opencode-go-api-key", async (_, apiKey: string) => {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      CredentialsManager.getInstance().setOpenCodeGoApiKey(apiKey);
+
+      const llmHelper = appState.processingHelper.getLLMHelper();
+      llmHelper.setOpenCodeGoApiKey(apiKey);
+
+      appState.getIntelligenceManager().resetEngine();
+      appState.getIntelligenceManager().initializeLLMs();
+
+      return { success: true };
+    } catch (error: any) {
+      console.error("Error saving OpenCode Go API key:", error);
+      return { success: false, error: error.message };
+    }
+  });
+
   safeHandle("set-openai-api-key", async (_, apiKey: string) => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
@@ -1412,6 +1448,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       return {
         hasGeminiKey: hasKey(creds.geminiApiKey),
         hasGroqKey: hasKey(creds.groqApiKey),
+        hasDeepInfraKey: hasKey(creds.deepInfraApiKey),
+        hasOpenCodeGoKey: hasKey(creds.openCodeGoApiKey),
         hasOpenaiKey: hasKey(creds.openaiApiKey),
         hasClaudeKey: hasKey(creds.claudeApiKey),
         hasNativelyKey: hasKey(creds.nativelyApiKey),
@@ -1447,11 +1485,13 @@ export function initializeIpcHandlers(appState: AppState): void {
         // Dynamic Model Discovery - preferred models
         geminiPreferredModel: creds.geminiPreferredModel || undefined,
         groqPreferredModel: creds.groqPreferredModel || undefined,
+        deepinfraPreferredModel: creds.deepinfraPreferredModel || undefined,
+        openCodeGoPreferredModel: creds.openCodeGoPreferredModel || undefined,
         openaiPreferredModel: creds.openaiPreferredModel || undefined,
         claudePreferredModel: creds.claudePreferredModel || undefined,
       };
     } catch (error: any) {
-      return { hasGeminiKey: false, hasGroqKey: false, hasOpenaiKey: false, hasClaudeKey: false, hasNativelyKey: false, googleServiceAccountPath: null, sttProvider: 'none', groqSttModel: 'whisper-large-v3-turbo', localSttMode: 'parakeet_stream', localSttEndpoint: 'http://127.0.0.1:8000/v1/audio/transcriptions', localSttModel: 'whisper-large-v3-turbo', localSttGlossary: 'Kyntia, SSO, Next.js, NestJS, WaChap, Kloo, Artiweb, API, frontend, backend', localSttWhisperCppModelPath: path.join(app.getPath('home'), 'Library/Application Support/com.prakashjoshipax.VoiceInk/WhisperModels/ggml-large-v3-turbo-q5_0.bin'), localSttWhisperCppExecutablePath: '/opt/homebrew/bin/whisper-cli', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasTavilyKey: false, sttGroqKey: '', sttOpenaiKey: '', sttDeepgramKey: '', sttElevenLabsKey: '', sttAzureKey: '', sttIbmKey: '', sttSonioxKey: '' };
+      return { hasGeminiKey: false, hasGroqKey: false, hasDeepInfraKey: false, hasOpenCodeGoKey: false, hasOpenaiKey: false, hasClaudeKey: false, hasNativelyKey: false, googleServiceAccountPath: null, sttProvider: 'none', groqSttModel: 'whisper-large-v3-turbo', localSttMode: 'parakeet_stream', localSttEndpoint: 'http://127.0.0.1:8000/v1/audio/transcriptions', localSttModel: 'whisper-large-v3-turbo', localSttGlossary: 'Kyntia, SSO, Next.js, NestJS, WaChap, Kloo, Artiweb, API, frontend, backend', localSttWhisperCppModelPath: path.join(app.getPath('home'), 'Library/Application Support/com.prakashjoshipax.VoiceInk/WhisperModels/ggml-large-v3-turbo-q5_0.bin'), localSttWhisperCppExecutablePath: '/opt/homebrew/bin/whisper-cli', hasSttGroqKey: false, hasSttOpenaiKey: false, hasDeepgramKey: false, hasElevenLabsKey: false, hasAzureKey: false, azureRegion: 'eastus', hasIbmWatsonKey: false, ibmWatsonRegion: 'us-south', hasSonioxKey: false, hasTavilyKey: false, sttGroqKey: '', sttOpenaiKey: '', sttDeepgramKey: '', sttElevenLabsKey: '', sttAzureKey: '', sttIbmKey: '', sttSonioxKey: '' };
     }
   });
 
@@ -1459,7 +1499,7 @@ export function initializeIpcHandlers(appState: AppState): void {
   // Dynamic Model Discovery Handlers
   // ==========================================
 
-  safeHandle("fetch-provider-models", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey: string) => {
+  safeHandle("fetch-provider-models", async (_, provider: 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude', apiKey: string) => {
     try {
       // Fall back to stored key if no key was explicitly provided
       let key = apiKey?.trim();
@@ -1468,6 +1508,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         const cm = CredentialsManager.getInstance();
         if (provider === 'gemini') key = cm.getGeminiApiKey();
         else if (provider === 'groq') key = cm.getGroqApiKey();
+        else if (provider === 'deepinfra') key = cm.getDeepInfraApiKey();
+        else if (provider === 'opencode_go') key = cm.getOpenCodeGoApiKey();
         else if (provider === 'openai') key = cm.getOpenaiApiKey();
         else if (provider === 'claude') key = cm.getClaudeApiKey();
       }
@@ -1486,7 +1528,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle("set-provider-preferred-model", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude', modelId: string) => {
+  safeHandle("set-provider-preferred-model", async (_, provider: 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude', modelId: string) => {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       CredentialsManager.getInstance().setPreferredModel(provider, modelId);
@@ -1989,7 +2031,7 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
-  safeHandle("test-llm-connection", async (_, provider: 'gemini' | 'groq' | 'openai' | 'claude', apiKey?: string) => {
+  safeHandle("test-llm-connection", async (_, provider: 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude', apiKey?: string) => {
     console.log(`[IPC] Received test-llm-connection request for provider: ${provider}`);
     try {
       if (!apiKey || !apiKey.trim()) {
@@ -1997,6 +2039,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         const creds = CredentialsManager.getInstance();
         if (provider === 'gemini') apiKey = creds.getGeminiApiKey();
         else if (provider === 'groq') apiKey = creds.getGroqApiKey();
+        else if (provider === 'deepinfra') apiKey = creds.getDeepInfraApiKey();
+        else if (provider === 'opencode_go') apiKey = creds.getOpenCodeGoApiKey();
         else if (provider === 'openai') apiKey = creds.getOpenaiApiKey();
         else if (provider === 'claude') apiKey = creds.getClaudeApiKey();
       }
@@ -2006,52 +2050,78 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
 
       const axios = require('axios');
+      const keys = apiKey.split(/[\s,;]+/).map((key: string) => key.trim()).filter(Boolean);
       let response;
+      let lastError: any;
 
-      if (provider === 'gemini') {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent`;
-        response = await axios.post(url, {
-          contents: [{ parts: [{ text: "Hello" }] }]
-        }, {
-          headers: { 'x-goog-api-key': apiKey },
-          timeout: 15000
-        });
-      } else if (provider === 'groq') {
-        response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-          model: "llama-3.3-70b-versatile",
-          messages: [{ role: "user", content: "Hello" }]
-        }, {
-          headers: { Authorization: `Bearer ${apiKey}` },
-          timeout: 15000
-        });
-      } else if (provider === 'openai') {
-        response = await axios.post('https://api.openai.com/v1/chat/completions', {
-          model: "gpt-4o-mini",
-          messages: [{ role: "user", content: "Hello" }]
-        }, {
-          headers: { Authorization: `Bearer ${apiKey}` },
-          timeout: 15000
-        });
-      } else if (provider === 'claude') {
-        response = await axios.post('https://api.anthropic.com/v1/messages', {
-          model: "claude-sonnet-4-6",
-          max_tokens: 10,
-          messages: [{ role: "user", content: "Hello" }]
-        }, {
-          headers: {
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json'
-          },
-          timeout: 15000
-        });
+      for (const key of keys) {
+        try {
+          if (provider === 'gemini') {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent`;
+            response = await axios.post(url, {
+              contents: [{ parts: [{ text: "Hello" }] }]
+            }, {
+              headers: { 'x-goog-api-key': key },
+              timeout: 15000
+            });
+          } else if (provider === 'groq') {
+            response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+              model: "llama-3.1-8b-instant",
+              messages: [{ role: "user", content: "Hello" }]
+            }, {
+              headers: { Authorization: `Bearer ${key}` },
+              timeout: 15000
+            });
+          } else if (provider === 'deepinfra') {
+            response = await axios.post('https://api.deepinfra.com/v1/openai/chat/completions', {
+              model: "stepfun-ai/Step-3.5-Flash",
+              messages: [{ role: "user", content: "Hello" }],
+              max_tokens: 16
+            }, {
+              headers: { Authorization: `Bearer ${key}` },
+              timeout: 15000
+            });
+          } else if (provider === 'opencode_go') {
+            response = await axios.post('https://opencode.ai/zen/go/v1/chat/completions', {
+              model: "deepseek-v4-flash",
+              messages: [{ role: "user", content: "Hello" }]
+            }, {
+              headers: { Authorization: `Bearer ${key}` },
+              timeout: 15000
+            });
+          } else if (provider === 'openai') {
+            response = await axios.post('https://api.openai.com/v1/chat/completions', {
+              model: "gpt-4o-mini",
+              messages: [{ role: "user", content: "Hello" }]
+            }, {
+              headers: { Authorization: `Bearer ${key}` },
+              timeout: 15000
+            });
+          } else if (provider === 'claude') {
+            response = await axios.post('https://api.anthropic.com/v1/messages', {
+              model: "claude-sonnet-4-6",
+              max_tokens: 10,
+              messages: [{ role: "user", content: "Hello" }]
+            }, {
+              headers: {
+                'x-api-key': key,
+                'anthropic-version': '2023-06-01',
+                'content-type': 'application/json'
+              },
+              timeout: 15000
+            });
+          }
+
+          if (response && (response.status === 200 || response.status === 201)) {
+            return { success: true };
+          }
+        } catch (error: any) {
+          lastError = error;
+        }
       }
 
-      if (response && (response.status === 200 || response.status === 201)) {
-        return { success: true };
-      } else {
-        return { success: false, error: 'Request failed with status ' + response?.status };
-      }
+      if (lastError) throw lastError;
+      return { success: false, error: 'Request failed with status ' + response?.status };
 
     } catch (error: any) {
       console.error("LLM connection test failed:", error);

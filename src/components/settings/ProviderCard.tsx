@@ -7,7 +7,7 @@ interface FetchedModel {
 }
 
 interface ProviderCardProps {
-    providerId: 'gemini' | 'groq' | 'openai' | 'claude';
+    providerId: 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude';
     providerName: string;
     apiKey: string;
     preferredModel?: string;
@@ -186,6 +186,9 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
                     </button>
                 )}
             </div>
+            <p className="text-[10px] text-text-tertiary mb-3">
+                Add multiple keys separated by commas to enable automatic round robin on rate limits or provider failures.
+            </p>
 
             {/* Action Row: Test Connection + Conditional Dropdown + Fetch Models */}
             <div className="flex items-center justify-between mb-3 w-full">

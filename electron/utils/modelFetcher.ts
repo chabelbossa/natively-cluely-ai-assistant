@@ -10,7 +10,28 @@ export interface ProviderModel {
     label: string;
 }
 
-type Provider = 'gemini' | 'groq' | 'openai' | 'claude';
+type Provider = 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude';
+
+const DEEPINFRA_DEFAULT_ORDER = [
+    'stepfun-ai/Step-3.5-Flash',
+    'Qwen/Qwen3.5-4B',
+    'meta-llama/Meta-Llama-3.1-8B-Instruct',
+    'openai/gpt-oss-20b',
+    'Qwen/Qwen3-8B',
+    'mistralai/Mistral-7B-Instruct-v0.3',
+    'deepseek-ai/DeepSeek-V3',
+];
+
+const OPENCODE_GO_DEFAULT_ORDER = [
+    'deepseek-v4-flash',
+    'qwen3.5-plus',
+    'mimo-v2.5',
+    'kimi-k2.5',
+    'glm-5',
+    'deepseek-v4-pro',
+    'kimi-k2.6',
+    'glm-5.1',
+];
 
 /**
  * Fetch available models from a provider's API.
@@ -25,6 +46,10 @@ export async function fetchProviderModels(
             return fetchOpenAIModels(apiKey);
         case 'groq':
             return fetchGroqModels(apiKey);
+        case 'deepinfra':
+            return fetchDeepInfraModels(apiKey);
+        case 'opencode_go':
+            return fetchOpenCodeGoModels(apiKey);
         case 'claude':
             return fetchAnthropicModels(apiKey);
         case 'gemini':
@@ -32,6 +57,26 @@ export async function fetchProviderModels(
         default:
             throw new Error(`Unknown provider: ${provider}`);
     }
+}
+
+function sortByPreference(models: ProviderModel[], orderedIds: string[], idMapper: (id: string) => string = id => id): ProviderModel[] {
+    const rank = new Map(orderedIds.map((id, index) => [id.toLowerCase(), index]));
+    return [...models].sort((a, b) => {
+        const aRank = rank.get(idMapper(a.id).toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
+        const bRank = rank.get(idMapper(b.id).toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
+        if (aRank !== bRank) return aRank - bRank;
+        return a.label.localeCompare(b.label);
+    });
+}
+
+function prettifyModelLabel(id: string): string {
+    return id
+        .replace(/^deepinfra:/, '')
+        .replace(/^opencode-go[/:]/, '')
+        .split(/[/:]/)
+        .pop()!
+        .replace(/[-_]/g, ' ')
+        .replace(/\b\w/g, c => c.toUpperCase());
 }
 
 // ─── OpenAI ──────────────────────────────────────────────────────────────────
@@ -82,9 +127,77 @@ async function fetchGroqModels(apiKey: string): Promise<ProviderModel[]> {
         return !excludePatterns.some(p => id.includes(p));
     });
 
-    return filtered
+    const mapped = filtered
         .map((m: any) => ({ id: m.id, label: m.id }))
         .sort((a, b) => a.label.localeCompare(b.label));
+
+    return sortByPreference(mapped, ['llama-3.1-8b-instant', 'openai/gpt-oss-20b', 'llama-3.3-70b-versatile']);
+}
+
+// ─── DeepInfra ───────────────────────────────────────────────────────────────
+
+async function fetchDeepInfraModels(apiKey: string): Promise<ProviderModel[]> {
+    const response = await axios.get('https://api.deepinfra.com/v1/openai/models', {
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+        timeout: 15000,
+    });
+
+    const models: any[] = response.data?.data || [];
+    const excludePatterns = [
+        'embedding', 'rerank', 'whisper', 'tts', 'speech', 'audio',
+        'image', 'vision', 'stable-diffusion', 'flux', 'sdxl', 'ocr',
+    ];
+
+    const filtered = models.filter((m: any) => {
+        const id = String(m.id || '');
+        const lower = id.toLowerCase();
+        if (!id || excludePatterns.some(p => lower.includes(p))) return false;
+        const hasChatMetadata = !!m.metadata?.context_length || !!m.metadata?.max_tokens;
+        const likelyChat = /instruct|chat|gpt-oss|deepseek|qwen|mistral|llama|glm|kimi/i.test(id);
+        return hasChatMetadata || likelyChat;
+    });
+
+    const mapped = filtered.map((m: any) => ({
+        id: `deepinfra:${m.id}`,
+        label: prettifyModelLabel(m.id),
+    }));
+
+    return sortByPreference(mapped, DEEPINFRA_DEFAULT_ORDER, id => id.replace(/^deepinfra:/, ''));
+}
+
+// ─── OpenCode Go ─────────────────────────────────────────────────────────────
+
+async function fetchOpenCodeGoModels(apiKey: string): Promise<ProviderModel[]> {
+    const response = await axios.get('https://opencode.ai/zen/go/v1/models', {
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+        timeout: 15000,
+    });
+
+    const models: any[] = response.data?.data || [];
+
+    const compatibleIds = new Set([
+        'glm-5.1',
+        'glm-5',
+        'kimi-k2.5',
+        'kimi-k2.6',
+        'deepseek-v4-pro',
+        'deepseek-v4-flash',
+        'mimo-v2-pro',
+        'mimo-v2-omni',
+        'mimo-v2.5-pro',
+        'mimo-v2.5',
+        'qwen3.6-plus',
+        'qwen3.5-plus',
+    ]);
+
+    const mapped = models
+        .filter((m: any) => compatibleIds.has(String(m.id || '')))
+        .map((m: any) => ({
+            id: `opencode-go/${m.id}`,
+            label: prettifyModelLabel(m.id),
+        }));
+
+    return sortByPreference(mapped, OPENCODE_GO_DEFAULT_ORDER, id => id.replace(/^opencode-go\//, ''));
 }
 
 // ─── Anthropic ───────────────────────────────────────────────────────────────
