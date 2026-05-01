@@ -129,8 +129,8 @@ export class ModelSelectorWindowHelper {
 
     private createWindow(x?: number, y?: number, showWhenReady: boolean = true): void {
         const windowSettings: Electron.BrowserWindowConstructorOptions = {
-            width: 140,
-            height: 200,
+            width: 240,
+            height: 280,
             frame: false,
             transparent: true,
             resizable: false,

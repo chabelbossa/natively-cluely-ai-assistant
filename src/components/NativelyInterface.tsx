@@ -31,7 +31,11 @@ import {
     ThumbsUp,
     Clock3,
     CircleSlash,
-    CheckCircle2
+    CheckCircle2,
+    Eye,
+    EyeOff,
+    Loader2,
+    Globe
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -69,7 +73,33 @@ interface Message {
         yourTarget: number | null;
         currency: string;
     };
+    modelUsed?: string;
+    tokensUsed?: number;
+    durationMs?: number;
 }
+
+const estimateTokens = (text: string): number => Math.max(1, Math.round(text.length / 4));
+
+const shortenModelName = (model: string): string => {
+    const map: Record<string, string> = {
+        'gemini-3.1-flash-lite-preview': 'Gemini 3.1 Flash',
+        'gemini-3.1-pro-preview': 'Gemini 3.1 Pro',
+        'llama-3.3-70b-versatile': 'Groq Llama 3.3',
+        'gpt-5.4': 'GPT 5.4',
+        'claude-sonnet-4-6': 'Sonnet 4.6',
+        'natively': 'Natively',
+        'gemini-2.5-pro-preview': 'Gemini 2.5 Pro',
+    };
+    if (map[model]) return map[model];
+    if (model.startsWith('ollama-')) return model.replace('ollama-', '');
+    if (model.length > 20) return model.substring(0, 17) + '...';
+    return model;
+};
+
+const formatDuration = (ms: number): string => {
+    if (ms < 1000) return `${ms}ms`;
+    return `${(ms / 1000).toFixed(1)}s`;
+};
 
 const getSuggestedAnswerIntent = (question?: string) => {
     const normalized = (question || '').toLowerCase();
@@ -99,7 +129,7 @@ const appendStreamingMessage = (messages: Message[], intent: string, token: stri
     }];
 };
 
-const finalizeStreamingMessage = (messages: Message[], intent: string, text: string): Message[] => {
+const finalizeStreamingMessage = (messages: Message[], intent: string, text: string, meta?: { modelUsed?: string; tokensUsed?: number }): Message[] => {
     const existingIndex = [...messages].reverse().findIndex(msg => msg.isStreaming && msg.intent === intent);
     if (existingIndex !== -1) {
         const index = messages.length - 1 - existingIndex;
@@ -107,7 +137,8 @@ const finalizeStreamingMessage = (messages: Message[], intent: string, text: str
         updated[index] = {
             ...updated[index],
             text,
-            isStreaming: false
+            isStreaming: false,
+            ...(meta || {}),
         };
         return updated;
     }
@@ -238,6 +269,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
     const [sttInterviewerError, setSttInterviewerError] = useState<string>('');
     const [sttInterviewerProvider, setSttInterviewerProvider] = useState<string>('');
     const [isProcessing, setIsProcessing] = useState(false);
+    const [actionLoading, setActionLoading] = useState<Record<string, boolean>>({});
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [conversationContext, setConversationContext] = useState<string>('');
     const [isManualRecording, setIsManualRecording] = useState(false);
@@ -295,12 +327,25 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
     // Active mode name (shown as a badge near the Modes button)
     const [activeModeLabel, setActiveModeLabel] = useState<string | null>(null);
+    const [availableModes, setAvailableModes] = useState<Array<{ id: string; name: string; templateType: string }>>([]);
+    const [isModeOpen, setIsModeOpen] = useState(false);
+    const [isLangOpen, setIsLangOpen] = useState(false);
+    const [aiLang, setAiLang] = useState<string>('auto');
+    const modeRef = useRef<HTMLDivElement>(null);
+    const langRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         // Load initial active mode name
         window.electronAPI?.modesGetActive?.()
             .then((mode: { name: string } | null) => setActiveModeLabel(mode?.name ?? null))
             .catch(() => {});
+        window.electronAPI?.modesGetAll?.()
+            .then((list) => setAvailableModes(list))
+            .catch(() => {});
+        // AI response language
+        window.electronAPI?.getAiResponseLanguage?.().then((r: any) => {
+            if (r?.language) setAiLang(r.language);
+        }).catch(() => {});
         // Live-update whenever mode is activated/deactivated
         const unsub = window.electronAPI?.onModeChanged?.((data: { id: string | null; name: string | null }) => {
             setActiveModeLabel(data.name);
@@ -308,8 +353,20 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         return () => unsub?.();
     }, []);
 
+    // Close mode/lang dropdowns on outside click
+    useEffect(() => {
+        const handleClick = (e: MouseEvent) => {
+            if (modeRef.current && !modeRef.current.contains(e.target as Node)) setIsModeOpen(false);
+            if (langRef.current && !langRef.current.contains(e.target as Node)) setIsLangOpen(false);
+        };
+        if (isModeOpen || isLangOpen) document.addEventListener('mousedown', handleClick);
+        return () => document.removeEventListener('mousedown', handleClick);
+    }, [isModeOpen, isLangOpen]);
+
     // Model Selection State
     const [currentModel, setCurrentModel] = useState<string>('gemini-3-flash-preview');
+    const currentModelRef = useRef(currentModel);
+    useEffect(() => { currentModelRef.current = currentModel; }, [currentModel]);
 
     // Dynamic Action Button Mode (Recap vs Brainstorm)
     const [actionButtonMode, setActionButtonMode] = useState<'recap' | 'brainstorm'>('recap');
@@ -592,6 +649,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         const text = transcript.text?.trim();
         if (!text) return;
 
+        // A stale hidden-transcript preference can make live STT look broken while
+        // final persistence still works. Any incoming segment should surface the
+        // live panel again so the user can verify capture in real time.
+        setShowTranscript(true);
+        localStorage.setItem('natively_interviewer_transcript', 'true');
+
         const speaker = normalizeLiveSpeaker(transcript.speaker);
         const timestamp = Date.now();
         const turn: LiveTranscriptTurn = {
@@ -772,8 +835,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
         cleanups.push(window.electronAPI.onIntelligenceSuggestedAnswer((data) => {
             setIsProcessing(false);
+            setActionLoading(prev => ({ ...prev, whatToSay: false }));
             const intent = getSuggestedAnswerIntent(data.question);
-            setMessages(prev => finalizeStreamingMessage(prev, intent, data.answer));
+            setMessages(prev => finalizeStreamingMessage(prev, intent, data.answer, {
+                modelUsed: shortenModelName(currentModelRef.current),
+                tokensUsed: estimateTokens(data.answer),
+            }));
         }));
 
         // STREAMING: Refinement
@@ -783,7 +850,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
         cleanups.push(window.electronAPI.onIntelligenceRefinedAnswer((data) => {
             setIsProcessing(false);
-            setMessages(prev => finalizeStreamingMessage(prev, data.intent, data.answer));
+            setMessages(prev => finalizeStreamingMessage(prev, data.intent, data.answer, {
+                modelUsed: shortenModelName(currentModelRef.current),
+                tokensUsed: estimateTokens(data.answer),
+            }));
         }));
 
         // STREAMING: Recap
@@ -792,8 +862,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         }));
 
         cleanups.push(window.electronAPI.onIntelligenceRecap((data) => {
-            setIsProcessing(false);
-            setMessages(prev => finalizeStreamingMessage(prev, 'recap', data.summary));
+            setActionLoading(prev => ({ ...prev, recap: false }));
+            setMessages(prev => finalizeStreamingMessage(prev, 'recap', data.summary, {
+                modelUsed: shortenModelName(currentModelRef.current),
+                tokensUsed: estimateTokens(data.summary),
+            }));
         }));
 
         // STREAMING: Follow-Up Questions (Rendered as message? Or specific UI?)
@@ -813,9 +886,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         }));
 
         cleanups.push(window.electronAPI.onIntelligenceFollowUpQuestionsUpdate((data) => {
-            // This event name is slightly different ('update' vs 'answer')
-            setIsProcessing(false);
-            setMessages(prev => finalizeStreamingMessage(prev, 'follow_up_questions', data.questions));
+            setActionLoading(prev => ({ ...prev, followUpQuestions: false }));
+            const text = typeof data.questions === 'string' ? data.questions : JSON.stringify(data.questions);
+            setMessages(prev => finalizeStreamingMessage(prev, 'follow_up_questions', data.questions, {
+                modelUsed: shortenModelName(currentModelRef.current),
+                tokensUsed: estimateTokens(text),
+            }));
         }));
 
         cleanups.push(window.electronAPI.onIntelligenceManualResult((data) => {
@@ -829,6 +905,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
         cleanups.push(window.electronAPI.onIntelligenceError((data) => {
             setIsProcessing(false);
+            setActionLoading({});
             setMessages(prev => [...prev, {
                 id: Date.now().toString(),
                 role: 'system',
@@ -865,8 +942,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         });
 
         const cleanupFinal = window.electronAPI.onIntelligenceClarify((data) => {
-            setIsProcessing(false);
-            setMessages(prev => finalizeStreamingMessage(prev, 'clarify', data.clarification));
+            setActionLoading(prev => ({ ...prev, clarify: false }));
+            setMessages(prev => finalizeStreamingMessage(prev, 'clarify', data.clarification, {
+                modelUsed: shortenModelName(currentModelRef.current),
+                tokensUsed: estimateTokens(data.clarification),
+            }));
         });
 
         return () => {
@@ -886,7 +966,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
     const handleWhatToSay = async () => {
         setIsExpanded(true);
-        setIsProcessing(true);
+        setActionLoading(prev => ({ ...prev, whatToSay: true }));
         analytics.trackCommandExecuted('what_to_say');
 
         // Capture and clear attached image context.
@@ -924,7 +1004,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 text: `Error: ${err}`
             }]);
         } finally {
-            setIsProcessing(false);
+            setActionLoading(prev => ({ ...prev, whatToSay: false }));
         }
     };
 
@@ -948,7 +1028,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
 
     const handleRecap = async () => {
         setIsExpanded(true);
-        setIsProcessing(true);
+        setActionLoading(prev => ({ ...prev, recap: true }));
         analytics.trackCommandExecuted('recap');
 
         try {
@@ -960,13 +1040,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 text: `Error: ${err}`
             }]);
         } finally {
-            setIsProcessing(false);
+            setActionLoading(prev => ({ ...prev, recap: false }));
         }
     };
 
     const handleFollowUpQuestions = async () => {
         setIsExpanded(true);
-        setIsProcessing(true);
+        setActionLoading(prev => ({ ...prev, followUpQuestions: true }));
         analytics.trackCommandExecuted('suggest_questions');
 
         try {
@@ -978,13 +1058,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 text: `Error: ${err}`
             }]);
         } finally {
-            setIsProcessing(false);
+            setActionLoading(prev => ({ ...prev, followUpQuestions: false }));
         }
     };
 
     const handleClarify = async () => {
         setIsExpanded(true);
-        setIsProcessing(true);
+        setActionLoading(prev => ({ ...prev, clarify: true }));
         analytics.trackCommandExecuted('clarify');
 
         try {
@@ -996,13 +1076,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 text: `Error: ${err}`
             }]);
         } finally {
-            setIsProcessing(false);
+            setActionLoading(prev => ({ ...prev, clarify: false }));
         }
     };
 
     const handleCodeHint = async () => {
         setIsExpanded(true);
-        setIsProcessing(true);
+        setActionLoading(prev => ({ ...prev, codeHint: true }));
         analytics.trackCommandExecuted('code_hint');
 
         const currentAttachments = attachedContext;
@@ -1031,13 +1111,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 text: `Error: ${err}`
             }]);
         } finally {
-            setIsProcessing(false);
+            setActionLoading(prev => ({ ...prev, codeHint: false }));
         }
     };
 
     const handleBrainstorm = async () => {
         setIsExpanded(true);
-        setIsProcessing(true);
+        setActionLoading(prev => ({ ...prev, brainstorm: true }));
         analytics.trackCommandExecuted('brainstorm');
 
         const currentAttachments = attachedContext;
@@ -1066,9 +1146,35 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                 text: `Error: ${err}`
             }]);
         } finally {
-            setIsProcessing(false);
+            setActionLoading(prev => ({ ...prev, brainstorm: false }));
         }
     };
+
+    // ── Mode & Language handlers ──
+    const handleSetActiveMode = async (modeId: string | null) => {
+        try {
+            await window.electronAPI?.modesSetActive(modeId);
+            setIsModeOpen(false);
+        } catch (e) { console.error('Failed to set mode:', e); }
+    };
+
+    const handleSetLanguage = async (code: string) => {
+        try {
+            await window.electronAPI?.setAiResponseLanguage(code);
+            setAiLang(code);
+            setIsLangOpen(false);
+        } catch (e) { console.error('Failed to set language:', e); }
+    };
+
+    const LANG_OPTIONS = [
+        { code: 'auto', label: 'Auto' },
+        { code: 'English', label: 'English' },
+        { code: 'French', label: 'Français' },
+        { code: 'Spanish', label: 'Español' },
+        { code: 'German', label: 'Deutsch' },
+        { code: 'Chinese', label: '中文' },
+        { code: 'Japanese', label: '日本語' },
+    ];
 
 
     // Setup Streaming Listeners
@@ -1149,11 +1255,20 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
                                 isNegotiationCoaching: true,
                                 negotiationCoachingData: coaching,
                                 text: '',
+                                modelUsed: shortenModelName(currentModel),
+                                tokensUsed: 0,
+                                durationMs: latency,
                             }];
                         }
                     } catch {}
-                    // Normal completion
-                    return [...prev.slice(0, -1), { ...lastMsg, isStreaming: false }];
+                    // Normal completion — attach metadata
+                    return [...prev.slice(0, -1), {
+                        ...lastMsg,
+                        isStreaming: false,
+                        modelUsed: shortenModelName(currentModel),
+                        tokensUsed: estimateTokens(lastMsg.text),
+                        durationMs: latency,
+                    }];
                 }
                 return prev;
             });
@@ -2056,7 +2171,8 @@ Provide only the answer, nothing else.`;
     const interviewerSttIndicatorError = sttInterviewerError?.replace(/\s*\(\d+ consecutive errors\):?/gi, '');
     const visibleTranscriptTurns = [...liveTranscriptTurns].sort((a, b) => a.timestamp - b.timestamp);
     const copyableTranscriptTurns = [...copyTranscriptTurns].sort((a, b) => a.timestamp - b.timestamp);
-    const hasLiveTranscript = showTranscript && visibleTranscriptTurns.length > 0;
+    const hasPendingTranscript = Object.keys(pendingLiveTranscript).length > 0;
+    const hasLiveTranscript = showTranscript && (visibleTranscriptTurns.length > 0 || hasPendingTranscript || isConnected);
     const transcriptPageSize = isTranscriptExpanded ? LIVE_TRANSCRIPT_EXPANDED_PAGE_SIZE : LIVE_TRANSCRIPT_COLLAPSED_PAGE_SIZE;
     const maxTranscriptPage = Math.max(0, Math.ceil(visibleTranscriptTurns.length / transcriptPageSize) - 1);
     const currentTranscriptPage = Math.min(transcriptPage, maxTranscriptPage);
@@ -2327,7 +2443,20 @@ Provide only the answer, nothing else.`;
                                                 {copiedTranscriptId === 'all' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                                                 <span>{copiedTranscriptId === 'all' ? 'Copied' : 'Copy all'}</span>
                                             </button>
-                                            {Object.keys(pendingLiveTranscript).length > 0 && (
+                                            <button
+                                                onClick={() => {
+                                                    const next = !showTranscript;
+                                                    setShowTranscript(next);
+                                                    localStorage.setItem('natively_interviewer_transcript', String(next));
+                                                }}
+                                                className={`flex items-center gap-1 px-2 py-1 rounded-full border transition-all active:scale-95 ${quickActionClass}`}
+                                                style={appearance.chipStyle}
+                                                title={showTranscript ? 'Hide transcript' : 'Show transcript'}
+                                            >
+                                                {showTranscript ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                                                <span>{showTranscript ? 'Hide' : 'Show'}</span>
+                                            </button>
+                                            {hasPendingTranscript && (
                                                 <>
                                                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                                                     <span>Listening</span>
@@ -2335,26 +2464,32 @@ Provide only the answer, nothing else.`;
                                             )}
                                         </div>
                                     </div>
-                                    <div className={`px-3.5 pb-3 space-y-2 overflow-hidden ${isTranscriptExpanded ? 'min-h-[220px]' : ''}`}>
-                                        {displayedTranscriptTurns.map((turn) => (
-                                            <div key={turn.id} className="group/transcript grid grid-cols-[72px_minmax(0,1fr)_24px] gap-2 text-[12px] leading-snug">
-                                                <div className={`font-semibold ${turn.speaker === 'user' ? 'text-emerald-400' : 'overlay-text-muted'}`}>
-                                                    {getTranscriptSpeakerLabel(turn.speaker)}
+                                    <div className={`px-3.5 pb-3 space-y-2 overflow-y-auto ${isTranscriptExpanded ? 'max-h-[320px]' : 'max-h-[180px]'}`}>
+                                        {displayedTranscriptTurns.length > 0 ? (
+                                            displayedTranscriptTurns.map((turn) => (
+                                                <div key={turn.id} className="group/transcript grid grid-cols-[72px_minmax(0,1fr)_24px] gap-2 text-[12px] leading-snug">
+                                                    <div className={`font-semibold ${turn.speaker === 'user' ? 'text-emerald-400' : 'overlay-text-muted'}`}>
+                                                        {getTranscriptSpeakerLabel(turn.speaker)}
+                                                    </div>
+                                                    <div className={`min-w-0 select-text ${turn.final ? 'overlay-text-primary' : 'overlay-text-muted italic'}`}>
+                                                        {turn.text}
+                                                        {!turn.final && <span className="inline-block ml-1 w-1 h-1 rounded-full bg-emerald-400 align-middle animate-pulse" />}
+                                                    </div>
+                                                    <button
+                                                        onClick={() => handleCopyTranscriptTurn(turn)}
+                                                        className="opacity-0 group-hover/transcript:opacity-100 focus:opacity-100 p-1 rounded-md overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive transition-opacity"
+                                                        title="Copy transcript line"
+                                                        style={appearance.iconStyle}
+                                                    >
+                                                        {copiedTranscriptId === turn.id ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                                                    </button>
                                                 </div>
-                                                <div className={`min-w-0 select-text ${turn.final ? 'overlay-text-primary' : 'overlay-text-muted italic'}`}>
-                                                    {turn.text}
-                                                    {!turn.final && <span className="inline-block ml-1 w-1 h-1 rounded-full bg-emerald-400 align-middle animate-pulse" />}
-                                                </div>
-                                                <button
-                                                    onClick={() => handleCopyTranscriptTurn(turn)}
-                                                    className="opacity-0 group-hover/transcript:opacity-100 focus:opacity-100 p-1 rounded-md overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive transition-opacity"
-                                                    title="Copy transcript line"
-                                                    style={appearance.iconStyle}
-                                                >
-                                                    {copiedTranscriptId === turn.id ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                                                </button>
+                                            ))
+                                        ) : (
+                                            <div className="py-2 text-[12px] overlay-text-muted">
+                                                Waiting for live transcript...
                                             </div>
-                                        ))}
+                                        )}
                                         <div ref={liveTranscriptEndRef} />
                                     </div>
                                 </div>
@@ -2467,6 +2602,20 @@ Provide only the answer, nothing else.`;
                                                     </button>
                                                 )}
                                                 {renderMessageText(msg)}
+                                                {msg.role === 'system' && msg.modelUsed && !msg.isStreaming && (
+                                                    <div className="flex items-center gap-2 mt-2 pt-1.5 text-[10px] overlay-text-muted border-t" style={{ borderColor: 'inherit', opacity: 0.2 }}>
+                                                        <span className="flex items-center gap-1">
+                                                            <Sparkles className="w-2.5 h-2.5" />
+                                                            {msg.modelUsed}
+                                                        </span>
+                                                        {msg.durationMs ? (
+                                                            <span className="opacity-50">{formatDuration(msg.durationMs)}</span>
+                                                        ) : null}
+                                                        {msg.tokensUsed ? (
+                                                            <span className="opacity-50">{msg.tokensUsed} tok</span>
+                                                        ) : null}
+                                                    </div>
+                                                )}
                                             </div>
                                         </div>
                                     ))}
@@ -2506,20 +2655,23 @@ Provide only the answer, nothing else.`;
 
                             {/* Quick Actions - Minimal & Clean */}
                             <div className={`flex flex-nowrap justify-center items-center gap-1.5 px-4 pb-3 overflow-x-hidden ${rollingTranscript && showTranscript ? 'pt-1' : 'pt-3'}`}>
-                                <button onClick={handleWhatToSay} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`} style={appearance.chipStyle}>
-                                    <Pencil className="w-3 h-3 opacity-70" /> What to answer?
+                                <button onClick={handleWhatToSay} disabled={!!actionLoading.whatToSay} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`} style={appearance.chipStyle}>
+                                    {actionLoading.whatToSay ? <Loader2 className="w-3 h-3 animate-spin" /> : <Pencil className="w-3 h-3 opacity-70" />}
+                                    <span>What to answer?</span>
                                 </button>
-                                <button onClick={handleClarify} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`} style={appearance.chipStyle}>
-                                    <MessageSquare className="w-3 h-3 opacity-70" /> Clarify
+                                <button onClick={handleClarify} disabled={!!actionLoading.clarify} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`} style={appearance.chipStyle}>
+                                    {actionLoading.clarify ? <Loader2 className="w-3 h-3 animate-spin" /> : <MessageSquare className="w-3 h-3 opacity-70" />}
+                                    <span>Clarify</span>
                                 </button>
-                                <button onClick={actionButtonMode === 'brainstorm' ? handleBrainstorm : handleRecap} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`} style={appearance.chipStyle}>
+                                <button onClick={actionButtonMode === 'brainstorm' ? handleBrainstorm : handleRecap} disabled={actionButtonMode === 'brainstorm' ? !!actionLoading.brainstorm : !!actionLoading.recap} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`} style={appearance.chipStyle}>
                                     {actionButtonMode === 'brainstorm'
-                                        ? <><Lightbulb className="w-3 h-3 opacity-70" /> Brainstorm</>
-                                        : <><RefreshCw className="w-3 h-3 opacity-70" /> Recap</>
+                                        ? <>{actionLoading.brainstorm ? <Loader2 className="w-3 h-3 animate-spin" /> : <Lightbulb className="w-3 h-3 opacity-70" />} <span>Brainstorm</span></>
+                                        : <>{actionLoading.recap ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3 opacity-70" />} <span>Recap</span></>
                                     }
                                 </button>
-                                <button onClick={handleFollowUpQuestions} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`} style={appearance.chipStyle}>
-                                    <HelpCircle className="w-3 h-3 opacity-70" /> Follow Up Question
+                                <button onClick={handleFollowUpQuestions} disabled={!!actionLoading.followUpQuestions} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`} style={appearance.chipStyle}>
+                                    {actionLoading.followUpQuestions ? <Loader2 className="w-3 h-3 animate-spin" /> : <HelpCircle className="w-3 h-3 opacity-70" />}
+                                    <span>Follow Up Question</span>
                                 </button>
                                 <button
                                     onClick={handleAnswerNow}
@@ -2656,6 +2808,110 @@ Provide only the answer, nothing else.`;
                                         </button>
 
                                         <div className="w-px h-3 mx-1" style={appearance.dividerStyle} />
+
+                                        {/* Mode Selector */}
+                                        <div className="relative" ref={modeRef}>
+                                            <button
+                                                onClick={() => { setIsModeOpen(!isModeOpen); setIsLangOpen(false); }}
+                                                className={`
+                                                    flex items-center gap-1 px-2.5 py-1.5
+                                                    border rounded-lg transition-colors
+                                                    text-[11px] font-medium max-w-[110px]
+                                                    interaction-base interaction-press whitespace-nowrap
+                                                    ${controlSurfaceClass}
+                                                    ${activeModeLabel ? 'text-accent-primary' : 'text-text-secondary'}
+                                                `}
+                                                style={appearance.controlStyle}
+                                                title="Switch context mode"
+                                            >
+                                                <Sparkles className="w-3 h-3 shrink-0" />
+                                                <span className="truncate">{activeModeLabel || 'Mode'}</span>
+                                                <ChevronDown size={10} className="shrink-0" />
+                                            </button>
+                                            {isModeOpen && (
+                                                <div className="absolute bottom-full left-0 mb-1 min-w-[200px] max-w-[280px] bg-bg-elevated border border-border-subtle rounded-xl shadow-xl overflow-hidden z-50 p-1 animated fadeIn select-none">
+                                                    <div className="text-[10px] font-semibold uppercase tracking-wide text-text-tertiary px-2 py-1.5">Context Mode</div>
+                                                    <div className="max-h-[160px] overflow-y-auto">
+                                                    <button
+                                                        onClick={() => handleSetActiveMode(null)}
+                                                        className={`w-full text-left px-2 py-1.5 rounded-md text-[12px] flex items-center gap-2 transition-colors ${!activeModeLabel ? 'text-accent-primary bg-accent-primary/10' : 'text-text-secondary hover:bg-bg-input hover:text-text-primary'}`}
+                                                    >
+                                                        <span className="w-2 h-2 rounded-full border border-current" />
+                                                        No mode (default)
+                                                    </button>
+                                                    {availableModes.map((m) => (
+                                                        <button
+                                                            key={m.id}
+                                                            onClick={() => handleSetActiveMode(m.id)}
+                                                            className={`w-full text-left px-2 py-1.5 rounded-md text-[12px] flex items-center gap-2 transition-colors ${activeModeLabel === m.name ? 'text-accent-primary bg-accent-primary/10' : 'text-text-secondary hover:bg-bg-input hover:text-text-primary'}`}
+                                                        >
+                                                            {activeModeLabel === m.name ? (
+                                                                <Check className="w-3 h-3 text-accent-primary shrink-0" />
+                                                            ) : (
+                                                                <span className="w-3 h-3 rounded-full border border-current opacity-30 shrink-0" />
+                                                            )}
+                                                            <span className="truncate">{m.name}</span>
+                                                            <span className="text-[10px] text-text-tertiary ml-auto shrink-0">{m.templateType}</span>
+                                                        </button>
+                                                    ))}
+                                                    </div>
+                                                    {activeModeLabel && (
+                                                        <div className="border-t border-border-subtle mt-1 pt-1.5 px-1.5">
+                                                            <input
+                                                                type="text"
+                                                                placeholder="Add context notes for this mode..."
+                                                                className="w-full bg-bg-input border border-border-subtle rounded-md px-2 py-1 text-[11px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent-primary"
+                                                                onKeyDown={async (e) => {
+                                                                    if (e.key === 'Enter') {
+                                                                        const val = (e.target as HTMLInputElement).value.trim();
+                                                                        if (!val) return;
+                                                                        try {
+                                                                            const mode = availableModes.find(m => m.name === activeModeLabel);
+                                                                            if (mode) {
+                                                                                await window.electronAPI?.modesUpdate(mode.id, { customContext: val });
+                                                                                (e.target as HTMLInputElement).value = '';
+                                                                            }
+                                                                        } catch {}
+                                                                    }
+                                                                }}
+                                                            />
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* Language Selector */}
+                                        <div className="relative" ref={langRef}>
+                                            <button
+                                                onClick={() => { setIsLangOpen(!isLangOpen); setIsModeOpen(false); }}
+                                                className={`
+                                                    w-7 h-7 flex items-center justify-center rounded-lg
+                                                    text-text-secondary hover:text-text-primary
+                                                    transition-colors
+                                                    ${isLangOpen ? 'bg-bg-input text-text-primary' : ''}
+                                                `}
+                                                title={`AI response language: ${aiLang}`}
+                                            >
+                                                <Globe className="w-3.5 h-3.5" />
+                                            </button>
+                                            {isLangOpen && (
+                                                <div className="absolute bottom-full left-0 mb-1 min-w-[130px] bg-bg-elevated border border-border-subtle rounded-xl shadow-xl overflow-hidden z-50 p-1 animated fadeIn select-none">
+                                                    {LANG_OPTIONS.map((opt) => (
+                                                        <button
+                                                            key={opt.code}
+                                                            onClick={() => handleSetLanguage(opt.code)}
+                                                            className={`w-full text-left px-2.5 py-1.5 rounded-md text-[12px] flex items-center gap-2 transition-colors ${aiLang === opt.code ? 'text-accent-primary bg-accent-primary/10' : 'text-text-secondary hover:bg-bg-input hover:text-text-primary'}`}
+                                                        >
+                                                            <span className="flex-1">{opt.label}</span>
+                                                            {aiLang === opt.code && <Check className="w-3 h-3 text-accent-primary shrink-0" />}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div className="w-px h-3 mx-0.5" style={appearance.dividerStyle} />
 
                                         <div className="relative">
                                             <button

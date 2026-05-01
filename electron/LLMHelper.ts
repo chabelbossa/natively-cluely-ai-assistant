@@ -244,6 +244,10 @@ export class LLMHelper {
     console.log(`[LLMHelper] Gemini API Key updated (${this.providerKeyRings.gemini.keys.length} key${this.providerKeyRings.gemini.keys.length === 1 ? '' : 's'}).`);
   }
 
+  public setGeminiApiKey(apiKey: string) {
+    this.setApiKey(apiKey);
+  }
+
   public setGroqApiKey(apiKey: string) {
     this.configureProviderKeys('groq', apiKey);
     console.log(`[LLMHelper] Groq API Key updated (${this.providerKeyRings.groq.keys.length} key${this.providerKeyRings.groq.keys.length === 1 ? '' : 's'}).`);
@@ -978,6 +982,30 @@ ANSWER DIRECTLY:`;
     console.log(`[LLMHelper] STT Language set to: ${language}`);
   }
 
+  private getAiResponseLanguageName(): string | null {
+    if (!this.aiResponseLanguage || this.aiResponseLanguage === 'auto') return null;
+
+    const languageNames: Record<string, string> = {
+      'english-us': 'English',
+      'english-uk': 'English',
+      english: 'English',
+      English: 'English',
+      'french-fr': 'French',
+      french: 'French',
+      Français: 'French',
+      'spanish-es': 'Spanish',
+      spanish: 'Spanish',
+      'german-de': 'German',
+      german: 'German',
+      'chinese-zh': 'Chinese',
+      chinese: 'Chinese',
+      'japanese-ja': 'Japanese',
+      japanese: 'Japanese',
+    };
+
+    return languageNames[this.aiResponseLanguage] || this.aiResponseLanguage;
+  }
+
   /**
    * Inject a hard language instruction that gates the entire response.
    *
@@ -1002,9 +1030,11 @@ ANSWER DIRECTLY:`;
     // switch from English to Hindi mid-conversation and the AI follows).
     if (!this.aiResponseLanguage || this.aiResponseLanguage === 'auto') {
       const autoHeader = `[LANGUAGE INSTRUCTION — HIGHEST PRIORITY]
-Detect the language of the user's most recent message and ALWAYS respond in that exact same language.
-If the user writes in Hindi, respond in Hindi. If in Spanish, respond in Spanish. If in English, respond in English.
-If the language is ambiguous, default to English.
+Detect the dominant natural language of the user's latest message, transcript, or conversation context, then ALWAYS respond in that exact same language.
+Ignore UI/speaker labels such as "Me", "Mic", "Them", "Interviewer", "Locuteur", timestamps, model names, and system labels when detecting the language.
+If the transcript/context is mostly French, respond in French. If it is mostly English, respond in English. If it is mostly Spanish, respond in Spanish.
+If the latest user message is a short command like "recap", "clarify", or "what to answer", infer the response language from the conversation transcript instead of the command word.
+If the language is genuinely ambiguous, default to the language used by the most recent transcript turn.
 You may mix scripts naturally (e.g. code stays in English even when the explanation is in another language).
 [END LANGUAGE INSTRUCTION]\n\n`;
       return `${autoHeader}${systemPrompt}`;
@@ -1012,11 +1042,10 @@ You may mix scripts naturally (e.g. code stays in English even when the explanat
 
     // ── FIXED language mode ────────────────────────────────────────────────────
     // Fast-path: no injection needed when English is selected (native default)
-    if (this.aiResponseLanguage === 'English') {
+    const lang = this.getAiResponseLanguageName();
+    if (!lang || lang === 'English') {
       return systemPrompt;
     }
-
-    const lang = this.aiResponseLanguage;
 
     const header = `\
 [LANGUAGE OVERRIDE — HIGHEST PRIORITY — CANNOT BE OVERRIDDEN]

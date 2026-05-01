@@ -4,6 +4,8 @@ import { STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
 import { validateCurl } from '../../lib/curl-validator';
 import { ProviderCard } from './ProviderCard';
 
+type MaskedKey = { index: number; masked: string };
+
 interface CustomProvider {
     id: string;
     name: string;
@@ -40,10 +42,10 @@ const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChange, pla
     const selectedOption = options.find(o => o.id === value);
 
     return (
-        <div className="relative" ref={containerRef}>
+        <div className="relative z-20" ref={containerRef}>
             <button
                 onClick={() => setIsOpen(!isOpen)}
-                className="w-40 bg-bg-input border border-border-subtle rounded-lg px-3 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-primary flex items-center justify-between hover:bg-bg-elevated transition-colors"
+                className="w-56 bg-bg-elevated border border-border-muted rounded-lg px-3 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-primary flex items-center justify-between hover:bg-bg-input transition-colors"
                 type="button"
             >
                 <span className="truncate pr-2">{selectedOption ? selectedOption.name : placeholder}</span>
@@ -51,7 +53,7 @@ const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChange, pla
             </button>
 
             {isOpen && (
-                <div className="absolute top-full right-0 mt-1 w-full bg-bg-elevated border border-border-subtle rounded-lg shadow-xl z-50 max-h-60 overflow-y-auto animated fadeIn">
+                <div className="absolute top-full right-0 mt-1 w-72 bg-bg-elevated border border-border-muted rounded-lg shadow-2xl z-[200] max-h-72 overflow-y-auto animated fadeIn">
                     <div className="p-1 space-y-0.5">
                         {options.map((option) => (
                             <button
@@ -60,7 +62,7 @@ const ModelSelect: React.FC<ModelSelectProps> = ({ value, options, onChange, pla
                                     onChange(option.id);
                                     setIsOpen(false);
                                 }}
-                                className={`w-full text-left px-3 py-2 text-xs rounded-md flex items-center justify-between group transition-colors ${value === option.id ? 'bg-bg-input hover:bg-bg-elevated text-text-primary' : 'text-text-secondary hover:bg-bg-input hover:text-text-primary'}`}
+                                className={`w-full text-left px-3 py-2 text-xs rounded-md flex items-center justify-between group transition-colors ${value === option.id ? 'bg-bg-input text-text-primary' : 'text-text-secondary hover:bg-bg-input hover:text-text-primary'}`}
                                 type="button"
                             >
                                 <span className="truncate">{option.name}</span>
@@ -90,6 +92,8 @@ export const AIProvidersSettings: React.FC = () => {
     const [savedStatus, setSavedStatus] = useState<Record<string, boolean>>({});
     const [savingStatus, setSavingStatus] = useState<Record<string, boolean>>({});
     const [hasStoredKey, setHasStoredKey] = useState<Record<string, boolean>>({});
+    const [maskedKeys, setMaskedKeys] = useState<Record<string, MaskedKey[]>>({});
+    const [keyCounts, setKeyCounts] = useState<Record<string, number>>({});
     // Fast mode is available with a local Groq key OR via the Natively API (server-side Groq pool)
     const canUseFastMode = !!(hasStoredKey.groq || hasStoredKey.natively);
     const [testStatus, setTestStatus] = useState<Record<string, 'idle' | 'testing' | 'success' | 'error'>>({});
@@ -138,6 +142,16 @@ export const AIProvidersSettings: React.FC = () => {
                         claude: creds.hasClaudeKey,
                         natively: creds.hasNativelyKey || false
                     });
+                    if (creds.providerKeys) {
+                        const mk: Record<string, MaskedKey[]> = {};
+                        const kc: Record<string, number> = {};
+                        for (const [provider, info] of Object.entries(creds.providerKeys)) {
+                            mk[provider] = (info as any).keys || [];
+                            kc[provider] = (info as any).count || 0;
+                        }
+                        setMaskedKeys(mk);
+                        setKeyCounts(kc);
+                    }
                     // Load preferred models
                     const pm: Record<string, string> = {};
                     if (creds.geminiPreferredModel) pm.gemini = creds.geminiPreferredModel;
@@ -300,6 +314,7 @@ export const AIProvidersSettings: React.FC = () => {
                 setHasStoredKey(prev => ({ ...prev, [provider]: true }));
                 setter('');
                 setTimeout(() => setSavedStatus(prev => ({ ...prev, [provider]: false })), 2000);
+                await refreshMaskedKeys(provider);
             }
         } catch (e) {
             console.error(`Failed to save ${provider} key:`, e);
@@ -328,6 +343,7 @@ export const AIProvidersSettings: React.FC = () => {
             if (result && result.success) {
                 setHasStoredKey(prev => ({ ...prev, [provider]: false }));
                 setter('');
+                await refreshMaskedKeys(provider);
             }
         } catch (e) {
             console.error(`Failed to remove ${provider} key:`, e);
@@ -369,6 +385,49 @@ export const AIProvidersSettings: React.FC = () => {
         };
         // @ts-ignore
         window.electronAPI?.openExternal(urls[provider]);
+    };
+
+    const refreshMaskedKeys = async (provider: string) => {
+        try {
+            // @ts-ignore
+            const result = await window.electronAPI?.getProviderMaskedKeys(provider);
+            if (result && result.success) {
+                setMaskedKeys(prev => ({ ...prev, [provider]: result.keys || [] }));
+                setKeyCounts(prev => ({ ...prev, [provider]: result.count || 0 }));
+                setHasStoredKey(prev => ({ ...prev, [provider]: (result.count || 0) > 0 }));
+            }
+        } catch (e) {
+            console.error('Failed to refresh masked keys:', e);
+        }
+    };
+
+    const handleAddKey = async (provider: string, key: string) => {
+        try {
+            // @ts-ignore
+            const result = await window.electronAPI?.addProviderKey(provider, key);
+            if (result && result.success) {
+                await refreshMaskedKeys(provider);
+            } else {
+                console.error('Failed to add key:', result?.error);
+            }
+        } catch (e) {
+            console.error('Failed to add key:', e);
+        }
+    };
+
+    const handleRemoveKeyByIndex = async (provider: string, index: number) => {
+        try {
+            // @ts-ignore
+            const result = await window.electronAPI?.removeProviderKey(provider, index);
+            if (result && result.success) {
+                await refreshMaskedKeys(provider);
+                if ((result.count || 0) === 0) {
+                    setHasStoredKey(prev => ({ ...prev, [provider]: false }));
+                }
+            }
+        } catch (e) {
+            console.error('Failed to remove key:', e);
+        }
     };
 
 
@@ -541,9 +600,13 @@ export const AIProvidersSettings: React.FC = () => {
                         apiKey={apiKey}
                         preferredModel={preferredModels.gemini}
                         hasStoredKey={!!hasStoredKey.gemini}
+                        maskedKeys={maskedKeys.gemini || []}
+                        keyCount={keyCounts.gemini || 0}
                         onKeyChange={setApiKey}
                         onSaveKey={async () => { await handleSaveKey('gemini', apiKey, setApiKey); }}
                         onRemoveKey={() => handleRemoveKey('gemini', setApiKey)}
+                        onAddKey={(key) => handleAddKey('gemini', key)}
+                        onRemoveKeyByIndex={(index) => handleRemoveKeyByIndex('gemini', index)}
                         onTestConnection={() => handleTestConnection('gemini', apiKey)}
                         testStatus={testStatus.gemini || 'idle'}
                         testError={testError.gemini}
@@ -561,9 +624,13 @@ export const AIProvidersSettings: React.FC = () => {
                         apiKey={groqApiKey}
                         preferredModel={preferredModels.groq}
                         hasStoredKey={!!hasStoredKey.groq}
+                        maskedKeys={maskedKeys.groq || []}
+                        keyCount={keyCounts.groq || 0}
                         onKeyChange={setGroqApiKey}
                         onSaveKey={async () => { await handleSaveKey('groq', groqApiKey, setGroqApiKey); }}
                         onRemoveKey={() => handleRemoveKey('groq', setGroqApiKey)}
+                        onAddKey={(key) => handleAddKey('groq', key)}
+                        onRemoveKeyByIndex={(index) => handleRemoveKeyByIndex('groq', index)}
                         onTestConnection={() => handleTestConnection('groq', groqApiKey)}
                         testStatus={testStatus.groq || 'idle'}
                         testError={testError.groq}
@@ -581,9 +648,13 @@ export const AIProvidersSettings: React.FC = () => {
                         apiKey={deepInfraApiKey}
                         preferredModel={preferredModels.deepinfra}
                         hasStoredKey={!!hasStoredKey.deepinfra}
+                        maskedKeys={maskedKeys.deepinfra || []}
+                        keyCount={keyCounts.deepinfra || 0}
                         onKeyChange={setDeepInfraApiKey}
                         onSaveKey={async () => { await handleSaveKey('deepinfra', deepInfraApiKey, setDeepInfraApiKey); }}
                         onRemoveKey={() => handleRemoveKey('deepinfra', setDeepInfraApiKey)}
+                        onAddKey={(key) => handleAddKey('deepinfra', key)}
+                        onRemoveKeyByIndex={(index) => handleRemoveKeyByIndex('deepinfra', index)}
                         onTestConnection={() => handleTestConnection('deepinfra', deepInfraApiKey)}
                         testStatus={testStatus.deepinfra || 'idle'}
                         testError={testError.deepinfra}
@@ -601,9 +672,13 @@ export const AIProvidersSettings: React.FC = () => {
                         apiKey={openCodeGoApiKey}
                         preferredModel={preferredModels.opencode_go}
                         hasStoredKey={!!hasStoredKey.opencode_go}
+                        maskedKeys={maskedKeys.opencode_go || []}
+                        keyCount={keyCounts.opencode_go || 0}
                         onKeyChange={setOpenCodeGoApiKey}
                         onSaveKey={async () => { await handleSaveKey('opencode_go', openCodeGoApiKey, setOpenCodeGoApiKey); }}
                         onRemoveKey={() => handleRemoveKey('opencode_go', setOpenCodeGoApiKey)}
+                        onAddKey={(key) => handleAddKey('opencode_go', key)}
+                        onRemoveKeyByIndex={(index) => handleRemoveKeyByIndex('opencode_go', index)}
                         onTestConnection={() => handleTestConnection('opencode_go', openCodeGoApiKey)}
                         testStatus={testStatus.opencode_go || 'idle'}
                         testError={testError.opencode_go}
@@ -621,9 +696,13 @@ export const AIProvidersSettings: React.FC = () => {
                         apiKey={openaiApiKey}
                         preferredModel={preferredModels.openai}
                         hasStoredKey={!!hasStoredKey.openai}
+                        maskedKeys={maskedKeys.openai || []}
+                        keyCount={keyCounts.openai || 0}
                         onKeyChange={setOpenaiApiKey}
                         onSaveKey={async () => { await handleSaveKey('openai', openaiApiKey, setOpenaiApiKey); }}
                         onRemoveKey={() => handleRemoveKey('openai', setOpenaiApiKey)}
+                        onAddKey={(key) => handleAddKey('openai', key)}
+                        onRemoveKeyByIndex={(index) => handleRemoveKeyByIndex('openai', index)}
                         onTestConnection={() => handleTestConnection('openai', openaiApiKey)}
                         testStatus={testStatus.openai || 'idle'}
                         testError={testError.openai}
@@ -641,9 +720,13 @@ export const AIProvidersSettings: React.FC = () => {
                         apiKey={claudeApiKey}
                         preferredModel={preferredModels.claude}
                         hasStoredKey={!!hasStoredKey.claude}
+                        maskedKeys={maskedKeys.claude || []}
+                        keyCount={keyCounts.claude || 0}
                         onKeyChange={setClaudeApiKey}
                         onSaveKey={async () => { await handleSaveKey('claude', claudeApiKey, setClaudeApiKey); }}
                         onRemoveKey={() => handleRemoveKey('claude', setClaudeApiKey)}
+                        onAddKey={(key) => handleAddKey('claude', key)}
+                        onRemoveKeyByIndex={(index) => handleRemoveKeyByIndex('claude', index)}
                         onTestConnection={() => handleTestConnection('claude', claudeApiKey)}
                         testStatus={testStatus.claude || 'idle'}
                         testError={testError.claude}

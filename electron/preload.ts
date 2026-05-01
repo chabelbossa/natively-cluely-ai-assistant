@@ -170,6 +170,7 @@ interface ElectronAPI {
   setModel: (modelId: string) => Promise<{ success: boolean; error?: string }>
   setDefaultModel: (modelId: string) => Promise<{ success: boolean; error?: string }>
   toggleModelSelector: (coords: { x: number; y: number }) => Promise<void>
+  hideModelSelector: () => Promise<void>
   forceRestartOllama: () => Promise<void>
 
   // Settings Window
@@ -579,6 +580,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getNativelyUsage: () => ipcRenderer.invoke("get-natively-usage"),
   getStoredCredentials: () => ipcRenderer.invoke("get-stored-credentials"),
 
+  // Provider Key Management (round-robin)
+  getProviderMaskedKeys: (provider: string) => ipcRenderer.invoke("get-provider-masked-keys", provider),
+  addProviderKey: (provider: string, key: string) => ipcRenderer.invoke("add-provider-key", provider, key),
+  removeProviderKey: (provider: string, index: number) => ipcRenderer.invoke("remove-provider-key", provider, index),
+
   // Permissions
   checkPermissions:    () => ipcRenderer.invoke("permissions:check"),
   requestMicPermission: () => ipcRenderer.invoke("permissions:request-mic"),
@@ -916,6 +922,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setModel: (modelId: string) => ipcRenderer.invoke('set-model', modelId),
   setDefaultModel: (modelId: string) => ipcRenderer.invoke('set-default-model', modelId),
   toggleModelSelector: (coords: { x: number; y: number }) => ipcRenderer.invoke('toggle-model-selector', coords),
+  hideModelSelector: () => ipcRenderer.invoke('hide-model-selector'),
   forceRestartOllama: () => ipcRenderer.invoke('force-restart-ollama'),
 
   // Settings Window

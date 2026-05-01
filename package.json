@@ -17,6 +17,7 @@
     "app:dev": "concurrently \"npm run dev -- --port 5180 --strictPort\" \"wait-on http://localhost:5180 && npm run electron:dev\"",
     "app:build": "npm run build && npm run build:electron && cross-env NATIVELY_BUILD_ALL_MAC_ARCHES=1 npm run build:native && npm run build:parakeet-helper && electron-builder",
     "app:build:mac-arm64": "npm run build && npm run build:electron && npm run build:native && npm run build:parakeet-helper && electron-builder --mac zip --arm64 --publish never -c.mac.target=zip",
+    "app:install:local": "npm run build && npm run build:electron && npm run build:native && npm run build:parakeet-helper && electron-builder --mac dir --arm64 && rm -rf /Applications/Natively.app && cp -R release/mac-arm64/Natively.app /Applications/",
     "watch": "tsc -p electron/tsconfig.json --watch",
     "start": "npm run app:dev",
     "dist": "npm run app:build",

@@ -16,6 +16,9 @@ export interface CopilotDecisionPayload {
 type LlmProviderId = 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude'
 type RuntimeLlmProviderId = 'ollama' | LlmProviderId | 'natively' | 'custom'
 
+type MaskedKeyInfo = { index: number; masked: string }
+type ProviderKeysInfo = { keys: MaskedKeyInfo[]; count: number }
+
 export interface ElectronAPI {
   updateContentDimensions: (dimensions: {
     width: number
@@ -106,7 +109,11 @@ export interface ElectronAPI {
   setClaudeApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   getNativelyUsage: () => Promise<{ ok: boolean; error?: string; plan?: string; quota?: { transcription: { used: number; limit: number; remaining: number }; ai: { used: number; limit: number; remaining: number }; search: { used: number; limit: number; remaining: number }; resets_at: string }; member_since?: string }>
-  getStoredCredentials: () => Promise<{ hasNativelyKey?: boolean; hasGeminiKey: boolean; hasGroqKey: boolean; hasDeepInfraKey?: boolean; hasOpenCodeGoKey?: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; googleServiceAccountPath: string | null; sttProvider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local'; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; groqSttModel?: string; localSttMode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; localSttEndpoint?: string; localSttModel?: string; localSttGlossary?: string; localSttWhisperCppModelPath?: string; localSttWhisperCppExecutablePath?: string; hasSonioxKey?: boolean; hasTavilyKey?: boolean; geminiPreferredModel?: string; groqPreferredModel?: string; deepinfraPreferredModel?: string; openCodeGoPreferredModel?: string; openaiPreferredModel?: string; claudePreferredModel?: string; sttGroqKey?: string; sttOpenaiKey?: string; sttDeepgramKey?: string; sttElevenLabsKey?: string; sttAzureKey?: string; sttIbmKey?: string; sttSonioxKey?: string }>
+  getStoredCredentials: () => Promise<{ hasNativelyKey?: boolean; hasGeminiKey: boolean; hasGroqKey: boolean; hasDeepInfraKey?: boolean; hasOpenCodeGoKey?: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; providerKeys: Record<string, ProviderKeysInfo>; googleServiceAccountPath: string | null; sttProvider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local'; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; groqSttModel?: string; localSttMode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; localSttEndpoint?: string; localSttModel?: string; localSttGlossary?: string; localSttWhisperCppModelPath?: string; localSttWhisperCppExecutablePath?: string; hasSonioxKey?: boolean; hasTavilyKey?: boolean; geminiPreferredModel?: string; groqPreferredModel?: string; deepinfraPreferredModel?: string; openCodeGoPreferredModel?: string; openaiPreferredModel?: string; claudePreferredModel?: string; sttGroqKey?: string; sttOpenaiKey?: string; sttDeepgramKey?: string; sttElevenLabsKey?: string; sttAzureKey?: string; sttIbmKey?: string; sttSonioxKey?: string }>
+  // Provider Key Management (round-robin)
+  getProviderMaskedKeys: (provider: string) => Promise<{ success: boolean; keys?: MaskedKeyInfo[]; count?: number; error?: string }>
+  addProviderKey: (provider: string, key: string) => Promise<{ success: boolean; index?: number; count?: number; error?: string }>
+  removeProviderKey: (provider: string, index: number) => Promise<{ success: boolean; count?: number; error?: string }>
   // Permissions
   checkPermissions:     () => Promise<{ microphone: 'granted'|'denied'|'not-determined'|'restricted'; screen: 'granted'|'denied'|'not-determined'|'restricted'; platform: string }>
   requestMicPermission: () => Promise<boolean>
@@ -244,6 +251,7 @@ export interface ElectronAPI {
   setModel: (modelId: string) => Promise<{ success: boolean; error?: string }>;
   setDefaultModel: (modelId: string) => Promise<{ success: boolean; error?: string }>;
   toggleModelSelector: (coords: { x: number; y: number }) => Promise<void>;
+  hideModelSelector: () => Promise<void>;
   forceRestartOllama: () => Promise<void>;
 
   // Settings Window

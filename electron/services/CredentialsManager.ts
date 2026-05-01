@@ -84,6 +84,20 @@ export interface StoredCredentials {
 
 export type StoredLlmProvider = 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude';
 
+export interface MaskedKeyInfo {
+    index: number;
+    masked: string;
+}
+
+const API_KEY_FIELDS: Record<StoredLlmProvider, keyof StoredCredentials> = {
+    gemini: 'geminiApiKey',
+    groq: 'groqApiKey',
+    deepinfra: 'deepInfraApiKey',
+    opencode_go: 'openCodeGoApiKey',
+    openai: 'openaiApiKey',
+    claude: 'claudeApiKey',
+};
+
 const PREFERRED_MODEL_KEYS: Record<StoredLlmProvider, keyof StoredCredentials> = {
     gemini: 'geminiPreferredModel',
     groq: 'groqPreferredModel',
@@ -180,6 +194,57 @@ export class CredentialsManager {
 
     public getClaudeApiKeys(): string[] {
         return parseApiKeyList(this.credentials.claudeApiKey);
+    }
+
+    public getMaskedApiKeys(provider: StoredLlmProvider): MaskedKeyInfo[] {
+        const keys = this.getApiKeysList(provider);
+        return keys.map((key, index) => ({
+            index,
+            masked: this.maskKey(key),
+        }));
+    }
+
+    public getApiKeyCount(provider: StoredLlmProvider): number {
+        return this.getApiKeysList(provider).length;
+    }
+
+    public addApiKey(provider: StoredLlmProvider, newKey: string): number {
+        const trimmed = newKey.trim();
+        if (!trimmed) return -1;
+        const keys = this.getApiKeysList(provider);
+        keys.push(trimmed);
+        this.setApiKeysList(provider, keys);
+        this.saveCredentials();
+        console.log(`[CredentialsManager] Added key to ${provider}, total: ${keys.length}`);
+        return keys.length - 1;
+    }
+
+    public removeApiKey(provider: StoredLlmProvider, index: number): boolean {
+        const keys = this.getApiKeysList(provider);
+        if (index < 0 || index >= keys.length) return false;
+        keys.splice(index, 1);
+        this.setApiKeysList(provider, keys);
+        this.saveCredentials();
+        console.log(`[CredentialsManager] Removed key ${index} from ${provider}, remaining: ${keys.length}`);
+        return true;
+    }
+
+    private getApiKeysList(provider: StoredLlmProvider): string[] {
+        const field = API_KEY_FIELDS[provider];
+        const value = this.credentials[field];
+        return parseApiKeyList(value as string | undefined);
+    }
+
+    private setApiKeysList(provider: StoredLlmProvider, keys: string[]): void {
+        const field = API_KEY_FIELDS[provider];
+        (this.credentials as any)[field] = keys.length > 0 ? keys.join('\n') : undefined;
+    }
+
+    private maskKey(key: string): string {
+        if (key.length <= 8) return '••••••••';
+        const prefix = key.substring(0, 4);
+        const suffix = key.substring(key.length - 3);
+        return `${prefix}...${suffix}`;
     }
 
     public getGoogleServiceAccountPath(): string | undefined {

@@ -132,28 +132,36 @@ const ModelSelectorWindow = () => {
     const handleSelectFn = (modelId: string) => {
         setCurrentModel(modelId);
         localStorage.setItem('cached-current-model', modelId);
-        
+
         window.electronAPI?.setModel(modelId)
+            .then(() => window.electronAPI?.hideModelSelector?.())
             .catch((err: any) => console.error("Failed to set model:", err));
     };
 
     const panelClass = isLight
-        ? 'bg-[#F3F4F6]/92 border-black/10 shadow-black/10'
-        : 'bg-[#1E1E1E]/80 border-white/10 shadow-black/40';
+        ? 'bg-white border-slate-200 shadow-black/15 text-slate-950'
+        : 'bg-[#202127] border-white/10 shadow-black/40 text-white';
+    const mutedTextClass = isLight ? 'text-slate-500' : 'text-slate-400';
+    const selectedClass = isLight
+        ? 'bg-slate-100 text-slate-950'
+        : 'bg-white/10 text-white';
+    const idleClass = isLight
+        ? 'text-slate-700 hover:bg-slate-100 hover:text-slate-950'
+        : 'text-slate-300 hover:bg-white/5 hover:text-white';
 
     return (
         <div className="w-fit h-fit bg-transparent flex flex-col">
-            <div className={`w-[140px] h-[200px] backdrop-blur-md border rounded-[16px] overflow-hidden shadow-2xl p-2 flex flex-col animate-scale-in origin-top-left ${panelClass}`}>
+            <div className={`w-[240px] h-[280px] border rounded-[16px] overflow-hidden shadow-2xl p-2 flex flex-col animate-scale-in origin-top-left ${panelClass}`}>
 
                 {isLoading ? (
-                    <div className={`flex items-center justify-center py-4 ${isLight ? 'text-slate-400' : 'text-slate-500'}`}>
+                    <div className={`flex items-center justify-center py-4 ${mutedTextClass}`}>
                         <Loader2 className="w-4 h-4 animate-spin mr-2" />
                         <span className="text-xs">Loading models...</span>
                     </div>
                 ) : (
                     <div className="flex-1 overflow-y-auto scrollbar-hide flex flex-col gap-0.5">
                         {availableModels.length === 0 ? (
-                            <div className={`px-4 py-3 text-center text-xs ${isLight ? 'text-slate-400' : 'text-slate-500'}`}>
+                            <div className={`px-4 py-3 text-center text-xs ${mutedTextClass}`}>
                                 No models connected.<br />Check Settings.
                             </div>
                         ) : (
@@ -161,17 +169,15 @@ const ModelSelectorWindow = () => {
                                 const isSelected = currentModel === model.id;
                                 return (
                                     <button
+                                        type="button"
                                         key={model.id}
                                         onClick={() => handleSelectFn(model.id)}
                                         className={`
                                             w-full text-left px-3 py-2 flex items-center justify-between group transition-colors duration-200 rounded-lg
-                                            ${isSelected
-                                                ? (isLight ? 'bg-black/[0.07] text-slate-900' : 'bg-white/10 text-white')
-                                                : (isLight ? 'text-slate-500 hover:bg-black/[0.04] hover:text-slate-800' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200')
-                                            }
+                                            ${isSelected ? selectedClass : idleClass}
                                         `}
                                     >
-                                        <span className="text-[12px] font-medium truncate flex-1 min-w-0">{model.name}</span>
+                                        <span className="text-[12px] font-medium truncate flex-1 min-w-0" title={model.name}>{model.name}</span>
                                         {isSelected && <Check className={`w-3.5 h-3.5 shrink-0 ml-2 ${isLight ? 'text-emerald-600' : 'text-emerald-400'}`} />}
                                     </button>
                                 );
