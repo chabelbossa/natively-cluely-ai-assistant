@@ -31,11 +31,19 @@ export class DeepgramStreamingSTT extends EventEmitter {
     private keepAliveInterval: NodeJS.Timeout | null = null;
     private buffer: Buffer[] = [];
     private isConnecting = false;
+    private sentChunks = 0;
+    private sentBytes = 0;
+    private transcriptEvents = 0;
+    private lastAudioLogAt = 0;
+    private lastTranscriptLogAt = 0;
 
     constructor(apiKey: string) {
         super();
         this.apiKey = apiKey;
     }
+
+    /** This provider supports real-time speaker diarization via Deepgram's API */
+    public readonly supportsDiarization = true;
 
     public setSampleRate(rate: number): void {
         if (this.sampleRate === rate) return;
@@ -80,6 +88,12 @@ export class DeepgramStreamingSTT extends EventEmitter {
         this.isActive = true;
         this.shouldReconnect = true;
         this.reconnectAttempts = 0;
+        this.sentChunks = 0;
+        this.sentBytes = 0;
+        this.transcriptEvents = 0;
+        this.lastAudioLogAt = 0;
+        this.lastTranscriptLogAt = 0;
+        console.log(`[DeepgramStreaming][lifecycle] start rate=${this.sampleRate}Hz channels=${this.numChannels} lang=${this.languageCode} diarize=true`);
         this.connect();
     }
 
@@ -109,6 +123,7 @@ export class DeepgramStreamingSTT extends EventEmitter {
         if (!this.isOpen) {
             this.buffer.push(chunk);
             if (this.buffer.length > 500) this.buffer.shift();
+            this.logAudioWrite('buffered', chunk);
 
             if (!this.isConnecting && this.shouldReconnect && !this.reconnectTimer) {
                 this.connect();
@@ -118,6 +133,7 @@ export class DeepgramStreamingSTT extends EventEmitter {
 
         try {
             this.live.send(chunk);
+            this.logAudioWrite('sent', chunk);
         } catch (err: any) {
             console.error('[DeepgramStreaming] Send error:', err?.message);
         }
@@ -134,7 +150,7 @@ export class DeepgramStreamingSTT extends EventEmitter {
 
             const deepgram = createClient(this.apiKey);
 
-            this.live = deepgram.listen.live({
+            const liveOptions = {
                 model: 'nova-3',
                 language: this.languageCode,
                 smart_format: true,
@@ -145,7 +161,21 @@ export class DeepgramStreamingSTT extends EventEmitter {
                 endpointing: 300,
                 utterance_end_ms: 1000,
                 vad_events: true,
-            });
+                diarize: true,          // ← Real-time speaker diarization
+            };
+
+            console.log(`[DeepgramStreaming][connect] options=${JSON.stringify({
+                model: liveOptions.model,
+                language: liveOptions.language,
+                sample_rate: liveOptions.sample_rate,
+                channels: liveOptions.channels,
+                interim_results: liveOptions.interim_results,
+                endpointing: liveOptions.endpointing,
+                utterance_end_ms: liveOptions.utterance_end_ms,
+                diarize: liveOptions.diarize,
+            })}`);
+
+            this.live = deepgram.listen.live(liveOptions);
 
             this.live.on(LiveTranscriptionEvents.Open, () => {
                 this.isConnecting = false;
@@ -158,12 +188,37 @@ export class DeepgramStreamingSTT extends EventEmitter {
                         const alt = data.channel?.alternatives?.[0];
                         const transcript = alt?.transcript;
                         const isFinal = data.is_final ?? false;
-                        console.log(`[DeepgramStreaming] Transcript event — isFinal=${isFinal}, text="${transcript ?? '(empty)'}"`);
                         if (!transcript) return;
+
+                        // Extract speaker_id from word-level diarization data.
+                        // Deepgram attaches speaker to each word; we take the most
+                        // frequent speaker across the utterance as the segment label.
+                        let speakerId: number | undefined;
+                        const words: any[] = alt?.words ?? [];
+                        const speakerCounts: Record<number, number> = {};
+                        if (words.length > 0 && words[0]?.speaker !== undefined) {
+                            for (const w of words) {
+                                if (w.speaker !== undefined) speakerCounts[w.speaker] = (speakerCounts[w.speaker] ?? 0) + 1;
+                            }
+                            speakerId = Number(Object.entries(speakerCounts).sort((a, b) => b[1] - a[1])[0]?.[0]);
+                        }
+
+                        this.logTranscriptEvent({
+                            isFinal,
+                            transcript,
+                            confidence: alt?.confidence,
+                            wordsCount: words.length,
+                            speakerId,
+                            speakerCounts,
+                            speechFinal: data.speech_final,
+                            channelIndex: data.channel_index ?? data.channel?.channel_index,
+                        });
+
                         this.emit('transcript', {
                             text: transcript,
                             isFinal,
                             confidence: alt?.confidence ?? 1.0,
+                            speakerId,  // undefined for local/non-diarized providers
                         });
                     } catch (err) {
                         console.error('[DeepgramStreaming] Parse error:', err);
@@ -254,5 +309,38 @@ export class DeepgramStreamingSTT extends EventEmitter {
             clearInterval(this.keepAliveInterval);
             this.keepAliveInterval = null;
         }
+    }
+
+    private logAudioWrite(state: 'buffered' | 'sent', chunk: Buffer): void {
+        this.sentChunks++;
+        this.sentBytes += chunk.length;
+        const now = Date.now();
+        if (this.sentChunks <= 5 || this.sentChunks % 250 === 0 || now - this.lastAudioLogAt > 5000) {
+            this.lastAudioLogAt = now;
+            console.log(`[DeepgramStreaming][audio] state=${state} chunks=${this.sentChunks} bytes=${this.sentBytes} last=${chunk.length} open=${this.isOpen} connecting=${this.isConnecting} buffer=${this.buffer.length}`);
+        }
+    }
+
+    private logTranscriptEvent(event: {
+        isFinal: boolean;
+        transcript: string;
+        confidence?: number;
+        wordsCount: number;
+        speakerId?: number;
+        speakerCounts: Record<number, number>;
+        speechFinal?: boolean;
+        channelIndex?: unknown;
+    }): void {
+        this.transcriptEvents++;
+        const now = Date.now();
+        if (!event.isFinal && this.transcriptEvents > 5 && now - this.lastTranscriptLogAt < 3000) {
+            return;
+        }
+        this.lastTranscriptLogAt = now;
+
+        const speakerCounts = Object.keys(event.speakerCounts).length > 0
+            ? JSON.stringify(event.speakerCounts)
+            : '{}';
+        console.log(`[DeepgramStreaming][transcript] #${this.transcriptEvents} final=${event.isFinal} speechFinal=${event.speechFinal ?? 'n/a'} channelIndex=${JSON.stringify(event.channelIndex ?? null)} words=${event.wordsCount} speakerId=${event.speakerId ?? 'none'} speakerCounts=${speakerCounts} conf=${Number(event.confidence ?? 0).toFixed(2)} text="${event.transcript.substring(0, 140)}"`);
     }
 }

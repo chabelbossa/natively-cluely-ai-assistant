@@ -93,7 +93,7 @@ type CopilotFeedbackRating = 'useful' | 'too_early' | 'not_relevant' | 'already_
 
 interface LiveTranscriptTurn {
     id: string;
-    speaker: 'interviewer' | 'user';
+    speaker: string;
     text: string;
     final: boolean;
     timestamp: number;
@@ -145,6 +145,11 @@ const transcriptTextSimilarity = (a: string, b: string) => {
 
     const union = new Set([...aSet, ...bSet]).size;
     return union === 0 ? 0 : intersection / union;
+};
+
+const normalizeLiveSpeaker = (speaker: string) => {
+    const value = String(speaker || '').trim();
+    return value || 'interviewer';
 };
 
 const upsertTranscriptTurn = (turns: LiveTranscriptTurn[], next: LiveTranscriptTurn, limit: number) => {
@@ -538,7 +543,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
         const text = transcript.text?.trim();
         if (!text) return;
 
-        const speaker: LiveTranscriptTurn['speaker'] = transcript.speaker === 'user' ? 'user' : 'interviewer';
+        const speaker = normalizeLiveSpeaker(transcript.speaker);
         const timestamp = Date.now();
         const turn: LiveTranscriptTurn = {
             id: `${transcript.final ? 'final' : 'partial'}-${speaker}-${timestamp}-${Math.random().toString(16).slice(2)}`,
@@ -644,8 +649,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({ onEndMeeting, ove
             }
 
             // Only show interviewer (system audio) transcripts in rolling bar
-            if (transcript.speaker !== 'interviewer') {
-                return;  // Safety check for any other speaker types
+            if (transcript.speaker === 'user') {
+                return;  // User mic is already visible in the live transcript panel.
             }
 
             // Route to rolling transcript bar - accumulate text continuously
@@ -2188,6 +2193,13 @@ Provide only the answer, nothing else.`;
 
     const getTranscriptSpeakerLabel = (speaker: LiveTranscriptTurn['speaker']) => {
         if (speaker === 'interviewer') return 'Speaker';
+        const diarizedMatch = /^locuteur[_-](\d+)$/i.exec(speaker);
+        if (diarizedMatch) return `Locuteur ${Number(diarizedMatch[1]) + 1}`;
+        if (/^speaker[_-](\d+)$/i.test(speaker)) {
+            const id = /^speaker[_-](\d+)$/i.exec(speaker)?.[1];
+            return `Speaker ${Number(id) + 1}`;
+        }
+        if (speaker && speaker !== 'user') return speaker;
         return 'Mic';
     };
 
@@ -2438,7 +2450,7 @@ Provide only the answer, nothing else.`;
                                                 {copiedTranscriptId === 'all' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                                                 <span>{copiedTranscriptId === 'all' ? 'Copied' : 'Copy all'}</span>
                                             </button>
-                                            {(pendingLiveTranscript.user || pendingLiveTranscript.interviewer) && (
+                                            {Object.keys(pendingLiveTranscript).length > 0 && (
                                                 <>
                                                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                                                     <span>Listening</span>

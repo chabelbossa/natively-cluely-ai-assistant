@@ -83,7 +83,10 @@ export class CopilotDecisionEngine {
     private shouldObserveSegment(segment: CopilotTranscriptSegment): boolean {
         if (!segment.final) return false;
         if (!segment.text.trim()) return false;
-        return segment.speaker === 'interviewer' || segment.speaker === 'system';
+        return segment.speaker === 'interviewer'
+            || segment.speaker === 'system'
+            || /^locuteur[_-]\d+$/i.test(segment.speaker)
+            || /^speaker[_-]\d+$/i.test(segment.speaker);
     }
 
     private getActiveCopilotMode(): CopilotMode | null {

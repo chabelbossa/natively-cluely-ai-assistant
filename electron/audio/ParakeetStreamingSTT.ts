@@ -31,6 +31,11 @@ export class ParakeetStreamingSTT extends EventEmitter {
     private lastPartialConfidence = 0.9;
     private lastPartialAt = 0;
     private lastCommittedPartialSourceText = '';
+    private audioChunks = 0;
+    private audioBytes = 0;
+    private transcriptEvents = 0;
+    private lastAudioLogAt = 0;
+    private lastTranscriptLogAt = 0;
     private readonly sessionListener: (event: ParakeetBridgeEvent) => void;
 
     constructor(config: ParakeetStreamingConfig = {}) {
@@ -72,6 +77,13 @@ export class ParakeetStreamingSTT extends EventEmitter {
         this.lastPartialConfidence = 0.9;
         this.lastPartialAt = 0;
         this.lastCommittedPartialSourceText = '';
+        this.audioChunks = 0;
+        this.audioBytes = 0;
+        this.transcriptEvents = 0;
+        this.lastAudioLogAt = 0;
+        this.lastTranscriptLogAt = 0;
+
+        console.log(`[ParakeetStreaming][lifecycle] start session=${this.sessionId} inputRate=${this.sampleRate}Hz channels=${this.numChannels} language=${this.getIsoLanguage() || 'auto'} debounce=${this.speechEndDebounceMs}ms partialCommit=${this.partialCommitIntervalMs}ms`);
 
         void this.bridge.startSession(this.sessionId, { language: this.getIsoLanguage() || 'auto' })
             .then(() => {
@@ -80,6 +92,7 @@ export class ParakeetStreamingSTT extends EventEmitter {
                     return;
                 }
                 this.ready = true;
+                console.log(`[ParakeetStreaming][lifecycle] ready session=${this.sessionId} pendingChunks=${this.pendingChunks.length}`);
                 this.flushPendingChunks();
             })
             .catch((error: Error) => {
@@ -120,6 +133,7 @@ export class ParakeetStreamingSTT extends EventEmitter {
         const pcm16k = this.resampleTo16kHz(audioData);
         if (pcm16k.length === 0) return;
         this.samplesSinceLastFinal += Math.floor(pcm16k.length / 2);
+        this.logAudioWrite(this.ready ? 'sent' : 'buffered', audioData.length, pcm16k.length);
 
         if (!this.ready) {
             this.pendingChunks.push(pcm16k);
@@ -158,6 +172,7 @@ export class ParakeetStreamingSTT extends EventEmitter {
             const emittedText = this.getIncrementalTranscriptText(result.text);
             if (!emittedText) return;
             if (final && this.shouldDropRepeatedFinal(emittedText)) {
+                console.log(`[ParakeetStreaming][transcript] dropped repeated final session=${this.sessionId} text="${emittedText.substring(0, 100)}"`);
                 this.lastCommittedPartialSourceText = result.text.trim();
                 return;
             }
@@ -173,8 +188,10 @@ export class ParakeetStreamingSTT extends EventEmitter {
                 isFinal: final,
                 confidence,
             });
+            this.logTranscriptEvent(final, emittedText, result.text, confidence);
 
             if (!final && this.shouldAutoCommitPartial(result.text)) {
+                console.log(`[ParakeetStreaming][auto-final] session=${this.sessionId} partialChars=${result.text.length} emittedChars=${emittedText.length}`);
                 this.commitPartialAsFinal(result.text, confidence);
             }
 
@@ -198,6 +215,7 @@ export class ParakeetStreamingSTT extends EventEmitter {
         if (!this.ready || this.pendingChunks.length === 0) return;
         const chunks = this.pendingChunks;
         this.pendingChunks = [];
+        console.log(`[ParakeetStreaming][audio] flushing pending session=${this.sessionId} chunks=${chunks.length}`);
         for (const chunk of chunks) {
             this.bridge.sendAudio(this.sessionId, chunk);
         }
@@ -243,10 +261,31 @@ export class ParakeetStreamingSTT extends EventEmitter {
             isFinal: true,
             confidence: confidence || 0.85,
         });
+        this.logTranscriptEvent(true, emittedText, text, confidence || 0.85, 'committed-partial');
         this.samplesSinceLastFinal = 0;
         this.lastFinalText = this.normalizeForComparison(emittedText);
         this.lastFinalAt = Date.now();
         this.lastCommittedPartialSourceText = text.trim();
+    }
+
+    private logAudioWrite(state: 'buffered' | 'sent', rawBytes: number, pcm16kBytes: number): void {
+        this.audioChunks++;
+        this.audioBytes += pcm16kBytes;
+        const now = Date.now();
+        if (this.audioChunks <= 5 || this.audioChunks % 250 === 0 || now - this.lastAudioLogAt > 5000) {
+            this.lastAudioLogAt = now;
+            console.log(`[ParakeetStreaming][audio] session=${this.sessionId} state=${state} chunks=${this.audioChunks} rawLast=${rawBytes} pcm16kLast=${pcm16kBytes} pcm16kTotal=${this.audioBytes} ready=${this.ready} pending=${this.pendingChunks.length} samplesSinceFinal=${this.samplesSinceLastFinal}`);
+        }
+    }
+
+    private logTranscriptEvent(final: boolean, emittedText: string, sourceText: string, confidence: number, source = 'helper'): void {
+        this.transcriptEvents++;
+        const now = Date.now();
+        if (!final && this.transcriptEvents > 5 && now - this.lastTranscriptLogAt < 3000) {
+            return;
+        }
+        this.lastTranscriptLogAt = now;
+        console.log(`[ParakeetStreaming][transcript] session=${this.sessionId} #${this.transcriptEvents} source=${source} final=${final} conf=${Number(confidence || 0).toFixed(2)} emittedChars=${emittedText.length} sourceChars=${sourceText.length} text="${emittedText.substring(0, 140)}"`);
     }
 
     private getIncrementalTranscriptText(sourceText: string): string {

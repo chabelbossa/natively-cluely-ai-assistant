@@ -182,6 +182,8 @@ type STTProvider = (GoogleSTT | RestSTT | LocalSTT | ParakeetStreamingSTT | Deep
   setCredentials?: (keyPath: string) => void;
   notifySpeechEnded?: () => void;
   flushPendingTranscript?: () => void;
+  /** True if this provider supports real-time speaker diarization */
+  supportsDiarization?: boolean;
 };
 
 type ScreenshotWindowMode = 'launcher' | 'overlay';
@@ -838,6 +840,8 @@ export class AppState {
     user: 0,
   };
   private _lastSystemAudioLevel: { rms: number; peak: number } | null = null;
+  private sttTranscriptLogCounters: Record<string, number> = {};
+  private sttTranscriptLastLogAt: Record<string, number> = {};
 
   // ── Cross-channel transcript deduplication ──
   // When system audio is active, the microphone picks up speaker output as room
@@ -845,10 +849,27 @@ export class AppState {
   // buffer of recent final transcripts per channel and suppress duplicates.
   // Priority: Speaker (system audio) is the clean digital source — when both
   // channels produce the same text, suppress the Mic copy.
-  private _recentTranscripts: Array<{ speaker: string; text: string; timestamp: number }> = [];
+  private _recentTranscripts: Array<{ channel: 'interviewer' | 'user'; effectiveSpeaker: string; text: string; timestamp: number }> = [];
   private readonly _DEDUP_WINDOW_MS = 8000; // 8-second window
   private readonly _DEDUP_SIMILARITY_THRESHOLD = 0.6; // 60% overlap
   private _dedupSuppressedCount = 0;
+  private _dedupPreservedSystemCount = 0;
+  private _pendingMicEchoTranscripts: Array<{
+    id: number;
+    text: string;
+    timestamp: number;
+    final: boolean;
+    provider: string;
+    timer: NodeJS.Timeout;
+    deliver: () => void;
+  }> = [];
+  private _pendingMicEchoSeq = 0;
+  private _pendingMicHeldCount = 0;
+  private _pendingMicDroppedCount = 0;
+  private _pendingMicReleasedCount = 0;
+  private _lastSystemAudioNonSilentAt = 0;
+  private readonly _MIC_ECHO_GRACE_MS = 1600;
+  private readonly _SYSTEM_AUDIO_ACTIVE_WINDOW_MS = 3500;
 
   /**
    * Normalized similarity between two strings (Dice coefficient on word bigrams).
@@ -875,36 +896,196 @@ export class AppState {
     return (2 * intersection) / (bigramsA.size + bigramsB.size);
   }
 
+  private normalizeForEchoComparison(text: string): string {
+    return text
+      .toLowerCase()
+      .normalize('NFKC')
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private getEchoMatch(a: string, b: string): { match: boolean; similarity: number } {
+    const similarity = this.textSimilarity(a, b);
+    if (similarity >= this._DEDUP_SIMILARITY_THRESHOLD) {
+      return { match: true, similarity };
+    }
+
+    const left = this.normalizeForEchoComparison(a);
+    const right = this.normalizeForEchoComparison(b);
+    if (!left || !right) return { match: false, similarity };
+
+    const shorter = left.length <= right.length ? left : right;
+    const longer = left.length > right.length ? left : right;
+    const shorterWords = shorter.split(' ').filter(Boolean).length;
+    const lengthRatio = shorter.length / Math.max(longer.length, 1);
+
+    return {
+      match: shorterWords >= 4 && lengthRatio >= 0.38 && longer.includes(shorter),
+      similarity,
+    };
+  }
+
+  private isSystemAudioRecentlyActive(timestamp: number): boolean {
+    if (timestamp - this._lastSystemAudioNonSilentAt <= this._SYSTEM_AUDIO_ACTIVE_WINDOW_MS) {
+      return true;
+    }
+    return this._recentTranscripts.some(
+      recent => recent.channel === 'interviewer' && timestamp - recent.timestamp <= this._DEDUP_WINDOW_MS
+    );
+  }
+
+  private cancelPendingMicEchoMatches(
+    systemText: string,
+    timestamp: number,
+    meta: { provider: string; isFinal: boolean; effectiveSpeaker: string },
+  ): number {
+    let dropped = 0;
+    const remaining: typeof this._pendingMicEchoTranscripts = [];
+
+    for (const pending of this._pendingMicEchoTranscripts) {
+      if (timestamp - pending.timestamp > this._DEDUP_WINDOW_MS) {
+        remaining.push(pending);
+        continue;
+      }
+
+      const match = this.getEchoMatch(pending.text, systemText);
+      if (!match.match) {
+        remaining.push(pending);
+        continue;
+      }
+
+      clearTimeout(pending.timer);
+      dropped++;
+      this._pendingMicDroppedCount++;
+      if (this._pendingMicDroppedCount <= 12 || this._pendingMicDroppedCount % 25 === 0) {
+        console.log(`[STT][echo-delay] drop-pending-mic #${this._pendingMicDroppedCount} provider=${meta.provider} matched=${meta.effectiveSpeaker} sim=${match.similarity.toFixed(2)} final=${meta.isFinal} mic="${pending.text.substring(0, 90)}" system="${systemText.substring(0, 90)}"`);
+      }
+    }
+
+    this._pendingMicEchoTranscripts = remaining;
+    return dropped;
+  }
+
+  private queueMicEchoCandidate(
+    text: string,
+    timestamp: number,
+    meta: { provider: string; isFinal: boolean },
+    deliver: () => void,
+  ): boolean {
+    if (meta.provider !== 'deepgram') return false;
+    if (text.length < 8) return false;
+    if (!this.isSystemAudioRecentlyActive(timestamp)) return false;
+
+    const id = ++this._pendingMicEchoSeq;
+    const timer = setTimeout(() => {
+      const index = this._pendingMicEchoTranscripts.findIndex(pending => pending.id === id);
+      if (index === -1) return;
+      const [pending] = this._pendingMicEchoTranscripts.splice(index, 1);
+      this._pendingMicReleasedCount++;
+      if (this._pendingMicReleasedCount <= 12 || this._pendingMicReleasedCount % 25 === 0) {
+        console.log(`[STT][echo-delay] release-mic #${this._pendingMicReleasedCount} provider=${pending.provider} final=${pending.final} waited=${Date.now() - pending.timestamp}ms text="${pending.text.substring(0, 90)}"`);
+      }
+      pending.deliver();
+    }, this._MIC_ECHO_GRACE_MS);
+
+    this._pendingMicEchoTranscripts.push({
+      id,
+      text,
+      timestamp,
+      final: meta.isFinal,
+      provider: meta.provider,
+      timer,
+      deliver,
+    });
+
+    this._pendingMicHeldCount++;
+    if (this._pendingMicHeldCount <= 12 || this._pendingMicHeldCount % 25 === 0) {
+      console.log(`[STT][echo-delay] hold-mic #${this._pendingMicHeldCount} provider=${meta.provider} final=${meta.isFinal} grace=${this._MIC_ECHO_GRACE_MS}ms text="${text.substring(0, 90)}"`);
+    }
+    return true;
+  }
+
+  private clearPendingMicEchoTranscripts(reason: string, flush: boolean): void {
+    const pending = this._pendingMicEchoTranscripts.splice(0);
+    if (pending.length === 0) return;
+
+    console.log(`[STT][echo-delay] clear pending=${pending.length} reason=${reason} flush=${flush}`);
+    for (const item of pending) {
+      clearTimeout(item.timer);
+      if (flush) {
+        item.deliver();
+      }
+    }
+  }
+
   /**
    * Check if this transcript is a cross-channel duplicate.
    * Returns true if it should be suppressed.
    */
-  private isCrossChannelDuplicate(speaker: string, text: string, timestamp: number): boolean {
+  private isCrossChannelDuplicate(
+    channel: 'interviewer' | 'user',
+    effectiveSpeaker: string,
+    text: string,
+    timestamp: number,
+    meta: { provider: string; isFinal: boolean; diarized: boolean; speakerId?: number } = {
+      provider: 'unknown',
+      isFinal: false,
+      diarized: false,
+    },
+  ): boolean {
     // Purge old entries
     this._recentTranscripts = this._recentTranscripts.filter(
       t => timestamp - t.timestamp < this._DEDUP_WINDOW_MS
     );
 
     // Check against the OTHER channel's recent transcripts
-    const otherChannel = speaker === 'interviewer' ? 'user' : 'interviewer';
+    const otherChannel = channel === 'interviewer' ? 'user' : 'interviewer';
     for (const recent of this._recentTranscripts) {
-      if (recent.speaker !== otherChannel) continue;
+      if (recent.channel !== otherChannel) continue;
       const sim = this.textSimilarity(text, recent.text);
       if (sim >= this._DEDUP_SIMILARITY_THRESHOLD) {
-        this._dedupSuppressedCount++;
-        // Always suppress the SECOND arrival. We can't retract transcripts
-        // already sent to the UI, so whichever channel spoke first wins.
-        // This eliminates ALL cross-channel echo duplication.
-        const label = speaker === 'user' ? 'Mic' : 'Speaker';
-        if (this._dedupSuppressedCount <= 10 || this._dedupSuppressedCount % 20 === 0) {
-          console.log(`[Main][dedup] Suppressing ${label} duplicate #${this._dedupSuppressedCount} (sim=${sim.toFixed(2)}): "${text.substring(0, 60)}..."`);
+        // Speaker/system audio is the canonical source for "the other person".
+        // If mic echo arrives first, do NOT suppress the later system transcript;
+        // preserving system context is more important than avoiding one visible
+        // duplicate line.
+        if (channel === 'interviewer') {
+          this._dedupPreservedSystemCount++;
+          if (this._dedupPreservedSystemCount <= 10 || this._dedupPreservedSystemCount % 20 === 0) {
+            console.log(`[STT][dedup] preserve-system #${this._dedupPreservedSystemCount} provider=${meta.provider} effective=${effectiveSpeaker} matched=${recent.effectiveSpeaker} sim=${sim.toFixed(2)} final=${meta.isFinal} diarized=${meta.diarized} speakerId=${meta.speakerId ?? 'none'} text="${text.substring(0, 80)}..."`);
+          }
+          break;
         }
-        return true; // Suppress — first arrival already displayed
+
+        this._dedupSuppressedCount++;
+        if (this._dedupSuppressedCount <= 10 || this._dedupSuppressedCount % 20 === 0) {
+          console.log(`[STT][dedup] suppress-mic-echo #${this._dedupSuppressedCount} provider=${meta.provider} effective=${effectiveSpeaker} matched=${recent.effectiveSpeaker} sim=${sim.toFixed(2)} final=${meta.isFinal} text="${text.substring(0, 80)}..."`);
+        }
+        return true;
       }
     }
 
     // Record this transcript for future cross-channel checks
-    this._recentTranscripts.push({ speaker, text, timestamp });
+    this._recentTranscripts.push({ channel, effectiveSpeaker, text, timestamp });
+    return false;
+  }
+
+  private shouldLogSttTranscriptTrace(key: string, isFinal: boolean): boolean {
+    const now = Date.now();
+    const count = (this.sttTranscriptLogCounters[key] || 0) + 1;
+    this.sttTranscriptLogCounters[key] = count;
+
+    if (isFinal || count <= 5 || count % 25 === 0) {
+      this.sttTranscriptLastLogAt[key] = now;
+      return true;
+    }
+
+    const last = this.sttTranscriptLastLogAt[key] || 0;
+    if (now - last > 5000) {
+      this.sttTranscriptLastLogAt[key] = now;
+      return true;
+    }
+
     return false;
   }
 
@@ -941,6 +1122,9 @@ export class AppState {
     // Persist last system audio level for the health check
     if (channel === 'interviewer') {
       this._lastSystemAudioLevel = level;
+      if (level.rms > 25 || level.peak > 80) {
+        this._lastSystemAudioNonSilentAt = now;
+      }
     }
   }
 
@@ -1046,70 +1230,130 @@ export class AppState {
     }
 
     stt.setRecognitionLanguage(sttLanguage);
+    const providerInstanceName = stt.constructor?.name || 'UnknownSTTProvider';
+    console.log(`[STT][provider] channel=${speaker} configured=${sttProvider} instance=${providerInstanceName} language=${sttLanguage} diarization=${stt.supportsDiarization ? 'yes' : 'no'}`);
 
     // Wire Transcript Events
-    stt.on('transcript', (segment: { text: string, isFinal: boolean, confidence: number }) => {
+    stt.on('transcript', (segment: { text: string, isFinal: boolean, confidence: number, speakerId?: number }) => {
       if (!this.isMeetingActive) {
         return;
       }
 
-      // ── Cross-channel deduplication ──
-      // When system audio is active, the mic picks up speaker output as echo.
-      // Both channels produce near-identical transcripts. Suppress the second
-      // arrival (first-to-arrive wins). Check both finals and long partials.
-      const trimmedText = segment.text.trim();
-      if (trimmedText.length > 30) {
-        if (this.isCrossChannelDuplicate(speaker, trimmedText, Date.now())) {
-          return; // Suppress duplicate
-        }
+      // ── Diarization: resolve effective speaker label ──
+      // When the provider supports diarization (e.g. Deepgram with diarize:true),
+      // it emits a numeric speakerId per segment. We map those to human-readable
+      // labels: "locuteur_0", "locuteur_1", etc. for the system audio channel.
+      // The mic channel (user) always stays as "user" regardless of provider.
+      // Local providers (Parakeet, Whisper) never set speakerId → labels unchanged.
+      let effectiveSpeaker: string = speaker;
+      if (speaker === 'interviewer' && stt.supportsDiarization && segment.speakerId !== undefined) {
+        effectiveSpeaker = `locuteur_${segment.speakerId}`;
       }
 
-      const helper = this.getWindowHelper();
+      // ── Cross-channel deduplication ──
+      // For diarized system audio, preserve the system transcript while still
+      // recording it so later mic echo can be suppressed. For non-diarized audio,
+      // suppress echo duplicates between mic and system audio channels.
+      const trimmedText = segment.text.trim();
+      const isDiarized = speaker === 'interviewer' && stt.supportsDiarization;
       const timestamp = Date.now();
-      const payload = {
-        speaker: speaker,
-        text: segment.text,
-        timestamp,
-        final: segment.isFinal,
-        confidence: segment.confidence
-      };
-      helper.getLauncherWindow()?.webContents.send('native-audio-transcript', payload);
-      helper.getOverlayWindow()?.webContents.send('native-audio-transcript', payload);
+      const traceKey = `${sttProvider}:${speaker}:${effectiveSpeaker}`;
 
-      const transcriptSegment = {
-        speaker: speaker,
-        text: segment.text,
-        timestamp,
-        final: segment.isFinal,
-        confidence: segment.confidence
+      if (this.shouldLogSttTranscriptTrace(traceKey, segment.isFinal)) {
+        console.log(`[STT][map] provider=${sttProvider} instance=${providerInstanceName} channel=${speaker} effective=${effectiveSpeaker} diarized=${isDiarized} speakerId=${segment.speakerId ?? 'none'} final=${segment.isFinal} conf=${Number(segment.confidence ?? 0).toFixed(2)} chars=${trimmedText.length} text="${trimmedText.substring(0, 120)}"`);
+      }
+
+      if (speaker === 'interviewer' && trimmedText.length >= 8) {
+        this.cancelPendingMicEchoMatches(trimmedText, timestamp, {
+          provider: sttProvider,
+          isFinal: segment.isFinal,
+          effectiveSpeaker,
+        });
+      }
+
+      if (!isDiarized && trimmedText.length > 30) {
+        if (this.isCrossChannelDuplicate(speaker, effectiveSpeaker, trimmedText, timestamp, {
+          provider: sttProvider,
+          isFinal: segment.isFinal,
+          diarized: isDiarized,
+          speakerId: segment.speakerId,
+        })) {
+          return; // Suppress duplicate
+        }
+      } else if (isDiarized && trimmedText.length > 30) {
+        // Do not suppress diarized system audio, but still record it so mic echo
+        // arriving later can be identified and dropped.
+        this.isCrossChannelDuplicate(speaker, effectiveSpeaker, trimmedText, timestamp, {
+          provider: sttProvider,
+          isFinal: segment.isFinal,
+          diarized: isDiarized,
+          speakerId: segment.speakerId,
+        });
+      }
+
+      const deliverTranscript = () => {
+        if (!this.isMeetingActive) return;
+
+        const helper = this.getWindowHelper();
+        const payload = {
+          speaker: effectiveSpeaker,
+          text: segment.text,
+          timestamp,
+          final: segment.isFinal,
+          confidence: segment.confidence
+        };
+        helper.getLauncherWindow()?.webContents.send('native-audio-transcript', payload);
+        helper.getOverlayWindow()?.webContents.send('native-audio-transcript', payload);
+
+        const transcriptSegment = {
+          speaker: effectiveSpeaker,
+          text: segment.text,
+          timestamp,
+          final: segment.isFinal,
+          confidence: segment.confidence
+        };
+
+        // Passive meeting intelligence should trust the system-audio channel.
+        // Microphone STT is still shown in the UI and used by the explicit Answer
+        // recording flow. We still persist final mic transcripts for post-meeting
+        // transcript/summary, but keep them out of passive answer context by default.
+        // Diarized speakers (locuteur_X) also come from system audio → feed context.
+        const includeMicContext = process.env.NATIVELY_INCLUDE_MIC_CONTEXT === '1';
+        const isSystemAudio = speaker === 'interviewer' || effectiveSpeaker.startsWith('locuteur_');
+        const shouldFeedPassiveContext = isSystemAudio || includeMicContext;
+        if (segment.isFinal && this.shouldLogSttTranscriptTrace(`${sttProvider}:${speaker}:${effectiveSpeaker}:context`, true)) {
+          console.log(`[STT][context] provider=${sttProvider} channel=${speaker} effective=${effectiveSpeaker} passive=${shouldFeedPassiveContext ? 'feed' : 'record-only'} includeMic=${includeMicContext} text="${trimmedText.substring(0, 100)}"`);
+        }
+        if (!shouldFeedPassiveContext) {
+          this.intelligenceManager.recordTranscriptOnly(transcriptSegment);
+          return;
+        }
+
+        this.intelligenceManager.handleTranscript(transcriptSegment);
+
+        // Feed final transcript to JIT RAG indexer
+        if (segment.isFinal && this.ragManager) {
+          this.ragManager.feedLiveTranscript([{
+            speaker: effectiveSpeaker,
+            text: segment.text,
+            timestamp
+          }]);
+        }
+
+        // Feed final recruiter (system audio) transcripts to negotiation tracker
+        if (segment.isFinal && speaker === 'interviewer') {
+          this.knowledgeOrchestrator?.feedInterviewerUtterance?.(segment.text);
+        }
       };
 
-      // Passive meeting intelligence should trust the system-audio channel.
-      // Microphone STT is still shown in the UI and used by the explicit Answer
-      // recording flow. We still persist final mic transcripts for post-meeting
-      // transcript/summary, but keep them out of passive answer context by default.
-      const includeMicContext = process.env.NATIVELY_INCLUDE_MIC_CONTEXT === '1';
-      const shouldFeedPassiveContext = speaker === 'interviewer' || includeMicContext;
-      if (!shouldFeedPassiveContext) {
-        this.intelligenceManager.recordTranscriptOnly(transcriptSegment);
+      if (speaker === 'user' && this.queueMicEchoCandidate(trimmedText, timestamp, {
+        provider: sttProvider,
+        isFinal: segment.isFinal,
+      }, deliverTranscript)) {
         return;
       }
 
-      this.intelligenceManager.handleTranscript(transcriptSegment);
-
-      // Feed final transcript to JIT RAG indexer
-      if (segment.isFinal && this.ragManager) {
-        this.ragManager.feedLiveTranscript([{
-          speaker: speaker,
-          text: segment.text,
-          timestamp
-        }]);
-      }
-
-      // Feed final recruiter (system audio) transcripts to negotiation tracker
-      if (segment.isFinal && speaker === 'interviewer') {
-        this.knowledgeOrchestrator?.feedInterviewerUtterance?.(segment.text);
-      }
+      deliverTranscript();
     });
 
     // Consecutive failure counter — reset on any successful final transcript
@@ -1435,6 +1679,8 @@ export class AppState {
    */
   public async reconfigureSttProvider(): Promise<void> {
     console.log('[Main] Reconfiguring STT Provider...');
+    this.clearPendingMicEchoTranscripts('stt_reconfigure', false);
+    this._recentTranscripts = [];
 
     // RC-01 fix: pause audio captures FIRST so their EventEmitter queues drain
     // before we null-out the STT instances. Without this, buffered 'data' events
@@ -1655,10 +1901,18 @@ export class AppState {
     // Give synchronous EventEmitter listeners and very fast provider finalizers a tick
     // before the caller reads context or marks the meeting inactive.
     await new Promise(resolve => setTimeout(resolve, 120));
+    if (this._pendingMicEchoTranscripts.length > 0) {
+      await new Promise(resolve => setTimeout(resolve, this._MIC_ECHO_GRACE_MS));
+      this.clearPendingMicEchoTranscripts(`flush:${reason}`, true);
+    }
   }
 
   public async startMeeting(metadata?: any): Promise<void> {
     console.log('[Main] Starting Meeting...', metadata);
+    this.clearPendingMicEchoTranscripts('new_meeting', false);
+    this._recentTranscripts = [];
+    this._lastSystemAudioLevel = null;
+    this._lastSystemAudioNonSilentAt = 0;
 
     // PR #173: Reset audio recovery state for fresh session
     this._systemAudioRecoveryInProgress = false;

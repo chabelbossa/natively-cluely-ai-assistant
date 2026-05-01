@@ -21,6 +21,16 @@ const formatDuration = (ms: number) => {
     return `${minutes}:${Number(seconds) < 10 ? '0' : ''}${seconds}`;
 };
 
+const formatSpeakerLabel = (speaker: string) => {
+    if (speaker === 'user') return 'Mic';
+    if (speaker === 'interviewer') return 'Speaker';
+    const diarizedMatch = /^locuteur[_-](\d+)$/i.exec(speaker || '');
+    if (diarizedMatch) return `Locuteur ${Number(diarizedMatch[1]) + 1}`;
+    const speakerMatch = /^speaker[_-](\d+)$/i.exec(speaker || '');
+    if (speakerMatch) return `Speaker ${Number(speakerMatch[1]) + 1}`;
+    return speaker || 'Speaker';
+};
+
 const cleanMarkdown = (content: string) => {
     if (!content) return '';
     // Ensure code blocks are on new lines to fix rendering issues
@@ -126,7 +136,7 @@ ${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'Non
 ${customSections ? `\n\n${customSections}` : ''}
             `.trim();
         } else if (activeTab === 'transcript' && meeting.transcript) {
-            textToCopy = meeting.transcript.map(t => `[${formatTime(t.timestamp)}] ${t.speaker === 'user' ? 'Mic' : 'Speaker'}: ${t.text}`).join('\n');
+            textToCopy = meeting.transcript.map(t => `[${formatTime(t.timestamp)}] ${formatSpeakerLabel(t.speaker)}: ${t.text}`).join('\n');
         } else if (activeTab === 'usage' && meeting.usage) {
             textToCopy = meeting.usage.map(u => `Q: ${u.question || ''}\nA: ${u.answer || ''}`).join('\n\n');
         }
@@ -431,7 +441,7 @@ ${customSections ? `\n\n${customSections}` : ''}
                                             <div key={i} className="group">
                                                 <div className="flex items-center gap-2 mb-1">
                                                     <span className="text-xs font-semibold text-text-secondary">
-                                                        {entry.speaker === 'user' ? 'Mic' : 'Speaker'}
+                                                        {formatSpeakerLabel(entry.speaker)}
                                                     </span>
                                                     <span className="text-xs text-text-tertiary font-mono">{entry.timestamp ? formatTime(entry.timestamp) : '0:00'}</span>
                                                 </div>

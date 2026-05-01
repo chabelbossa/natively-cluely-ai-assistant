@@ -373,7 +373,10 @@ Return ONLY valid JSON (no markdown code blocks):
 
                 const context = details.transcript?.map(t => {
                     const label = t.speaker === 'interviewer' ? 'INTERVIEWER' :
-                        t.speaker === 'user' ? 'ME' : 'ASSISTANT';
+                        t.speaker === 'user' ? 'ME' :
+                            /^locuteur[_-]\d+$/i.test(t.speaker || '') ? t.speaker.toUpperCase() :
+                                /^speaker[_-]\d+$/i.test(t.speaker || '') ? t.speaker.toUpperCase() :
+                                    'ASSISTANT';
                     return `[${label}]: ${t.text}`;
                 }).join('\n') || "";
 
