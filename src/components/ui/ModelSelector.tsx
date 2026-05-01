@@ -89,6 +89,8 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
         if (model === 'llama-3.3-70b-versatile') return 'Groq Llama 3.3';
         if (model === 'gpt-5.4') return 'GPT 5.4';
         if (model === 'claude-sonnet-4-6') return 'Sonnet 4.6';
+        if (model === 'gpt-5.2') return 'GPT 5.2 Codex';
+        if (model === 'gpt-5.1') return 'GPT 5.1 Codex';
 
         // Check dynamic cloud models
         const cloud = cloudModels.find(m => m.id === model);

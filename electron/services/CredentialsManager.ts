@@ -6,6 +6,7 @@
 import { app, safeStorage } from 'electron';
 import fs from 'fs';
 import path from 'path';
+import type { CodexAccount, CodexMultiAuthSettings } from '../types/codex-multi-auth';
 
 const CREDENTIALS_PATH = path.join(app.getPath('userData'), 'credentials.enc');
 
@@ -80,6 +81,10 @@ export interface StoredCredentials {
     trialExpiresAt?: string;   // ISO timestamp — local copy for startup check
     trialStartedAt?: string;   // ISO timestamp
     trialClaimed?:   boolean;  // set true on first claim, never cleared — hides start card permanently
+    // Codex Multi-Auth OAuth accounts
+    codexAccounts?: CodexAccount[];
+    codexSettings?: CodexMultiAuthSettings;
+    codexPreferredModel?: string;
 }
 
 export type StoredLlmProvider = 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude';
@@ -352,6 +357,22 @@ export class CredentialsManager {
     }
 
     // =========================================================================
+    // Codex Multi-Auth Getters
+    // =========================================================================
+
+    public getCodexAccounts(): CodexAccount[] {
+        return this.credentials.codexAccounts ?? [];
+    }
+
+    public getCodexSettings(): CodexMultiAuthSettings {
+        return this.credentials.codexSettings ?? {
+            rotationStrategy: 'round-robin',
+            criticalThreshold: 10,
+            lowThreshold: 25,
+        };
+    }
+
+    // =========================================================================
     // Setters (auto-save)
     // =========================================================================
 
@@ -389,6 +410,18 @@ export class CredentialsManager {
         this.credentials.claudeApiKey = serializeApiKeyList(key);
         this.saveCredentials();
         console.log('[CredentialsManager] Claude API Key updated');
+    }
+
+    public setCodexAccounts(accounts: CodexAccount[]): void {
+        this.credentials.codexAccounts = accounts;
+        this.saveCredentials();
+        console.log(`[CredentialsManager] Codex accounts updated (${accounts.length} accounts)`);
+    }
+
+    public setCodexSettings(settings: CodexMultiAuthSettings): void {
+        this.credentials.codexSettings = settings;
+        this.saveCredentials();
+        console.log('[CredentialsManager] Codex settings updated');
     }
 
     public setGoogleServiceAccountPath(filePath: string): void {
@@ -560,6 +593,16 @@ export class CredentialsManager {
         (this.credentials as any)[key] = modelId;
         this.saveCredentials();
         console.log(`[CredentialsManager] ${provider} preferred model set to: ${modelId}`);
+    }
+
+    public getCodexPreferredModel(): string | undefined {
+        return this.credentials.codexPreferredModel;
+    }
+
+    public setCodexPreferredModel(modelId: string): void {
+        this.credentials.codexPreferredModel = modelId;
+        this.saveCredentials();
+        console.log(`[CredentialsManager] Codex preferred model set to: ${modelId}`);
     }
 
     public saveCustomProvider(provider: CustomProvider): void {

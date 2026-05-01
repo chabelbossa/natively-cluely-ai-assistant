@@ -93,6 +93,13 @@ export class ProcessingHelper {
       this.llmHelper.setClaudeApiKey(claudeKey);
     }
 
+    // Initialize Codex Multi-Auth if accounts exist
+    const codexAccounts = credManager.getCodexAccounts();
+    if (codexAccounts.length > 0) {
+      console.log(`[ProcessingHelper] Loading ${codexAccounts.length} Codex OAuth account(s)`);
+      this.llmHelper.initializeCodexAuth();
+    }
+
     const nativelyKey = credManager.getNativelyApiKey();
     if (nativelyKey) {
       console.log("[ProcessingHelper] Loading stored Natively API Key from CredentialsManager");

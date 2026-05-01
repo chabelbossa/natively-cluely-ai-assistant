@@ -62,11 +62,11 @@ interface ElectronAPI {
   quitApp: () => Promise<void>
 
   // LLM Model Management
-  getCurrentLlmConfig: () => Promise<{ provider: "ollama" | "gemini" | "groq" | "deepinfra" | "opencode_go" | "openai" | "claude" | "natively" | "custom"; model: string; isOllama: boolean }>
+  getCurrentLlmConfig: () => Promise<{ provider: "ollama" | "gemini" | "groq" | "deepinfra" | "opencode_go" | "openai" | "claude" | "codex" | "natively" | "custom"; model: string; isOllama: boolean }>
   getAvailableOllamaModels: () => Promise<string[]>
   switchToOllama: (model?: string, url?: string) => Promise<{ success: boolean; error?: string }>
   switchToGemini: (apiKey?: string, modelId?: string) => Promise<{ success: boolean; error?: string }>
-  testLlmConnection: (provider: 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude', apiKey?: string) => Promise<{ success: boolean; error?: string }>
+  testLlmConnection: (provider: 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude' | 'codex', apiKey?: string) => Promise<{ success: boolean; error?: string }>
   selectServiceAccount: () => Promise<{ success: boolean; path?: string; cancelled?: boolean; error?: string }>
 
   // API Key Management
@@ -78,7 +78,7 @@ interface ElectronAPI {
   setClaudeApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   getNativelyUsage: () => Promise<{ ok: boolean; plan?: string; quota?: { transcription: { used: number; limit: number; remaining: number }; ai: { used: number; limit: number; remaining: number }; search: { used: number; limit: number; remaining: number }; resets_at: string }; member_since?: string; error?: string; status?: number }>
-  getStoredCredentials: () => Promise<{ hasGeminiKey: boolean; hasGroqKey: boolean; hasDeepInfraKey?: boolean; hasOpenCodeGoKey?: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; hasNativelyKey: boolean; googleServiceAccountPath: string | null; sttProvider: string; groqSttModel?: string; localSttMode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; localSttEndpoint?: string; localSttModel?: string; localSttGlossary?: string; localSttWhisperCppModelPath?: string; localSttWhisperCppExecutablePath?: string; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; hasSonioxKey: boolean; deepinfraPreferredModel?: string; openCodeGoPreferredModel?: string }>
+  getStoredCredentials: () => Promise<{ hasGeminiKey: boolean; hasGroqKey: boolean; hasDeepInfraKey?: boolean; hasOpenCodeGoKey?: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; hasNativelyKey: boolean; googleServiceAccountPath: string | null; sttProvider: string; groqSttModel?: string; localSttMode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; localSttEndpoint?: string; localSttModel?: string; localSttGlossary?: string; localSttWhisperCppModelPath?: string; localSttWhisperCppExecutablePath?: string; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; hasSonioxKey: boolean; deepinfraPreferredModel?: string; openCodeGoPreferredModel?: string; hasCodexAccounts?: boolean; codexPreferredModel?: string }>
   // Free Trial
   startTrial:     () => Promise<{ ok: boolean; trial_token?: string; started_at?: string; expires_at?: string; expired?: boolean; already_used?: boolean; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: { duration_ms: number; ai_requests: number; stt_minutes: number; search_requests: number }; error?: string; status?: number }>
   getTrialStatus: () => Promise<{ ok: boolean; expired?: boolean; remaining_ms?: number; started_at?: string; expires_at?: string; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: object; error?: string }>
@@ -339,6 +339,19 @@ interface ElectronAPI {
   modesUpdateNoteSection: (id: string, updates: { title?: string; description?: string }) => Promise<{ success: boolean; error?: string }>;
   modesDeleteNoteSection: (id: string) => Promise<{ success: boolean; error?: string }>;
   modesRemoveAllNoteSections: (modeId: string) => Promise<{ success: boolean; error?: string }>;
+
+  // Codex Multi-Auth OAuth
+  codexAuthStart: () => Promise<{ success: boolean; account?: any; error?: string }>;
+  codexAuthAddAccount: (alias: string) => Promise<{ success: boolean; account?: any; error?: string }>;
+  codexAccountsList: () => Promise<{ success: boolean; accounts?: any[]; error?: string }>;
+  codexAccountSetEnabled: (alias: string, enabled: boolean) => Promise<{ success: boolean; error?: string }>;
+  codexAccountRemove: (alias: string) => Promise<{ success: boolean; error?: string }>;
+  codexAccountReauth: (alias: string) => Promise<{ success: boolean; error?: string }>;
+  codexSwitchAccount: (alias: string) => Promise<{ success: boolean; error?: string }>;
+  codexClearForce: () => Promise<{ success: boolean; error?: string }>;
+  codexSetStrategy: (strategy: string) => Promise<{ success: boolean; error?: string }>;
+  codexGetSettings: () => Promise<{ success: boolean; settings?: any; error?: string }>;
+  codexHealthReport: () => Promise<{ success: boolean; report?: any; error?: string }>;
 }
 
 export const PROCESSING_EVENTS = {
@@ -566,7 +579,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getAvailableOllamaModels: () => ipcRenderer.invoke("get-available-ollama-models"),
   switchToOllama: (model?: string, url?: string) => ipcRenderer.invoke("switch-to-ollama", model, url),
   switchToGemini: (apiKey?: string, modelId?: string) => ipcRenderer.invoke("switch-to-gemini", apiKey, modelId),
-  testLlmConnection: (provider: 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude', apiKey: string) => ipcRenderer.invoke("test-llm-connection", provider, apiKey),
+  testLlmConnection: (provider: 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude' | 'codex', apiKey: string) => ipcRenderer.invoke("test-llm-connection", provider, apiKey),
   selectServiceAccount: () => ipcRenderer.invoke("select-service-account"),
 
   // API Key Management
@@ -1171,8 +1184,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setTavilyApiKey: (apiKey: string) => ipcRenderer.invoke('set-tavily-api-key', apiKey),
 
   // Dynamic Model Discovery
-  fetchProviderModels: (provider: 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude', apiKey: string) => ipcRenderer.invoke('fetch-provider-models', provider, apiKey),
-  setProviderPreferredModel: (provider: 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude', modelId: string) => ipcRenderer.invoke('set-provider-preferred-model', provider, modelId),
+  fetchProviderModels: (provider: 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude' | 'codex', apiKey: string) => ipcRenderer.invoke('fetch-provider-models', provider, apiKey),
+  setProviderPreferredModel: (provider: 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude' | 'codex', modelId: string) => ipcRenderer.invoke('set-provider-preferred-model', provider, modelId),
 
   // License Management
   licenseActivate: (key: string) => ipcRenderer.invoke('license:activate', key),
@@ -1246,6 +1259,19 @@ contextBridge.exposeInMainWorld("electronAPI", {
   modesUpdateNoteSection: (id: string, updates: { title?: string; description?: string }) => ipcRenderer.invoke('modes:update-note-section', id, updates),
   modesDeleteNoteSection: (id: string) => ipcRenderer.invoke('modes:delete-note-section', id),
   modesRemoveAllNoteSections: (modeId: string) => ipcRenderer.invoke('modes:remove-all-note-sections', modeId),
+
+  // Codex Multi-Auth OAuth
+  codexAuthStart: () => ipcRenderer.invoke("codex-auth-start"),
+  codexAuthAddAccount: (alias: string) => ipcRenderer.invoke("codex-auth-add-account", alias),
+  codexAccountsList: () => ipcRenderer.invoke("codex-accounts-list"),
+  codexAccountSetEnabled: (alias: string, enabled: boolean) => ipcRenderer.invoke("codex-account-set-enabled", alias, enabled),
+  codexAccountRemove: (alias: string) => ipcRenderer.invoke("codex-account-remove", alias),
+  codexAccountReauth: (alias: string) => ipcRenderer.invoke("codex-account-reauth", alias),
+  codexSwitchAccount: (alias: string) => ipcRenderer.invoke("codex-switch-account", alias),
+  codexClearForce: () => ipcRenderer.invoke("codex-clear-force"),
+  codexSetStrategy: (strategy: string) => ipcRenderer.invoke("codex-set-strategy", strategy),
+  codexGetSettings: () => ipcRenderer.invoke("codex-get-settings"),
+  codexHealthReport: () => ipcRenderer.invoke("codex-health-report"),
 } as ElectronAPI)
 
 // Renderer-side console forwarding to main-process log file.

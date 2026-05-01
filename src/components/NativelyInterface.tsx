@@ -89,6 +89,8 @@ const shortenModelName = (model: string): string => {
         'claude-sonnet-4-6': 'Sonnet 4.6',
         'natively': 'Natively',
         'gemini-2.5-pro-preview': 'Gemini 2.5 Pro',
+        'gpt-5.2': 'GPT 5.2 Codex',
+        'gpt-5.1': 'GPT 5.1 Codex',
     };
     if (map[model]) return map[model];
     if (model.startsWith('ollama-')) return model.replace('ollama-', '');
@@ -2801,6 +2803,8 @@ Provide only the answer, nothing else.`;
                                                     if (m === 'llama-3.3-70b-versatile') return 'Groq Llama 3.3';
                                                     if (m === 'gpt-5.4') return 'GPT 5.4';
                                                     if (m === 'claude-sonnet-4-6') return 'Sonnet 4.6';
+                                                    if (m === 'gpt-5.2') return 'GPT 5.2 Codex';
+                                                    if (m === 'gpt-5.1') return 'GPT 5.1 Codex';
                                                     return m;
                                                 })()}
                                             </span>

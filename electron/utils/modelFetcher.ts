@@ -131,7 +131,7 @@ async function fetchGroqModels(apiKey: string): Promise<ProviderModel[]> {
         .map((m: any) => ({ id: m.id, label: m.id }))
         .sort((a, b) => a.label.localeCompare(b.label));
 
-    return sortByPreference(mapped, ['llama-3.1-8b-instant', 'openai/gpt-oss-20b', 'llama-3.3-70b-versatile']);
+    return sortByPreference(mapped, ['openai/gpt-oss-20b', 'llama-3.3-70b-versatile']);
 }
 
 // ─── DeepInfra ───────────────────────────────────────────────────────────────

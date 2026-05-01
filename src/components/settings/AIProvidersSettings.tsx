@@ -3,6 +3,7 @@ import { Plus, Trash2, Edit2, AlertCircle, CheckCircle, Save, ChevronDown, Check
 import { STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
 import { validateCurl } from '../../lib/curl-validator';
 import { ProviderCard } from './ProviderCard';
+import { CodexProviderCard } from './CodexProviderCard';
 
 type MaskedKey = { index: number; masked: string };
 
@@ -140,7 +141,8 @@ export const AIProvidersSettings: React.FC = () => {
                         opencode_go: !!creds.hasOpenCodeGoKey,
                         openai: creds.hasOpenaiKey,
                         claude: creds.hasClaudeKey,
-                        natively: creds.hasNativelyKey || false
+                        natively: creds.hasNativelyKey || false,
+                        codex: !!creds.hasCodexAccounts
                     });
                     if (creds.providerKeys) {
                         const mk: Record<string, MaskedKey[]> = {};
@@ -160,6 +162,7 @@ export const AIProvidersSettings: React.FC = () => {
                     if (creds.openCodeGoPreferredModel) pm.opencode_go = creds.openCodeGoPreferredModel;
                     if (creds.openaiPreferredModel) pm.openai = creds.openaiPreferredModel;
                     if (creds.claudePreferredModel) pm.claude = creds.claudePreferredModel;
+                    if (creds.codexPreferredModel) pm.codex = creds.codexPreferredModel;
                     setPreferredModels(pm);
                 }
 
@@ -735,6 +738,39 @@ export const AIProvidersSettings: React.FC = () => {
                         keyPlaceholder="sk-ant-..."
                         keyUrl="https://console.anthropic.com/settings/keys"
                         onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, claude: model }))}
+                    />
+
+                    {/* Codex (ChatGPT OAuth) */}
+                    <CodexProviderCard
+                        hasAccounts={!!hasStoredKey.codex}
+                        preferredModel={preferredModels.codex}
+                        onAddAccount={async () => {
+                            const alias = window.prompt('Enter an alias for this ChatGPT account (e.g. personal, work):');
+                            if (!alias?.trim()) return;
+                            try {
+                                // @ts-ignore
+                                const result = await window.electronAPI?.codexAuthAddAccount?.(alias.trim());
+                                if (result?.success) {
+                                    setHasStoredKey(prev => ({ ...prev, codex: true }));
+                                } else {
+                                    alert(result?.error || 'Failed to add account');
+                                }
+                            } catch (e: any) {
+                                alert(e.message || 'Failed to add account');
+                            }
+                        }}
+                        onManageAccounts={() => {
+                            // @ts-ignore
+                            window.electronAPI?.openSettingsTab?.('codex-multi-auth');
+                        }}
+                        onPreferredModelChange={(model) => {
+                            setPreferredModels(prev => ({ ...prev, codex: model }));
+                            // @ts-ignore
+                            window.electronAPI?.setProviderPreferredModel?.('codex', model).catch(console.error);
+                        }}
+                        testStatus={testStatus.codex || 'idle'}
+                        testError={testError.codex}
+                        onTestConnection={() => handleTestConnection('codex', '')}
                     />
 
                 </div>

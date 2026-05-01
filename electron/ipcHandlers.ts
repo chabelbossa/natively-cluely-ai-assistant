@@ -23,6 +23,9 @@ import {
   RECOGNITION_LANGUAGES,
   AI_RESPONSE_LANGUAGES,
 } from "./config/languages";
+import { runOAuthFlow, refreshAccessToken } from "./services/CodexOAuthFlow";
+import { CodexAccountManager } from "./services/CodexAccountManager";
+import { CodexAuthRouter } from "./services/CodexAuthRouter";
 
 export function initializeIpcHandlers(appState: AppState): void {
   const safeHandle = (
@@ -1840,6 +1843,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         openCodeGoPreferredModel: creds.openCodeGoPreferredModel || undefined,
         openaiPreferredModel: creds.openaiPreferredModel || undefined,
         claudePreferredModel: creds.claudePreferredModel || undefined,
+        codexPreferredModel: creds.codexPreferredModel || undefined,
+        hasCodexAccounts: (creds.codexAccounts ?? []).filter((a: any) => a.enabled).length > 0,
       };
     } catch (error: any) {
       return {
@@ -1888,6 +1893,8 @@ export function initializeIpcHandlers(appState: AppState): void {
         sttAzureKey: "",
         sttIbmKey: "",
         sttSonioxKey: "",
+        hasCodexAccounts: false,
+        codexPreferredModel: undefined,
       };
     }
   });
@@ -1906,10 +1913,21 @@ export function initializeIpcHandlers(appState: AppState): void {
         | "deepinfra"
         | "opencode_go"
         | "openai"
-        | "claude",
+        | "claude"
+        | "codex",
       apiKey: string,
     ) => {
       try {
+        if (provider === "codex") {
+          return {
+            success: true,
+            models: [
+              { id: "gpt-5.2", label: "GPT 5.2 Codex" },
+              { id: "gpt-5.1", label: "GPT 5.1 Codex" },
+            ],
+          };
+        }
+
         // Fall back to stored key if no key was explicitly provided
         let key = apiKey?.trim();
         if (!key) {
@@ -1956,12 +1974,18 @@ export function initializeIpcHandlers(appState: AppState): void {
         | "deepinfra"
         | "opencode_go"
         | "openai"
-        | "claude",
+        | "claude"
+        | "codex",
       modelId: string,
     ) => {
       try {
         const { CredentialsManager } = require("./services/CredentialsManager");
-        CredentialsManager.getInstance().setPreferredModel(provider, modelId);
+        const cm = CredentialsManager.getInstance();
+        if (provider === "codex") {
+          cm.setCodexPreferredModel(modelId);
+        } else {
+          cm.setPreferredModel(provider, modelId);
+        }
       } catch (error: any) {
         console.error(
           `[IPC] Failed to set preferred model for ${provider}:`,
@@ -2611,13 +2635,28 @@ export function initializeIpcHandlers(appState: AppState): void {
         | "deepinfra"
         | "opencode_go"
         | "openai"
-        | "claude",
+        | "claude"
+        | "codex",
       apiKey?: string,
     ) => {
       console.log(
         `[IPC] Received test-llm-connection request for provider: ${provider}`,
       );
       try {
+        if (provider === "codex") {
+          const { CodexAccountManager } = require("./services/CodexAccountManager");
+          const cam = CodexAccountManager.getInstance();
+          const enabled = cam.getEnabledAccounts();
+          if (enabled.length === 0) {
+            return { success: false, error: "No Codex OAuth accounts configured. Add an account in Settings > Codex Multi-Auth." };
+          }
+          const healthy = enabled.filter((a: any) => !a.cooldownUntil || Date.now() > a.cooldownUntil);
+          if (healthy.length === 0) {
+            return { success: false, error: "All Codex accounts are on cooldown. Wait a moment and try again." };
+          }
+          return { success: true };
+        }
+
         if (!apiKey || !apiKey.trim()) {
           const {
             CredentialsManager,
@@ -2663,7 +2702,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               response = await axios.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 {
-                  model: "llama-3.1-8b-instant",
+                  model: "llama-3.3-70b-versatile",
                   messages: [{ role: "user", content: "Hello" }],
                 },
                 {
@@ -4299,6 +4338,164 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { success: true };
     } catch (e: any) {
       console.error("[IPC] modes:remove-all-note-sections error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  // ========================================================================
+  // Codex Multi-Auth OAuth Handlers
+  // ========================================================================
+
+  safeHandle("codex-auth-start", async () => {
+    try {
+      const result = await runOAuthFlow(true);
+      if (!result.success || !result.account) {
+        return { success: false, error: result.error || "OAuth flow failed" };
+      }
+      return { success: true, account: result.account };
+    } catch (e: any) {
+      console.error("[IPC] codex-auth-start error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("codex-auth-add-account", async (_, alias: string) => {
+    try {
+      const result = await runOAuthFlow(true);
+      if (!result.success || !result.account) {
+        return { success: false, error: result.error || "OAuth flow failed" };
+      }
+      const manager = CodexAccountManager.getInstance();
+      const newAccount = manager.addAccount(alias, {
+        email: result.account.email,
+        accessToken: result.account.accessToken,
+        refreshToken: result.account.refreshToken,
+        expiresAt: result.account.expiresAt,
+        idToken: result.account.idToken,
+        oauthScope: result.account.oauthScope,
+        obtainedAt: new Date().toISOString(),
+        weight: 1.0,
+        enabled: true,
+      });
+      // Initialize LLMHelper if first account
+      const llmHelper = appState.processingHelper.getLLMHelper();
+      if (!llmHelper) {
+        return { success: false, error: "LLMHelper not available" };
+      }
+      llmHelper.initializeCodexAuth();
+      return { success: true, account: manager.getSanitizedAccounts().find((a) => a.alias === alias) };
+    } catch (e: any) {
+      console.error("[IPC] codex-auth-add-account error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("codex-accounts-list", async () => {
+    try {
+      const manager = CodexAccountManager.getInstance();
+      return { success: true, accounts: manager.getSanitizedAccounts() };
+    } catch (e: any) {
+      console.error("[IPC] codex-accounts-list error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("codex-account-set-enabled", async (_, alias: string, enabled: boolean) => {
+    try {
+      const manager = CodexAccountManager.getInstance();
+      const ok = manager.setAccountEnabled(alias, enabled);
+      return { success: ok };
+    } catch (e: any) {
+      console.error("[IPC] codex-account-set-enabled error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("codex-account-remove", async (_, alias: string) => {
+    try {
+      const manager = CodexAccountManager.getInstance();
+      const ok = manager.removeAccount(alias);
+      return { success: ok };
+    } catch (e: any) {
+      console.error("[IPC] codex-account-remove error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("codex-account-reauth", async (_, alias: string) => {
+    try {
+      const result = await runOAuthFlow(true);
+      if (!result.success || !result.account) {
+        return { success: false, error: result.error || "OAuth flow failed" };
+      }
+      const manager = CodexAccountManager.getInstance();
+      const ok = manager.reauthAccount(alias, {
+        accessToken: result.account.accessToken,
+        refreshToken: result.account.refreshToken,
+        expiresAt: result.account.expiresAt,
+        idToken: result.account.idToken,
+        oauthScope: result.account.oauthScope,
+      });
+      return { success: ok };
+    } catch (e: any) {
+      console.error("[IPC] codex-account-reauth error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("codex-switch-account", async (_, alias: string) => {
+    try {
+      const router = new CodexAuthRouter();
+      const ok = router.setForceMode(alias, 24);
+      return { success: ok };
+    } catch (e: any) {
+      console.error("[IPC] codex-switch-account error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("codex-clear-force", async () => {
+    try {
+      const router = new CodexAuthRouter();
+      router.clearForceMode();
+      return { success: true };
+    } catch (e: any) {
+      console.error("[IPC] codex-clear-force error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("codex-set-strategy", async (_, strategy: string) => {
+    try {
+      const manager = CodexAccountManager.getInstance();
+      const valid = ["round-robin", "least-used", "random", "weighted-round-robin"];
+      if (!valid.includes(strategy)) {
+        return { success: false, error: "Invalid strategy" };
+      }
+      manager.setSettings({ rotationStrategy: strategy as any });
+      return { success: true };
+    } catch (e: any) {
+      console.error("[IPC] codex-set-strategy error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("codex-get-settings", async () => {
+    try {
+      const manager = CodexAccountManager.getInstance();
+      return { success: true, settings: manager.getSettings() };
+    } catch (e: any) {
+      console.error("[IPC] codex-get-settings error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("codex-health-report", async () => {
+    try {
+      const router = new CodexAuthRouter();
+      return { success: true, report: router.getHealthReport() };
+    } catch (e: any) {
+      console.error("[IPC] codex-health-report error:", e);
       return { success: false, error: e.message };
     }
   });

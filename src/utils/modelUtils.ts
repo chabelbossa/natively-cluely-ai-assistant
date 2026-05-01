@@ -3,7 +3,7 @@ export const STANDARD_CLOUD_MODELS: Record<string, {
     ids: string[];
     names: string[];
     descs: string[];
-    pmKey: 'geminiPreferredModel' | 'groqPreferredModel' | 'deepinfraPreferredModel' | 'openCodeGoPreferredModel' | 'openaiPreferredModel' | 'claudePreferredModel';
+    pmKey: 'geminiPreferredModel' | 'groqPreferredModel' | 'deepinfraPreferredModel' | 'openCodeGoPreferredModel' | 'openaiPreferredModel' | 'claudePreferredModel' | 'codexPreferredModel';
 }> = {
     gemini: {
         hasKeyCheck: (creds) => !!creds?.hasGeminiKey,
@@ -14,9 +14,9 @@ export const STANDARD_CLOUD_MODELS: Record<string, {
     },
     groq: {
         hasKeyCheck: (creds) => !!creds?.hasGroqKey,
-        ids: ['llama-3.1-8b-instant', 'openai/gpt-oss-20b', 'llama-3.3-70b-versatile'],
-        names: ['Groq Llama 3.1 8B', 'Groq GPT OSS 20B', 'Groq Llama 3.3 70B'],
-        descs: ['Fastest • Lightweight', 'Very fast • Strong', 'Balanced • Larger'],
+        ids: ['openai/gpt-oss-20b', 'llama-3.3-70b-versatile'],
+        names: ['Groq GPT OSS 20B', 'Groq Llama 3.3 70B'],
+        descs: ['Very fast • Strong', 'Balanced • Larger'],
         pmKey: 'groqPreferredModel'
     },
     deepinfra: {
@@ -46,6 +46,13 @@ export const STANDARD_CLOUD_MODELS: Record<string, {
         names: ['Sonnet 4.6'],
         descs: ['Anthropic'],
         pmKey: 'claudePreferredModel'
+    },
+    codex: {
+        hasKeyCheck: (creds) => !!creds?.hasCodexAccounts,
+        ids: ['gpt-5.2', 'gpt-5.1'],
+        names: ['GPT 5.2 Codex', 'GPT 5.1 Codex'],
+        descs: ['ChatGPT Plus/Pro • Best', 'ChatGPT Plus/Pro • Fast'],
+        pmKey: 'codexPreferredModel'
     },
 };
 

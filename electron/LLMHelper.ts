@@ -19,6 +19,9 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import axios from 'axios';
 import { createProviderRateLimiters, RateLimiter } from './services/RateLimiter';
+import { CodexAuthRouter } from './services/CodexAuthRouter';
+import { CodexAccountManager } from './services/CodexAccountManager';
+import { CodexResponsesClient } from './services/CodexResponsesClient';
 const execAsync = promisify(exec);
 
 interface OllamaResponse {
@@ -29,11 +32,12 @@ interface OllamaResponse {
 // Model constant for Gemini 3 Flash
 const GEMINI_FLASH_MODEL = "gemini-3.1-flash-lite-preview"
 const GEMINI_PRO_MODEL = "gemini-3.1-pro-preview"
-const GROQ_MODEL = "llama-3.1-8b-instant"
+const GROQ_MODEL = "llama-3.3-70b-versatile"
 const OPENAI_MODEL = "gpt-5.4"
 const CLAUDE_MODEL = "claude-sonnet-4-6"
 const DEEPINFRA_MODEL = "deepinfra:stepfun-ai/Step-3.5-Flash"
 const OPENCODE_GO_MODEL = "opencode-go/deepseek-v4-flash"
+const CODEX_MODEL = "gpt-5.2"
 const DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 const OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 const MAX_OUTPUT_TOKENS = 65536
@@ -86,6 +90,11 @@ export class LLMHelper {
   private aiResponseLanguage: string = 'auto';
   private sttLanguage: string = 'english-us';
   private nativelyKey: string | null = null;
+
+  // Codex Multi-Auth OAuth
+  private codexAccountManager: CodexAccountManager | null = null;
+  private codexRouter: CodexAuthRouter | null = null;
+  private codexClient: CodexResponsesClient | null = null;
 
   // Rate limiters per provider to prevent 429 errors on free tiers
   private rateLimiters: ReturnType<typeof createProviderRateLimiters>;
@@ -273,6 +282,17 @@ export class LLMHelper {
     console.log(`[LLMHelper] Claude API Key updated (${this.providerKeyRings.claude.keys.length} key${this.providerKeyRings.claude.keys.length === 1 ? '' : 's'}).`);
   }
 
+  public initializeCodexAuth(): void {
+    try {
+      this.codexAccountManager = CodexAccountManager.getInstance();
+      this.codexRouter = new CodexAuthRouter();
+      this.codexClient = new CodexResponsesClient(this.codexRouter);
+      console.log('[LLMHelper] Codex Multi-Auth initialized');
+    } catch (error) {
+      console.error('[LLMHelper] Failed to initialize Codex Multi-Auth:', error);
+    }
+  }
+
   public setNativelyKey(key: string | null): void {
     this.nativelyKey = key || null;
     console.log(`[LLMHelper] Natively key ${key ? 'set' : 'cleared'}`);
@@ -366,6 +386,19 @@ export class LLMHelper {
     return modelId.startsWith("gemini-") || modelId.startsWith("models/");
   }
 
+  private isCodexModel(modelId: string): boolean {
+    return (
+      modelId.startsWith("codex-") ||
+      modelId.startsWith("gpt-5-codex") ||
+      modelId.startsWith("gpt-5.1-codex") ||
+      modelId.startsWith("gpt-5.2-codex") ||
+      modelId === "gpt-5.2" ||
+      modelId === "gpt-5.1" ||
+      modelId.startsWith("gpt-5.2-") ||
+      modelId.startsWith("gpt-5.1-")
+    );
+  }
+
   private resolveOpenAICompatibleRoute(modelId: string = this.currentModelId): { provider: 'DeepInfra' | 'OpenCode Go'; client: OpenAI | null; model: string } | null {
     if (this.isDeepInfraModel(modelId)) {
       return {
@@ -392,6 +425,7 @@ export class LLMHelper {
       : this.isOpenAiModel(this.currentModelId) ? 'OpenAI'
       : this.isGroqModel(this.currentModelId) ? 'Groq'
       : this.isGeminiModel(this.currentModelId) ? 'Gemini'
+      : this.isCodexModel(this.currentModelId) ? 'Codex'
       : '';
   }
   // ---------------------------
@@ -407,6 +441,7 @@ export class LLMHelper {
     if (modelId === 'llama') targetModelId = GROQ_MODEL;
     if (modelId === 'deepinfra') targetModelId = DEEPINFRA_MODEL;
     if (modelId === 'opencode_go' || modelId === 'opencode-go') targetModelId = OPENCODE_GO_MODEL;
+    if (modelId === 'codex') targetModelId = CODEX_MODEL;
 
     if (targetModelId.startsWith('ollama-')) {
       this.useOllama = true;
@@ -1183,6 +1218,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         }
         // No key or call failed — fall through to default routing
       }
+      if (this.isCodexModel(this.currentModelId) && this.codexClient) {
+        return await this.generateWithCodex(userContent, openaiSystemPrompt);
+      }
       if (this.isOpenAiModel(this.currentModelId) && this.openaiClient) {
         return await this.generateWithOpenai(userContent, openaiSystemPrompt, imagePaths);
       }
@@ -1219,9 +1257,12 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       const textGroq = this.modelVersionManager.getTextTieredModels(TextModelFamily.GROQ).tier1;
 
       if (isMultimodal) {
-        // MULTIMODAL PROVIDER ORDER: [Natively] -> OpenAI -> Gemini Flash -> Claude -> Gemini Pro -> Groq -> Custom/Ollama
+        // MULTIMODAL PROVIDER ORDER: [Natively] -> Codex -> OpenAI -> Gemini Flash -> Claude -> Gemini Pro -> Groq -> Custom/Ollama
         if (this.hasNatively()) {
           providers.push({ name: 'Natively API', execute: () => this.generateWithNatively(userContent, openaiSystemPrompt, imagePaths) });
+        }
+        if (this.codexClient) {
+          providers.push({ name: `Codex (${this.currentModelId})`, execute: () => this.generateWithCodex(userContent, openaiSystemPrompt) });
         }
         if (this.openaiClient) {
           providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.generateWithOpenai(userContent, openaiSystemPrompt, imagePaths, textOpenAI) });
@@ -1248,9 +1289,12 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           });
         }
       } else {
-        // TEXT-ONLY: [Natively] -> Groq -> Gemini Flash -> Gemini Pro -> OpenAI -> Claude
+        // TEXT-ONLY: [Natively] -> Codex -> Groq -> Gemini Flash -> Gemini Pro -> OpenAI -> Claude
         if (this.hasNatively()) {
           providers.push({ name: 'Natively API', execute: () => this.generateWithNatively(userContent, openaiSystemPrompt) });
+        }
+        if (this.codexClient) {
+          providers.push({ name: `Codex (${this.currentModelId})`, execute: () => this.generateWithCodex(userContent, openaiSystemPrompt) });
         }
         if (this.groqClient) {
           providers.push({ name: `Groq (${textGroq})`, execute: () => this.generateWithGroq(combinedMessages.groq, textGroq) });
@@ -2264,9 +2308,12 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     const textGroq = this.modelVersionManager.getTextTieredModels(TextModelFamily.GROQ).tier1;
 
     if (isMultimodal) {
-      // MULTIMODAL PROVIDER ORDER: [Natively] -> OpenAI -> Gemini Flash -> Claude -> Gemini Pro -> Groq Scout 4
+      // MULTIMODAL PROVIDER ORDER: [Natively] -> Codex -> OpenAI -> Gemini Flash -> Claude -> Gemini Pro -> Groq Scout 4
       if (this.hasNatively()) {
         providers.push({ name: 'Natively API', execute: () => this.streamWithNatively(userContent, openaiSystemPrompt, imagePaths) });
+      }
+      if (this.codexClient) {
+        providers.push({ name: `Codex (${this.currentModelId})`, execute: () => this.streamWithCodex(userContent, openaiSystemPrompt) });
       }
       if (this.openaiClient) {
         providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenaiMultimodal(userContent, imagePaths!, openaiSystemPrompt, textOpenAI) });
@@ -2287,6 +2334,9 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       // TEXT-ONLY PROVIDER ORDER: [Natively] → Groq → OpenAI → Claude → Gemini Flash → Gemini Pro
       if (this.hasNatively()) {
         providers.push({ name: 'Natively API', execute: () => this.streamWithNatively(userContent, openaiSystemPrompt) });
+      }
+      if (this.codexClient) {
+        providers.push({ name: `Codex (${this.currentModelId})`, execute: () => this.streamWithCodex(userContent, openaiSystemPrompt) });
       }
       if (this.groqClient) {
         providers.push({ name: `Groq (${textGroq})`, execute: () => this.streamWithGroq(combinedMessages.groq, textGroq) });
@@ -2523,6 +2573,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
 
     // 3. Cloud Provider Routing
+
+    // Codex (OAuth ChatGPT)
+    if (this.isCodexModel(this.currentModelId) && this.codexClient) {
+      const openAiSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
+      const finalOpenAiSystem = this.injectLanguageInstruction(openAiSystem);
+      yield* this.streamWithCodex(userContent, finalOpenAiSystem);
+      return;
+    }
 
     // OpenAI
     if (this.isOpenAiModel(this.currentModelId) && this.openaiClient) {
@@ -3431,10 +3489,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
   }
 
-  public getCurrentProvider(): "ollama" | "gemini" | "groq" | "deepinfra" | "opencode_go" | "openai" | "claude" | "natively" | "custom" {
+  public getCurrentProvider(): "ollama" | "gemini" | "groq" | "deepinfra" | "opencode_go" | "openai" | "claude" | "codex" | "natively" | "custom" {
     if (this.customProvider) return "custom";
     if (this.useOllama) return "ollama";
     if (this.currentModelId === 'natively') return "natively";
+    if (this.isCodexModel(this.currentModelId)) return "codex";
     if (this.isDeepInfraModel(this.currentModelId)) return "deepinfra";
     if (this.isOpenCodeGoModel(this.currentModelId)) return "opencode_go";
     if (this.isGroqModel(this.currentModelId)) return "groq";
@@ -3918,6 +3977,43 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       fullResponse += chunk;
     }
     return fullResponse;
+  }
+
+  // =========================================================================
+  // Codex Multi-Auth (ChatGPT OAuth)
+  // =========================================================================
+
+  private async generateWithCodex(userMessage: string, systemPrompt?: string): Promise<string> {
+    if (!this.codexClient) {
+      throw new Error("Codex client not initialized");
+    }
+    const input: Array<{ role: "system" | "user"; content: string }> = [];
+    if (systemPrompt) {
+      input.push({ role: "system", content: systemPrompt });
+    }
+    input.push({ role: "user", content: userMessage });
+    return this.codexClient.generateResponse({
+      model: this.currentModelId,
+      input,
+      store: false,
+    });
+  }
+
+  private async *streamWithCodex(userMessage: string, systemPrompt?: string): AsyncGenerator<string> {
+    if (!this.codexClient) {
+      throw new Error("Codex client not initialized");
+    }
+    const input: Array<{ role: "system" | "user"; content: string }> = [];
+    if (systemPrompt) {
+      input.push({ role: "system", content: systemPrompt });
+    }
+    input.push({ role: "user", content: userMessage });
+    yield* this.codexClient.streamResponse({
+      model: this.currentModelId,
+      input,
+      stream: true,
+      store: false,
+    });
   }
 
 }
