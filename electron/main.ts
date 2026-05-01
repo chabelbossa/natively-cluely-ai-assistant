@@ -839,6 +839,75 @@ export class AppState {
   };
   private _lastSystemAudioLevel: { rms: number; peak: number } | null = null;
 
+  // ── Cross-channel transcript deduplication ──
+  // When system audio is active, the microphone picks up speaker output as room
+  // echo. Both channels produce near-identical transcripts. We keep a rolling
+  // buffer of recent final transcripts per channel and suppress duplicates.
+  // Priority: Speaker (system audio) is the clean digital source — when both
+  // channels produce the same text, suppress the Mic copy.
+  private _recentTranscripts: Array<{ speaker: string; text: string; timestamp: number }> = [];
+  private readonly _DEDUP_WINDOW_MS = 8000; // 8-second window
+  private readonly _DEDUP_SIMILARITY_THRESHOLD = 0.6; // 60% overlap
+  private _dedupSuppressedCount = 0;
+
+  /**
+   * Normalized similarity between two strings (Dice coefficient on word bigrams).
+   * Returns 0..1, where 1 = identical.
+   */
+  private textSimilarity(a: string, b: string): number {
+    const normalize = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' ').trim();
+    const na = normalize(a);
+    const nb = normalize(b);
+    if (na === nb) return 1;
+    if (!na || !nb) return 0;
+    const wordsA = na.split(' ');
+    const wordsB = nb.split(' ');
+    const bigramsA = new Set(wordsA.map((w, i) => i < wordsA.length - 1 ? `${w} ${wordsA[i + 1]}` : null).filter(Boolean));
+    const bigramsB = new Set(wordsB.map((w, i) => i < wordsB.length - 1 ? `${w} ${wordsB[i + 1]}` : null).filter(Boolean));
+    if (bigramsA.size === 0 && bigramsB.size === 0) {
+      // Single-word comparison fallback
+      const setA = new Set(wordsA);
+      const setB = new Set(wordsB);
+      const intersection = [...setA].filter(w => setB.has(w)).length;
+      return (2 * intersection) / (setA.size + setB.size);
+    }
+    const intersection = [...bigramsA].filter(b => bigramsB.has(b)).length;
+    return (2 * intersection) / (bigramsA.size + bigramsB.size);
+  }
+
+  /**
+   * Check if this transcript is a cross-channel duplicate.
+   * Returns true if it should be suppressed.
+   */
+  private isCrossChannelDuplicate(speaker: string, text: string, timestamp: number): boolean {
+    // Purge old entries
+    this._recentTranscripts = this._recentTranscripts.filter(
+      t => timestamp - t.timestamp < this._DEDUP_WINDOW_MS
+    );
+
+    // Check against the OTHER channel's recent transcripts
+    const otherChannel = speaker === 'interviewer' ? 'user' : 'interviewer';
+    for (const recent of this._recentTranscripts) {
+      if (recent.speaker !== otherChannel) continue;
+      const sim = this.textSimilarity(text, recent.text);
+      if (sim >= this._DEDUP_SIMILARITY_THRESHOLD) {
+        this._dedupSuppressedCount++;
+        // Always suppress the SECOND arrival. We can't retract transcripts
+        // already sent to the UI, so whichever channel spoke first wins.
+        // This eliminates ALL cross-channel echo duplication.
+        const label = speaker === 'user' ? 'Mic' : 'Speaker';
+        if (this._dedupSuppressedCount <= 10 || this._dedupSuppressedCount % 20 === 0) {
+          console.log(`[Main][dedup] Suppressing ${label} duplicate #${this._dedupSuppressedCount} (sim=${sim.toFixed(2)}): "${text.substring(0, 60)}..."`);
+        }
+        return true; // Suppress — first arrival already displayed
+      }
+    }
+
+    // Record this transcript for future cross-channel checks
+    this._recentTranscripts.push({ speaker, text, timestamp });
+    return false;
+  }
+
   private getPcm16Level(chunk: Buffer): { rms: number; peak: number } {
     if (!chunk || chunk.length < 2) return { rms: 0, peak: 0 };
 
@@ -982,6 +1051,17 @@ export class AppState {
     stt.on('transcript', (segment: { text: string, isFinal: boolean, confidence: number }) => {
       if (!this.isMeetingActive) {
         return;
+      }
+
+      // ── Cross-channel deduplication ──
+      // When system audio is active, the mic picks up speaker output as echo.
+      // Both channels produce near-identical transcripts. Suppress the second
+      // arrival (first-to-arrive wins). Check both finals and long partials.
+      const trimmedText = segment.text.trim();
+      if (trimmedText.length > 30) {
+        if (this.isCrossChannelDuplicate(speaker, trimmedText, Date.now())) {
+          return; // Suppress duplicate
+        }
       }
 
       const helper = this.getWindowHelper();
