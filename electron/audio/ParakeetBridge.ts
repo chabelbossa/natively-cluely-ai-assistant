@@ -7,6 +7,13 @@ import readline from 'readline';
 
 export type ParakeetBridgeEventType = 'ready' | 'partial' | 'final' | 'error' | 'metrics' | 'status';
 
+export interface DiarizationSegment {
+    speaker_id: string;
+    start_time: number;
+    end_time: number;
+    quality: number;
+}
+
 export interface ParakeetBridgeEvent {
     type: ParakeetBridgeEventType;
     session_id?: string;
@@ -14,11 +21,14 @@ export interface ParakeetBridgeEvent {
     confidence?: number;
     error?: string;
     state?: string;
+    speaker_id?: string;
+    diarization_segments?: DiarizationSegment[];
     [key: string]: unknown;
 }
 
 export interface ParakeetSessionConfig {
     language?: string;
+    channel?: 'system' | 'mic';
 }
 
 type PendingReady = {
@@ -50,6 +60,7 @@ export class ParakeetBridge extends EventEmitter {
             type: 'start_session',
             session_id: sessionId,
             language: config.language || 'auto',
+            channel: config.channel || 'unknown',
         });
     }
 
@@ -135,6 +146,9 @@ export class ParakeetBridge extends EventEmitter {
                 env: {
                     ...process.env,
                     NATIVELY_PARAKEET_NO_DOWNLOAD: '1',
+                    // ASR stays cache-only; diarization models are separate and may be
+                    // downloaded once so local speaker separation can actually work.
+                    NATIVELY_PARAKEET_ALLOW_DIARIZATION_DOWNLOAD: process.env.NATIVELY_PARAKEET_ALLOW_DIARIZATION_DOWNLOAD || '1',
                 },
             });
 
@@ -145,7 +159,7 @@ export class ParakeetBridge extends EventEmitter {
                 this.process = null;
                 this.starting = null;
                 reject(error);
-            }, 45000);
+            }, 90000);
 
             this.pendingReady = { resolve, reject, timeout };
 

@@ -7,12 +7,16 @@ export interface ParakeetStreamingConfig {
     glossary?: string;
     speechEndDebounceMs?: number;
     partialCommitIntervalMs?: number;
+    channel?: 'system' | 'mic';
 }
 
 export class ParakeetStreamingSTT extends EventEmitter {
     private readonly bridge = ParakeetBridge.getInstance();
     private readonly sessionId: string;
+    private readonly channel: 'system' | 'mic';
     private readonly postProcessor: TranscriptPostProcessor;
+    /** True only after the helper confirms FluidAudio diarization models are ready. */
+    public supportsDiarization = false;
     private active = false;
     private ready = false;
     private sampleRate = 16000;
@@ -37,15 +41,19 @@ export class ParakeetStreamingSTT extends EventEmitter {
     private lastAudioLogAt = 0;
     private lastTranscriptLogAt = 0;
     private readonly sessionListener: (event: ParakeetBridgeEvent) => void;
+    private readonly bridgeStatusListener: (event: ParakeetBridgeEvent) => void;
 
     constructor(config: ParakeetStreamingConfig = {}) {
         super();
         this.sessionId = `parakeet_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        this.channel = config.channel || 'mic';
         this.postProcessor = new TranscriptPostProcessor({ glossary: config.glossary });
         this.speechEndDebounceMs = this.normalizeDebounceMs(config.speechEndDebounceMs);
         this.partialCommitIntervalMs = this.normalizePartialCommitIntervalMs(config.partialCommitIntervalMs);
         this.sessionListener = (event: ParakeetBridgeEvent) => this.handleBridgeEvent(event);
+        this.bridgeStatusListener = (event: ParakeetBridgeEvent) => this.handleBridgeEvent(event);
         this.bridge.on(`session:${this.sessionId}`, this.sessionListener);
+        this.bridge.on('status', this.bridgeStatusListener);
     }
 
     setRecognitionLanguage(key: string): void {
@@ -83,9 +91,12 @@ export class ParakeetStreamingSTT extends EventEmitter {
         this.lastAudioLogAt = 0;
         this.lastTranscriptLogAt = 0;
 
-        console.log(`[ParakeetStreaming][lifecycle] start session=${this.sessionId} inputRate=${this.sampleRate}Hz channels=${this.numChannels} language=${this.getIsoLanguage() || 'auto'} debounce=${this.speechEndDebounceMs}ms partialCommit=${this.partialCommitIntervalMs}ms`);
+        console.log(`[ParakeetStreaming][lifecycle] start session=${this.sessionId} source=${this.channel} inputRate=${this.sampleRate}Hz channels=${this.numChannels} language=${this.getIsoLanguage() || 'auto'} debounce=${this.speechEndDebounceMs}ms partialCommit=${this.partialCommitIntervalMs}ms`);
 
-        void this.bridge.startSession(this.sessionId, { language: this.getIsoLanguage() || 'auto' })
+        void this.bridge.startSession(this.sessionId, {
+            language: this.getIsoLanguage() || 'auto',
+            channel: this.channel,
+        })
             .then(() => {
                 if (!this.active) {
                     this.bridge.stopSession(this.sessionId);
@@ -159,6 +170,7 @@ export class ParakeetStreamingSTT extends EventEmitter {
     removeAllListeners(eventName?: string | symbol): this {
         this.clearFinalizeTimer();
         this.bridge.off(`session:${this.sessionId}`, this.sessionListener);
+        this.bridge.off('status', this.bridgeStatusListener);
         return super.removeAllListeners(eventName);
     }
 
@@ -183,12 +195,20 @@ export class ParakeetStreamingSTT extends EventEmitter {
                 this.lastPartialAt = Date.now();
             }
 
+            // Extract speakerId from diarization (only present on final events)
+            const speakerId = final && event.speaker_id ? this.parseSpeakerId(event.speaker_id) : undefined;
+
             this.emit('transcript', {
                 text: emittedText,
                 isFinal: final,
                 confidence,
+                speakerId,
             });
             this.logTranscriptEvent(final, emittedText, result.text, confidence);
+
+            if (final && speakerId !== undefined) {
+                console.log(`[ParakeetStreaming][diarization] session=${this.sessionId} speaker=${speakerId} segments=${event.diarization_segments?.length ?? 0}`);
+            }
 
             if (!final && this.shouldAutoCommitPartial(result.text)) {
                 console.log(`[ParakeetStreaming][auto-final] session=${this.sessionId} partialChars=${result.text.length} emittedChars=${emittedText.length}`);
@@ -202,6 +222,18 @@ export class ParakeetStreamingSTT extends EventEmitter {
                 this.lastCommittedPartialSourceText = result.text.trim();
                 this.lastPartialText = '';
                 this.lastPartialAt = 0;
+            }
+            return;
+        }
+
+        if (event.type === 'status') {
+            const state = String(event.state || '');
+            if (state === 'diarization_ready') {
+                this.supportsDiarization = true;
+                console.log(`[ParakeetStreaming][diarization] ready session=${this.sessionId} source=${this.channel}`);
+            } else if (state === 'diarization_unavailable' || state === 'diarization_skipped') {
+                this.supportsDiarization = false;
+                console.warn(`[ParakeetStreaming][diarization] ${state} session=${this.sessionId} source=${this.channel}${event.error ? ` error=${event.error}` : ''}`);
             }
             return;
         }
@@ -260,12 +292,26 @@ export class ParakeetStreamingSTT extends EventEmitter {
             text: emittedText,
             isFinal: true,
             confidence: confidence || 0.85,
+            // No speakerId for committed partials — diarization only runs on true finals
         });
         this.logTranscriptEvent(true, emittedText, text, confidence || 0.85, 'committed-partial');
         this.samplesSinceLastFinal = 0;
         this.lastFinalText = this.normalizeForComparison(emittedText);
         this.lastFinalAt = Date.now();
         this.lastCommittedPartialSourceText = text.trim();
+    }
+
+    /**
+     * Parse speaker ID from FluidAudio diarization.
+     * FluidAudio emits speaker IDs like "speaker_0", "speaker_1", etc.
+     * We extract the numeric part for compatibility with main.ts speaker mapping.
+     */
+    private parseSpeakerId(raw: string): number | undefined {
+        if (!raw) return undefined;
+        // FluidAudio SpeakerManager uses "speaker_N" format
+        const match = raw.match(/(?:speaker_)?(\d+)/);
+        if (match) return parseInt(match[1], 10);
+        return undefined;
     }
 
     private logAudioWrite(state: 'buffered' | 'sent', rawBytes: number, pcm16kBytes: number): void {

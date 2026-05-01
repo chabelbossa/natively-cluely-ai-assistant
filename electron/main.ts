@@ -843,6 +843,23 @@ export class AppState {
   private sttTranscriptLogCounters: Record<string, number> = {};
   private sttTranscriptLastLogAt: Record<string, number> = {};
 
+  // ── Mic Audio Gate ──
+  // When system audio is non-silent, the microphone picks up speaker output as
+  // room echo and produces duplicate transcripts. We gate quiet mic chunks while
+  // system audio plays, but allow strong near-field mic chunks so the user can
+  // still interrupt or answer during a call.
+  private _micGated = false;
+  private _micGateReopenTimer: NodeJS.Timeout | null = null;
+  private readonly _MIC_GATE_REOPEN_DELAY_MS = 1200; // reopen mic 1.2s after system silence
+  private readonly _MIC_GATE_RMS_THRESHOLD = 50;     // system audio RMS above this → gate mic
+  private readonly _MIC_GATE_PEAK_THRESHOLD = 150;    // system audio peak above this → gate mic
+  private readonly _MIC_GATE_OVERRIDE_RMS = 900;      // likely direct user speech → let mic through
+  private readonly _MIC_GATE_OVERRIDE_PEAK = 3000;
+  private _micGateActivations = 0;
+  private _micGateDeactivations = 0;
+  private _micGateDroppedChunks = 0;
+  private _micGateAllowedStrongChunks = 0;
+
   // ── Cross-channel transcript deduplication ──
   // When system audio is active, the microphone picks up speaker output as room
   // echo. Both channels produce near-identical transcripts. We keep a rolling
@@ -850,8 +867,8 @@ export class AppState {
   // Priority: Speaker (system audio) is the clean digital source — when both
   // channels produce the same text, suppress the Mic copy.
   private _recentTranscripts: Array<{ channel: 'interviewer' | 'user'; effectiveSpeaker: string; text: string; timestamp: number }> = [];
-  private readonly _DEDUP_WINDOW_MS = 8000; // 8-second window
-  private readonly _DEDUP_SIMILARITY_THRESHOLD = 0.6; // 60% overlap
+  private readonly _DEDUP_WINDOW_MS = 12000; // 12-second window (wider to catch delayed mic echoes)
+  private readonly _DEDUP_SIMILARITY_THRESHOLD = 0.45; // 45% overlap (more aggressive echo suppression)
   private _dedupSuppressedCount = 0;
   private _dedupPreservedSystemCount = 0;
   private _pendingMicEchoTranscripts: Array<{
@@ -866,9 +883,10 @@ export class AppState {
   private _pendingMicEchoSeq = 0;
   private _pendingMicHeldCount = 0;
   private _pendingMicDroppedCount = 0;
+  private _pendingMicDroppedPartialCount = 0;
   private _pendingMicReleasedCount = 0;
   private _lastSystemAudioNonSilentAt = 0;
-  private readonly _MIC_ECHO_GRACE_MS = 1600;
+  private readonly _MIC_ECHO_GRACE_MS = 2500;
   private readonly _SYSTEM_AUDIO_ACTIVE_WINDOW_MS = 3500;
 
   /**
@@ -973,9 +991,20 @@ export class AppState {
     meta: { provider: string; isFinal: boolean },
     deliver: () => void,
   ): boolean {
-    if (meta.provider !== 'deepgram') return false;
     if (text.length < 8) return false;
     if (!this.isSystemAudioRecentlyActive(timestamp)) return false;
+
+    // Live previews are noisy by nature: when system audio is active, mic
+    // partials are almost always room echo and make the overlay look like the
+    // user is speaking. Drop partials immediately; keep finals delayed below so
+    // genuine user speech can still be released if no matching system transcript arrives.
+    if (!meta.isFinal) {
+      this._pendingMicDroppedPartialCount++;
+      if (this._pendingMicDroppedPartialCount <= 12 || this._pendingMicDroppedPartialCount % 25 === 0) {
+        console.log(`[STT][echo-delay] drop-mic-partial #${this._pendingMicDroppedPartialCount} provider=${meta.provider} text="${text.substring(0, 90)}"`);
+      }
+      return true;
+    }
 
     const id = ++this._pendingMicEchoSeq;
     const timer = setTimeout(() => {
@@ -1117,7 +1146,7 @@ export class AppState {
 
     const level = this.getPcm16Level(chunk);
     const label = channel === 'interviewer' ? 'system' : 'mic';
-    console.log(`[Main][audio-level] ${label} rms=${level.rms.toFixed(1)} peak=${level.peak}`);
+    console.log(`[Main][audio-level] ${label} rms=${level.rms.toFixed(1)} peak=${level.peak}${channel === 'interviewer' ? ` micGated=${this._micGated}` : ''}`);
 
     // Persist last system audio level for the health check
     if (channel === 'interviewer') {
@@ -1126,6 +1155,63 @@ export class AppState {
         this._lastSystemAudioNonSilentAt = now;
       }
     }
+  }
+
+  /**
+   * Update the mic gate state based on system audio levels.
+   * Called on every system audio chunk (before the 5s throttle of maybeLogAudioLevel).
+   */
+  private updateMicGate(chunk: Buffer): void {
+    const level = this.getPcm16Level(chunk);
+    const isLoud = level.rms > this._MIC_GATE_RMS_THRESHOLD || level.peak > this._MIC_GATE_PEAK_THRESHOLD;
+
+    if (isLoud) {
+      this._lastSystemAudioNonSilentAt = Date.now();
+      // System audio is playing — gate the mic
+      if (this._micGateReopenTimer) {
+        clearTimeout(this._micGateReopenTimer);
+        this._micGateReopenTimer = null;
+      }
+      if (!this._micGated) {
+        this._micGated = true;
+        this._micGateActivations++;
+        if (this._micGateActivations <= 10 || this._micGateActivations % 50 === 0) {
+          console.log(`[Main][mic-gate] CLOSED #${this._micGateActivations} rms=${level.rms.toFixed(1)} peak=${level.peak}`);
+        }
+      }
+    } else if (this._micGated && !this._micGateReopenTimer) {
+      // System audio went silent — schedule mic gate reopen
+      this._micGateReopenTimer = setTimeout(() => {
+        this._micGated = false;
+        this._micGateReopenTimer = null;
+        this._micGateDeactivations++;
+        if (this._micGateDeactivations <= 10 || this._micGateDeactivations % 50 === 0) {
+          console.log(`[Main][mic-gate] OPEN #${this._micGateDeactivations} (after ${this._MIC_GATE_REOPEN_DELAY_MS}ms silence)`);
+        }
+      }, this._MIC_GATE_REOPEN_DELAY_MS);
+    }
+  }
+
+  private shouldDropMicChunkForEcho(chunk: Buffer): boolean {
+    if (!this._micGated) return false;
+
+    const level = this.getPcm16Level(chunk);
+    const looksLikeDirectSpeech =
+      level.rms >= this._MIC_GATE_OVERRIDE_RMS || level.peak >= this._MIC_GATE_OVERRIDE_PEAK;
+
+    if (looksLikeDirectSpeech) {
+      this._micGateAllowedStrongChunks++;
+      if (this._micGateAllowedStrongChunks <= 10 || this._micGateAllowedStrongChunks % 50 === 0) {
+        console.log(`[Main][mic-gate] PASS strong-mic #${this._micGateAllowedStrongChunks} rms=${level.rms.toFixed(1)} peak=${level.peak}`);
+      }
+      return false;
+    }
+
+    this._micGateDroppedChunks++;
+    if (this._micGateDroppedChunks <= 10 || this._micGateDroppedChunks % 250 === 0) {
+      console.log(`[Main][mic-gate] DROP echo-chunk #${this._micGateDroppedChunks} rms=${level.rms.toFixed(1)} peak=${level.peak}`);
+    }
+    return true;
   }
 
   private createSTTProvider(speaker: 'interviewer' | 'user'): STTProvider | null {
@@ -1197,6 +1283,7 @@ export class AppState {
         console.log(`[Main] Using ParakeetStreamingSTT for ${speaker}`);
         stt = new ParakeetStreamingSTT({
           glossary: config.glossary,
+          channel: speaker === 'interviewer' ? 'system' : 'mic',
         });
       } else {
         console.log(`[Main] Using LocalSTT for ${speaker}: ${config.mode}`);
@@ -1240,13 +1327,18 @@ export class AppState {
       }
 
       // ── Diarization: resolve effective speaker label ──
-      // When the provider supports diarization (e.g. Deepgram with diarize:true),
-      // it emits a numeric speakerId per segment. We map those to human-readable
-      // labels: "locuteur_0", "locuteur_1", etc. for the system audio channel.
+      // When the provider supports diarization, it emits a numeric speakerId per
+      // segment. We map those to human-readable labels: "locuteur_0", "locuteur_1",
+      // etc. for the system audio channel.
+      // Supported diarization providers:
+      //   - Deepgram (cloud, via diarize:true)
+      //   - Parakeet (local, via FluidAudio Pyannote + WeSpeaker)
       // The mic channel (user) always stays as "user" regardless of provider.
-      // Local providers (Parakeet, Whisper) never set speakerId → labels unchanged.
       let effectiveSpeaker: string = speaker;
-      if (speaker === 'interviewer' && stt.supportsDiarization && segment.speakerId !== undefined) {
+      const hasDiarizedSpeaker = speaker === 'interviewer'
+        && stt.supportsDiarization
+        && segment.speakerId !== undefined;
+      if (hasDiarizedSpeaker) {
         effectiveSpeaker = `locuteur_${segment.speakerId}`;
       }
 
@@ -1255,7 +1347,7 @@ export class AppState {
       // recording it so later mic echo can be suppressed. For non-diarized audio,
       // suppress echo duplicates between mic and system audio channels.
       const trimmedText = segment.text.trim();
-      const isDiarized = speaker === 'interviewer' && stt.supportsDiarization;
+      const isDiarized = hasDiarizedSpeaker;
       const timestamp = Date.now();
       const traceKey = `${sttProvider}:${speaker}:${effectiveSpeaker}`;
 
@@ -1472,6 +1564,7 @@ export class AppState {
           if (_sysChunkCount <= 3 || _sysChunkCount % 500 === 0) {
             console.log(`[Main] SystemAudio->STT: chunk #${_sysChunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
           }
+          this.updateMicGate(chunk);
           this.maybeLogAudioLevel('interviewer', chunk);
           this.googleSTT?.write(chunk);
         });
@@ -1492,6 +1585,7 @@ export class AppState {
       if (!this.microphoneCapture) {
         this.microphoneCapture = new MicrophoneCapture();
         this.microphoneCapture.on('data', (chunk: Buffer) => {
+          if (this.shouldDropMicChunkForEcho(chunk)) return;
           this.maybeLogAudioLevel('user', chunk);
           this.googleSTT_User?.write(chunk);
         });
@@ -1570,6 +1664,7 @@ export class AppState {
         if (_rcfgSysChunkCount <= 3 || _rcfgSysChunkCount % 500 === 0) {
           console.log(`[Main] (Reconfigured) SystemAudio->STT: chunk #${_rcfgSysChunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
         }
+        this.updateMicGate(chunk);
         this.maybeLogAudioLevel('interviewer', chunk);
         this.googleSTT?.write(chunk);
       });
@@ -1598,6 +1693,7 @@ export class AppState {
           if (_dfltSysChunkCount <= 3 || _dfltSysChunkCount % 500 === 0) {
             console.log(`[Main] (Default) SystemAudio->STT: chunk #${_dfltSysChunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
           }
+          this.updateMicGate(chunk);
           this.maybeLogAudioLevel('interviewer', chunk);
           this.googleSTT?.write(chunk);
         });
@@ -1630,7 +1726,7 @@ export class AppState {
       this.googleSTT_User?.setSampleRate(rate);
 
       this.microphoneCapture.on('data', (chunk: Buffer) => {
-        // console.log('[Main] Mic chunk', chunk.length);
+        if (this.shouldDropMicChunkForEcho(chunk)) return;
         this.maybeLogAudioLevel('user', chunk);
         this.googleSTT_User?.write(chunk);
       });
@@ -1654,6 +1750,7 @@ export class AppState {
         this.googleSTT_User?.setSampleRate(rate);
 
         this.microphoneCapture.on('data', (chunk: Buffer) => {
+          if (this.shouldDropMicChunkForEcho(chunk)) return;
           this.maybeLogAudioLevel('user', chunk);
           this.googleSTT_User?.write(chunk);
         });
