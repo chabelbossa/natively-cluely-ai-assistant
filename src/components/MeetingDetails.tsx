@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
-import { ArrowLeft, Search, Mail, Link, ChevronDown, Play, ArrowUp, Copy, Check, MoreHorizontal, Settings, ArrowRight } from 'lucide-react';
+import { ArrowLeft, Search, Mail, Link, ChevronDown, Play, Copy, Check, MoreHorizontal, Settings, ArrowRight } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import MeetingChatOverlay from './MeetingChatOverlay';
 import EditableTextBlock from './EditableTextBlock';
@@ -76,27 +76,7 @@ const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting: initialMeeting
     // We need local state for the meeting object to reflect optimistic updates
     const [meeting, setMeeting] = useState<Meeting>(initialMeeting);
     const [activeTab, setActiveTab] = useState<'summary' | 'transcript' | 'usage'>('summary');
-    const [query, setQuery] = useState('');
     const [isCopied, setIsCopied] = useState(false);
-    const [isChatOpen, setIsChatOpen] = useState(false);
-    const [submittedQuery, setSubmittedQuery] = useState('');
-
-    const handleSubmitQuestion = () => {
-        if (query.trim()) {
-            setSubmittedQuery(query);
-            if (!isChatOpen) {
-                setIsChatOpen(true);
-            }
-            setQuery('');
-        }
-    };
-
-    const handleInputKeyDown = (e: React.KeyboardEvent) => {
-        if (e.key === 'Enter' && query.trim()) {
-            e.preventDefault();
-            handleSubmitQuestion();
-        }
-    };
 
     const copyTextToClipboard = async (text: string) => {
         try {
@@ -219,7 +199,7 @@ ${customSections ? `\n\n${customSections}` : ''}
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: 0.1, duration: 0.3 }}
-                    className="max-w-4xl mx-auto px-8 py-8 pb-32" // Added pb-32 for floating footer clearance
+                    className="max-w-4xl mx-auto px-8 py-8 pb-12"
                 >
                     {/* Meta Info & Actions Row */}
                     <div className="flex items-start justify-between mb-6">
@@ -278,6 +258,21 @@ ${customSections ? `\n\n${customSections}` : ''}
                             {isCopied ? 'Copied' : activeTab === 'summary' ? 'Copy full summary' : activeTab === 'transcript' ? 'Copy full transcript' : 'Copy usage'}
                         </button>
                     </div>
+
+                    <MeetingChatOverlay
+                        isOpen={true}
+                        onClose={() => {}}
+                        meetingContext={{
+                            id: meeting.id,
+                            title: meeting.title,
+                            summary: meeting.detailedSummary?.overview,
+                            keyPoints: meeting.detailedSummary?.keyPoints,
+                            actionItems: meeting.detailedSummary?.actionItems,
+                            transcript: meeting.transcript
+                        }}
+                        initialQuery=""
+                        onNewQuery={() => {}}
+                    />
 
                     {/* Tab Content */}
                     <div className="space-y-8">
@@ -545,49 +540,6 @@ ${customSections ? `\n\n${customSections}` : ''}
                 </motion.div>
             </main>
 
-            {/* Floating Footer (Ask Bar) */}
-            <div className={`absolute bottom-0 left-0 right-0 p-6 flex justify-center pointer-events-none ${isChatOpen ? 'z-50' : 'z-20'}`}>
-                <div className="w-full max-w-[440px] relative group pointer-events-auto">
-                    {/* Dark Glass Effect Input (Matching Reference) */}
-                    <input
-                        type="text"
-                        value={query}
-                        onChange={(e) => setQuery(e.target.value)}
-                        onKeyDown={handleInputKeyDown}
-                        placeholder="Ask about this meeting..."
-                        className="w-full pl-5 pr-12 py-3 bg-transparent backdrop-blur-[24px] backdrop-saturate-[140%] shadow-[0_8px_30px_rgb(0,0,0,0.12)] border border-white/20 rounded-full text-sm text-text-primary placeholder-text-tertiary/70 focus:outline-none transition-shadow duration-200"
-                    />
-                    <button
-                        onClick={handleSubmitQuestion}
-                        className={`absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-full transition-all duration-200 border border-white/5 ${query.trim() ? 'bg-text-primary text-bg-primary hover:scale-105' : 'bg-bg-item-active text-text-primary hover:bg-bg-item-hover'
-                            }`}
-                    >
-                        <ArrowUp size={16} className="transform rotate-45" />
-                    </button>
-                </div>
-            </div>
-
-            {/* Chat Overlay */}
-            <MeetingChatOverlay
-                isOpen={isChatOpen}
-                onClose={() => {
-                    setIsChatOpen(false);
-                    setQuery('');
-                    setSubmittedQuery('');
-                }}
-                meetingContext={{
-                    id: meeting.id,  // Required for RAG queries
-                    title: meeting.title,
-                    summary: meeting.detailedSummary?.overview,
-                    keyPoints: meeting.detailedSummary?.keyPoints,
-                    actionItems: meeting.detailedSummary?.actionItems,
-                    transcript: meeting.transcript
-                }}
-                initialQuery={submittedQuery}
-                onNewQuery={(newQuery) => {
-                    setSubmittedQuery(newQuery);
-                }}
-            />
         </div>
     );
 };

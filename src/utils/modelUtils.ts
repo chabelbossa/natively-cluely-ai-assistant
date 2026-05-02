@@ -28,9 +28,9 @@ export const STANDARD_CLOUD_MODELS: Record<string, {
     },
     opencode_go: {
         hasKeyCheck: (creds) => !!creds?.hasOpenCodeGoKey,
-        ids: ['opencode-go/deepseek-v4-flash'],
-        names: ['OpenCode Go DeepSeek V4 Flash'],
-        descs: ['Flash • Low latency'],
+        ids: ['opencode-go/deepseek-v4-flash', 'opencode-go/deepseek-v4'],
+        names: ['OpenCode Go DeepSeek V4 Flash', 'OpenCode Go DeepSeek V4'],
+        descs: ['Flash • Low latency', 'Reasoning • High quality'],
         pmKey: 'openCodeGoPreferredModel'
     },
     openai: {
@@ -49,9 +49,9 @@ export const STANDARD_CLOUD_MODELS: Record<string, {
     },
     codex: {
         hasKeyCheck: (creds) => !!creds?.hasCodexAccounts,
-        ids: ['gpt-5.2', 'gpt-5.1'],
-        names: ['GPT 5.2 Codex', 'GPT 5.1 Codex'],
-        descs: ['ChatGPT Plus/Pro • Best', 'ChatGPT Plus/Pro • Fast'],
+        ids: ['codex:gpt-5.4', 'codex:gpt-5.4-mini', 'codex:gpt-5.3', 'codex:gpt-5.2', 'codex:gpt-5.1', 'codex:gpt-5'],
+        names: ['GPT 5.4 Codex', 'GPT 5.4 Mini Codex', 'GPT 5.3 Codex', 'GPT 5.2 Codex', 'GPT 5.1 Codex', 'GPT 5 Codex'],
+        descs: ['ChatGPT Plus/Pro • Best', 'ChatGPT Plus/Pro • Fast', 'ChatGPT Plus/Pro • Balanced', 'ChatGPT Plus/Pro • Stable', 'ChatGPT Plus/Pro • Legacy', 'ChatGPT Plus/Pro • Base'],
         pmKey: 'codexPreferredModel'
     },
 };
@@ -61,6 +61,7 @@ export const prettifyModelId = (id: string): string => {
     return id
         .replace(/^deepinfra:/, '')
         .replace(/^opencode-go[/:]/, '')
+        .replace(/^codex:/, '')
         .replace(/[\/:_-]/g, ' ')
         .replace(/\b\w/g, c => c.toUpperCase());
 };

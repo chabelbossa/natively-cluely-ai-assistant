@@ -113,7 +113,15 @@ export class ModelSelectorWindowHelper {
         } else {
             this.window.setContentProtection(this.contentProtection);
             if (activate) this.window.show(); else this.window.showInactive();
-            if (activate) this.window.focus();
+            if (activate) {
+                this.window.focus();
+                // Force the window to the very top of the z-order on macOS.
+                // This is necessary when the overlay window is always-on-top
+                // and the selector needs to appear above it.
+                if (process.platform === 'darwin') {
+                    this.window.moveTop();
+                }
+            }
         }
     }
 
@@ -129,8 +137,14 @@ export class ModelSelectorWindowHelper {
 
     public toggleWindow(x: number, y: number): void {
         if (this.window && !this.window.isDestroyed()) {
-            // Fix: If window was just closed by blur (e.g. clicking the toggle button), don't re-open immediately
-            if (!this.window.isVisible() && (Date.now() - this.lastBlurTime < 250)) {
+            const isOverlay = this.windowHelper?.getCurrentWindowMode() === 'overlay';
+
+            // When the overlay is active: ignore the blur guard — the selector
+            // window competes with the always-on-top overlay for z-order, and
+            // the OS may deliver spurious blur events.  Rejecting a toggle within
+            // 250 ms of the last blur can permanently block the selector during
+            // a meeting.
+            if (!isOverlay && !this.window.isVisible() && (Date.now() - this.lastBlurTime < 250)) {
                 return;
             }
 

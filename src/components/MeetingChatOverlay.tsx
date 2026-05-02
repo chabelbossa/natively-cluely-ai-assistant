@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useStreamBuffer } from '../hooks/useStreamBuffer';
-import { X, Copy, Check } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { ArrowUp, Check, Clock3, Copy, Cpu } from 'lucide-react';
+import { motion } from 'framer-motion';
 import nativelyIcon from './icon.png';
+import { ModelSelector } from './ui/ModelSelector';
 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -21,6 +22,9 @@ interface Message {
     role: 'user' | 'assistant';
     content: string;
     isStreaming?: boolean;
+    modelUsed?: string;
+    durationMs?: number;
+    source?: 'rag' | 'fallback';
 }
 
 interface MeetingContext {
@@ -41,6 +45,34 @@ interface MeetingChatOverlayProps {
 }
 
 type ChatState = 'idle' | 'opening' | 'waiting_for_llm' | 'streaming_response' | 'error' | 'closing';
+
+const formatResponseDuration = (ms?: number): string => {
+    if (ms == null) return '';
+    if (ms < 1000) return `${ms}ms`;
+    return `${(ms / 1000).toFixed(1)}s`;
+};
+
+const getModelDisplayName = (model: string): string => {
+    const names: Record<string, string> = {
+        'gemini-3.1-flash-lite-preview': 'Gemini 3.1 Flash',
+        'gemini-3.1-pro-preview': 'Gemini 3.1 Pro',
+        'llama-3.3-70b-versatile': 'Groq Llama 3.3',
+        'gpt-5.4': 'GPT 5.4',
+        'gpt-4o': 'GPT 4o',
+        'gpt-4o-mini': 'GPT 4o Mini',
+        'gpt-5.2': 'GPT 5.2 Codex',
+        'gpt-5.1': 'GPT 5.1 Codex',
+        'codex:gpt-5.4': 'GPT 5.4 Codex',
+        'codex:gpt-5.4-mini': 'GPT 5.4 Mini Codex',
+        'codex:gpt-5.3': 'GPT 5.3 Codex',
+        'codex:gpt-5.2': 'GPT 5.2 Codex',
+        'codex:gpt-5.1': 'GPT 5.1 Codex',
+        'codex:gpt-5': 'GPT 5 Codex',
+        'claude-sonnet-4-6': 'Sonnet 4.6',
+        natively: 'Natively',
+    };
+    return names[model] || (model.startsWith('ollama-') ? model.replace('ollama-', '') : model);
+};
 
 // ============================================
 // Typing Indicator Component
@@ -83,7 +115,7 @@ const UserMessage: React.FC<{ content: string }> = ({ content }) => (
     </motion.div>
 );
 
-const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean }> = ({ content, isStreaming }) => {
+const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean; modelUsed?: string; durationMs?: number; source?: 'rag' | 'fallback' }> = ({ content, isStreaming, modelUsed, durationMs, source }) => {
     const [copied, setCopied] = useState(false);
 
     const handleCopy = async () => {
@@ -166,13 +198,32 @@ const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean }> = (
                 )}
             </div>
             {!isStreaming && content && (
-                <button
-                    onClick={handleCopy}
-                    className="flex items-center gap-2 mt-3 text-[13px] text-text-tertiary hover:text-text-secondary transition-colors"
-                >
-                    {copied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
-                    {copied ? 'Copied' : 'Copy message'}
-                </button>
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] font-medium text-text-secondary">
+                    {modelUsed && (
+                        <span className="inline-flex items-center gap-1.5 rounded-md border border-border-subtle bg-bg-input px-2 py-1 text-text-primary">
+                            <Cpu size={12} />
+                            {modelUsed}
+                        </span>
+                    )}
+                    {durationMs != null && (
+                        <span className="inline-flex items-center gap-1.5 rounded-md border border-border-subtle bg-bg-input px-2 py-1 tabular-nums text-text-primary">
+                            <Clock3 size={12} />
+                            {formatResponseDuration(durationMs)}
+                        </span>
+                    )}
+                    {source && (
+                        <span className="rounded-md border border-border-subtle bg-bg-input px-2 py-1 text-text-secondary">
+                            {source === 'rag' ? 'RAG' : 'Fallback'}
+                        </span>
+                    )}
+                    <button
+                        onClick={handleCopy}
+                        className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-text-tertiary hover:bg-bg-input hover:text-text-primary transition-colors"
+                    >
+                        {copied ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
+                        {copied ? 'Copied' : 'Copy'}
+                    </button>
+                </div>
             )}
         </motion.div>
     );
@@ -192,10 +243,36 @@ const MeetingChatOverlay: React.FC<MeetingChatOverlayProps> = ({
     const [messages, setMessages] = useState<Message[]>([]);
     const [chatState, setChatState] = useState<ChatState>('idle');
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
+    const [query, setQuery] = useState('');
+    const [currentModel, setCurrentModel] = useState('gemini-3.1-flash-lite-preview');
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const chatWindowRef = useRef<HTMLDivElement>(null);
     const streamBuffer = useStreamBuffer();
+    const currentModelRef = useRef(currentModel);
+
+    useEffect(() => {
+        currentModelRef.current = currentModel;
+    }, [currentModel]);
+
+    useEffect(() => {
+        window.electronAPI?.getDefaultModel?.()
+            .then((result: { model?: string } | undefined) => {
+                if (result?.model) setCurrentModel(result.model);
+            })
+            .catch((err: any) => console.error('[MeetingChat] Failed to load model:', err));
+
+        const unsubscribe = window.electronAPI?.onModelChanged?.((modelId: string) => {
+            setCurrentModel(modelId);
+        });
+
+        return () => unsubscribe?.();
+    }, []);
+
+    const handleModelSelect = (modelId: string) => {
+        setCurrentModel(modelId);
+        window.electronAPI?.setModel?.(modelId).catch((err: any) => console.error('[MeetingChat] Failed to set model:', err));
+    };
 
     // Submit initial query when overlay opens
     useEffect(() => {
@@ -215,15 +292,6 @@ const MeetingChatOverlay: React.FC<MeetingChatOverlayProps> = ({
         }
     }, [initialQuery]);
 
-    // Reset state when overlay closes
-    useEffect(() => {
-        if (!isOpen) {
-            setChatState('idle');
-            setMessages([]);
-            setErrorMessage(null);
-        }
-    }, [isOpen]);
-
     // ESC key handler
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
@@ -234,13 +302,6 @@ const MeetingChatOverlay: React.FC<MeetingChatOverlayProps> = ({
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [isOpen]);
-
-    // Click outside handler
-    const handleBackdropClick = useCallback((e: React.MouseEvent) => {
-        if (e.target === e.currentTarget) {
-            handleClose();
-        }
-    }, []);
 
     const handleClose = useCallback(() => {
         onClose();
@@ -294,6 +355,8 @@ const MeetingChatOverlay: React.FC<MeetingChatOverlayProps> = ({
         }, 50);
 
         const assistantMessageId = `assistant-${Date.now()}`;
+        const startedAt = Date.now();
+        const modelAtStart = getModelDisplayName(currentModelRef.current);
 
         try {
             // Add typing indicator delay (200ms) - makes the AI feel "thoughtful"
@@ -325,7 +388,7 @@ const MeetingChatOverlay: React.FC<MeetingChatOverlayProps> = ({
                 const finalContent = streamBuffer.getBufferedContent();
                 setMessages(prev => prev.map(msg =>
                     msg.id === assistantMessageId
-                        ? { ...msg, content: finalContent, isStreaming: false }
+                        ? { ...msg, content: finalContent, isStreaming: false, modelUsed: modelAtStart, durationMs: Date.now() - startedAt, source: 'rag' }
                         : msg
                 ));
                 setChatState('idle');
@@ -383,9 +446,10 @@ ${contextString}`;
                         const finalContent = streamBuffer.getBufferedContent();
                         setMessages(prev => prev.map(msg =>
                             msg.id === assistantMessageId
-                                ? { ...msg, content: finalContent, isStreaming: false }
+                                ? { ...msg, content: finalContent, isStreaming: false, modelUsed: modelAtStart, durationMs: Date.now() - startedAt, source: 'fallback' }
                                 : msg
                         ));
+                        setChatState('idle');
                         streamBuffer.reset();
                         oldTokenCleanup?.();
                         oldDoneCleanup?.();
@@ -434,7 +498,7 @@ ${contextString}`;
                     const finalContent = streamBuffer.getBufferedContent();
                     setMessages(prev => prev.map(msg =>
                         msg.id === assistantMessageId
-                            ? { ...msg, content: finalContent, isStreaming: false }
+                            ? { ...msg, content: finalContent, isStreaming: false, modelUsed: modelAtStart, durationMs: Date.now() - startedAt, source: 'fallback' }
                             : msg
                     ));
                     setChatState('idle');
@@ -471,79 +535,96 @@ ${contextString}`;
         }
     }, [chatState, buildContextString, meetingContext]);
 
+    if (!isOpen) return null;
+
+    const isBusy = chatState === 'waiting_for_llm' || chatState === 'streaming_response';
+
+    const handleSubmit = () => {
+        if (!query.trim() || isBusy) return;
+        const nextQuery = query.trim();
+        setQuery('');
+        submitQuestion(nextQuery);
+    };
+
     return (
-        <AnimatePresence>
-            {isOpen && (
-                <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.16 }}
-                    className="absolute inset-0 z-40 flex flex-col justify-end"
-                    onClick={handleBackdropClick}
-                >
-                    {/* Backdrop with blur */}
-                    <motion.div
-                        initial={{ backdropFilter: 'blur(0px)' }}
-                        animate={{ backdropFilter: 'blur(8px)' }}
-                        exit={{ backdropFilter: 'blur(0px)' }}
-                        transition={{ duration: 0.16 }}
-                        className="absolute inset-0 bg-black/40"
-                    />
+        <motion.section
+            ref={chatWindowRef}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.18 }}
+            className="mb-8 rounded-[24px] border border-border-subtle bg-bg-primary shadow-sm overflow-hidden"
+        >
+            <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-border-subtle bg-bg-secondary/70">
+                <div className="min-w-0">
+                    <div className="flex items-center gap-2 text-text-primary">
+                        <img src={nativelyIcon} className="w-4 h-4 force-black-icon opacity-70" alt="Natively" />
+                        <h2 className="text-sm font-semibold">Chat post-traitement</h2>
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] font-medium text-text-secondary">
+                        <span>{messages.length} message{messages.length > 1 ? 's' : ''}</span>
+                        <span className="h-1 w-1 rounded-full bg-text-tertiary" />
+                        <span>{chatState === 'idle' ? 'Ready' : chatState.replace(/_/g, ' ')}</span>
+                    </div>
+                </div>
+                <div className="shrink-0">
+                    <ModelSelector currentModel={currentModel} onSelectModel={handleModelSelect} placement="bottom" />
+                </div>
+            </div>
 
-                    {/* Chat Window - extends to bottom, leaves room for input */}
+            <div className="max-h-[420px] min-h-[180px] overflow-y-auto px-6 py-5 custom-scrollbar bg-bg-primary">
+                {messages.length === 0 && chatState === 'idle' && (
+                    <div className="rounded-2xl border border-dashed border-border-subtle bg-bg-secondary/60 px-5 py-6 text-sm text-text-secondary">
+                        Pose une question sur cette réunion. L'historique restera dans cette carte.
+                    </div>
+                )}
+
+                {messages.map((msg) => (
+                    msg.role === 'user'
+                        ? <UserMessage key={msg.id} content={msg.content} />
+                        : <AssistantMessage key={msg.id} content={msg.content} isStreaming={msg.isStreaming} modelUsed={msg.modelUsed} durationMs={msg.durationMs} source={msg.source} />
+                ))}
+
+                {chatState === 'waiting_for_llm' && <TypingIndicator />}
+
+                {errorMessage && (
                     <motion.div
-                        ref={chatWindowRef}
-                        initial={{ height: 0, opacity: 0 }}
-                        animate={{ height: "85vh", opacity: 1 }}
-                        exit={{ height: 0, opacity: 0 }}
-                        transition={{
-                            height: { type: "spring", stiffness: 300, damping: 30, mass: 0.8 },
-                            opacity: { duration: 0.2 }
-                        }}
-                        className="relative mx-auto w-full max-w-[680px] mb-0 bg-bg-secondary rounded-t-[24px] border-t border-x border-border-subtle shadow-2xl overflow-hidden flex flex-col"
-                        onClick={(e) => e.stopPropagation()}
+                        initial={{ opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="text-[#FF6B6B] text-[13px] py-2"
                     >
-                        {/* Header with close button */}
-                        <div className="flex items-center justify-between px-4 py-3 border-b border-border-subtle shrink-0">
-                            <div className="flex items-center gap-2 text-text-tertiary">
-                                <img src={nativelyIcon} className="w-3.5 h-3.5 force-black-icon opacity-50" alt="logo" />
-                                <span className="text-[13px] font-medium">Search this meeting</span>
-                            </div>
-                            <button
-                                onClick={handleClose}
-                                className="p-2 transition-colors group"
-                            >
-                                <X size={16} className="text-text-tertiary group-hover:text-red-500 group-hover:drop-shadow-[0_0_8px_rgba(239,68,68,0.5)] transition-all duration-300" />
-                            </button>
-                        </div>
-
-                        {/* Messages area - scrollable */}
-                        <div className="flex-1 overflow-y-auto px-6 py-4 pb-32 custom-scrollbar">
-                            {messages.map((msg) => (
-                                msg.role === 'user'
-                                    ? <UserMessage key={msg.id} content={msg.content} />
-                                    : <AssistantMessage key={msg.id} content={msg.content} isStreaming={msg.isStreaming} />
-                            ))}
-
-                            {chatState === 'waiting_for_llm' && <TypingIndicator />}
-
-                            {errorMessage && (
-                                <motion.div
-                                    initial={{ opacity: 0, y: 4 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    className="text-[#FF6B6B] text-[13px] py-2"
-                                >
-                                    {errorMessage}
-                                </motion.div>
-                            )}
-
-                            <div ref={messagesEndRef} />
-                        </div>
+                        {errorMessage}
                     </motion.div>
-                </motion.div>
-            )}
-        </AnimatePresence>
+                )}
+
+                <div ref={messagesEndRef} />
+            </div>
+
+            <div className="border-t border-border-subtle bg-bg-secondary/70 p-4">
+                <div className="relative">
+                    <input
+                        type="text"
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                                e.preventDefault();
+                                handleSubmit();
+                            }
+                        }}
+                        placeholder="Demander quelque chose sur cette réunion..."
+                        className="w-full rounded-2xl border border-border-subtle bg-bg-primary px-4 py-3 pr-12 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent-primary/30"
+                    />
+                    <button
+                        type="button"
+                        onClick={handleSubmit}
+                        disabled={!query.trim() || isBusy}
+                        className={`absolute right-2 top-1/2 -translate-y-1/2 rounded-xl p-2 transition-all ${query.trim() && !isBusy ? 'bg-text-primary text-bg-primary hover:scale-105' : 'bg-bg-item-active text-text-tertiary'}`}
+                    >
+                        <ArrowUp size={16} />
+                    </button>
+                </div>
+            </div>
+        </motion.section>
     );
 };
 

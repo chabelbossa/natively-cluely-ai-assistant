@@ -37,7 +37,7 @@ const OPENAI_MODEL = "gpt-5.4"
 const CLAUDE_MODEL = "claude-sonnet-4-6"
 const DEEPINFRA_MODEL = "deepinfra:stepfun-ai/Step-3.5-Flash"
 const OPENCODE_GO_MODEL = "opencode-go/deepseek-v4-flash"
-const CODEX_MODEL = "gpt-5.2"
+const CODEX_MODEL = "codex:gpt-5.4"
 const DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 const OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 const MAX_OUTPUT_TOKENS = 65536
@@ -388,6 +388,7 @@ export class LLMHelper {
 
   private isCodexModel(modelId: string): boolean {
     return (
+      modelId.startsWith("codex:") ||
       modelId.startsWith("codex-") ||
       modelId.startsWith("gpt-5-codex") ||
       modelId.startsWith("gpt-5.1-codex") ||
@@ -397,6 +398,10 @@ export class LLMHelper {
       modelId.startsWith("gpt-5.2-") ||
       modelId.startsWith("gpt-5.1-")
     );
+  }
+
+  private resolveCodexModel(modelId: string = this.currentModelId): string {
+    return modelId.replace(/^codex:/, "");
   }
 
   private resolveOpenAICompatibleRoute(modelId: string = this.currentModelId): { provider: 'DeepInfra' | 'OpenCode Go'; client: OpenAI | null; model: string } | null {
@@ -3993,7 +3998,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
     input.push({ role: "user", content: userMessage });
     return this.codexClient.generateResponse({
-      model: this.currentModelId,
+      model: this.resolveCodexModel(),
       input,
       store: false,
     });
@@ -4009,7 +4014,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
     input.push({ role: "user", content: userMessage });
     yield* this.codexClient.streamResponse({
-      model: this.currentModelId,
+      model: this.resolveCodexModel(),
       input,
       stream: true,
       store: false,

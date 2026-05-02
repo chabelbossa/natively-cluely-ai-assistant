@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { ChevronDown, Check, Cloud, Terminal, Monitor, Server, Plus } from 'lucide-react';
 import { STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
 
 interface ModelSelectorProps {
     currentModel: string;
     onSelectModel: (model: string) => void;
+    placement?: 'top' | 'bottom';
 }
 
 interface CustomProvider {
@@ -13,18 +14,24 @@ interface CustomProvider {
     curlCommand: string;
 }
 
-export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSelectModel }) => {
+export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSelectModel, placement = 'top' }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [activeTab, setActiveTab] = useState<'cloud' | 'custom' | 'local'>('cloud');
     const [ollamaModels, setOllamaModels] = useState<string[]>([]);
     const [customProviders, setCustomProviders] = useState<CustomProvider[]>([]);
     const [cloudModels, setCloudModels] = useState<{ id: string; name: string; desc: string; provider: string }[]>([]);
     const dropdownRef = useRef<HTMLDivElement>(null);
+    const buttonRef = useRef<HTMLButtonElement>(null);
+    const menuRef = useRef<HTMLDivElement>(null);
+    const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0, maxHeight: 260 });
 
     // Close on click outside
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
-            if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+            const target = event.target as Node;
+            const isInsideButton = dropdownRef.current?.contains(target) ?? false;
+            const isInsideMenu = menuRef.current?.contains(target) ?? false;
+            if (!isInsideButton && !isInsideMenu) {
                 setIsOpen(false);
             }
         };
@@ -70,6 +77,39 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
         loadData();
     }, [isOpen]);
 
+    useLayoutEffect(() => {
+        if (!isOpen || !buttonRef.current) return;
+
+        const updatePosition = () => {
+            if (!buttonRef.current) return;
+
+            const rect = buttonRef.current.getBoundingClientRect();
+            const width = 288;
+            const viewportPadding = 12;
+            const gap = 8;
+            const availableAbove = rect.top - viewportPadding - gap;
+            const availableBelow = window.innerHeight - rect.bottom - viewportPadding - gap;
+            const shouldOpenBelow = placement === 'bottom' || (placement === 'top' && availableAbove < 180 && availableBelow > availableAbove);
+            const available = shouldOpenBelow ? availableBelow : availableAbove;
+            const maxHeight = Math.max(160, Math.min(360, available));
+            const left = Math.min(Math.max(viewportPadding, rect.left), window.innerWidth - width - viewportPadding);
+            const top = shouldOpenBelow
+                ? Math.min(rect.bottom + gap, window.innerHeight - maxHeight - viewportPadding)
+                : Math.max(viewportPadding, rect.top - maxHeight - gap);
+
+            setMenuPosition({ top, left, maxHeight });
+        };
+
+        updatePosition();
+        window.addEventListener('resize', updatePosition);
+        window.addEventListener('scroll', updatePosition, true);
+
+        return () => {
+            window.removeEventListener('resize', updatePosition);
+            window.removeEventListener('scroll', updatePosition, true);
+        };
+    }, [isOpen, placement]);
+
     const handleSelect = (model: string) => {
         // For custom/local, we might need to pass an ID or specific format
         // The backend logic (LLMHelper) needs to know how to handle this string or we need a richer object
@@ -91,6 +131,12 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
         if (model === 'claude-sonnet-4-6') return 'Sonnet 4.6';
         if (model === 'gpt-5.2') return 'GPT 5.2 Codex';
         if (model === 'gpt-5.1') return 'GPT 5.1 Codex';
+        if (model === 'codex:gpt-5.4') return 'GPT 5.4 Codex';
+        if (model === 'codex:gpt-5.4-mini') return 'GPT 5.4 Mini Codex';
+        if (model === 'codex:gpt-5.3') return 'GPT 5.3 Codex';
+        if (model === 'codex:gpt-5.2') return 'GPT 5.2 Codex';
+        if (model === 'codex:gpt-5.1') return 'GPT 5.1 Codex';
+        if (model === 'codex:gpt-5') return 'GPT 5 Codex';
         if (model === 'gpt-4o') return 'GPT 4o';
         if (model === 'gpt-4o-mini') return 'GPT 4o Mini';
 
@@ -106,17 +152,22 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
     };
 
     return (
-        <div className="relative" ref={dropdownRef}>
+        <div className="relative no-drag z-[90]" ref={dropdownRef}>
             <button
+                ref={buttonRef}
                 onClick={() => setIsOpen(!isOpen)}
-                className="flex items-center gap-2 px-3 py-1.5 bg-bg-input hover:bg-bg-elevated border border-border-subtle rounded-lg transition-colors text-xs font-medium text-text-primary max-w-[150px]"
+                className="flex items-center gap-2 px-3 py-1.5 min-w-[154px] max-w-[190px] rounded-lg border border-black/15 bg-white/95 text-slate-950 shadow-sm transition-colors text-xs font-semibold dark:border-white/15 dark:bg-[#15171c]/95 dark:text-white dark:shadow-black/30 hover:bg-white dark:hover:bg-[#1d2027]"
             >
-                <span className="truncate">{getModelDisplayName(currentModel)}</span>
-                <ChevronDown size={14} className={`shrink-0 text-text-secondary transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+                <span className="truncate flex-1 text-left">{getModelDisplayName(currentModel)}</span>
+                <ChevronDown size={14} className={`shrink-0 text-slate-600 dark:text-slate-300 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
             </button>
 
             {isOpen && (
-                <div className="absolute bottom-full left-0 mb-2 w-64 bg-bg-item-surface border border-border-subtle rounded-xl shadow-xl z-50 overflow-hidden animated fadeIn">
+                <div
+                    ref={menuRef}
+                    className="fixed w-72 bg-white text-slate-950 border border-black/10 rounded-xl shadow-2xl shadow-black/20 z-[10000] overflow-hidden animated fadeIn dark:bg-[#15171c] dark:text-white dark:border-white/15 dark:shadow-black/50"
+                    style={{ top: menuPosition.top, left: menuPosition.left }}
+                >
                     {/* Tabs */}
                     <div className="flex border-b border-border-subtle bg-bg-input/50">
                         <button
@@ -140,7 +191,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
                     </div>
 
                     {/* Content */}
-                    <div className="p-2 max-h-64 overflow-y-auto">
+                    <div className="p-2 overflow-y-auto overscroll-contain" style={{ maxHeight: menuPosition.maxHeight }}>
 
                         {/* Cloud Models */}
                         {activeTab === 'cloud' && (
