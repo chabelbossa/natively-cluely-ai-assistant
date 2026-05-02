@@ -92,9 +92,9 @@ const App: React.FC = () => {
   const [settingsInitialTab, setSettingsInitialTab] = useState('general');
   const [isModesOpen, setIsModesOpen] = useState(false);
   const [showPremiumModal, setShowPremiumModal] = useState(false);
-  const [isPremiumActive, setIsPremiumActive] = useState(false);
-  const [hasLoadedLicense, setHasLoadedLicense] = useState(false);
-  const [planDetails, setPlanDetails] = useState<{ isPremium: boolean; plan?: string; provider?: string }>({ isPremium: false });
+  const [isPremiumActive, setIsPremiumActive] = useState(true);
+  const [hasLoadedLicense, setHasLoadedLicense] = useState(true);
+  const [planDetails, setPlanDetails] = useState<{ isPremium: boolean; plan?: string; provider?: string }>({ isPremium: true });
 
   // Overlay opacity — only meaningful when isOverlayWindow, but stored centrally
   // so it can be initialized once from localStorage and updated via IPC.

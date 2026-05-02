@@ -52,30 +52,51 @@ export class ModelSelectorWindowHelper {
 
         const activate = options.activate ?? true;
 
-        // Set parent and align window settings
+        // Determine parent context
         const mainWin = this.windowHelper?.getMainWindow();
         const isOverlay = mainWin === this.windowHelper?.getOverlayWindow();
 
+        // CRITICAL FIX: When the overlay is the active window (during a meeting),
+        // do NOT parent the selector to it. Parenting constrains the child to the
+        // parent's z-order, and the overlay's mouse-passthrough / always-on-top
+        // state can prevent the child from receiving focus or appearing above it.
+        // Instead, make the selector a free-floating top-level window.
         if (mainWin && !mainWin.isDestroyed()) {
-            this.window.setParentWindow(mainWin);
+            if (isOverlay) {
+                this.window.setParentWindow(null);
+            } else {
+                this.window.setParentWindow(mainWin);
+            }
         }
 
         if (process.platform === "darwin") {
-            // Align with parent window behavior
+            // Visible on all workspaces when the overlay is active so it follows
+            // the user across spaces during a meeting.
             this.window.setVisibleOnAllWorkspaces(isOverlay, { visibleOnFullScreen: isOverlay });
-            // Only set alwaysOnTop if the value is actually changing — calling it unnecessarily
-            // triggers NSApp activation on macOS, stealing focus from other apps.
-            const currentAlwaysOnTop = this.window.isAlwaysOnTop();
-            if (currentAlwaysOnTop !== isOverlay) {
-                this.window.setAlwaysOnTop(isOverlay, "floating");
+
+            // Use a higher window level when the overlay is active so the selector
+            // appears above the always-on-top overlay. "pop-up-menu" is higher than
+            // "floating" and is the standard level for transient UI like dropdowns.
+            const desiredLevel = isOverlay ? "pop-up-menu" : "floating";
+            const currentLevel = this.window.getAlwaysOnTopLevel();
+            if (this.window.isAlwaysOnTop() && currentLevel === desiredLevel) {
+                // No change needed — avoids unnecessary NSApp activation.
+            } else {
+                this.window.setAlwaysOnTop(true, desiredLevel);
             }
-            // Always hide from MC as it's a dropdown
+
             this.window.setHiddenInMissionControl(true);
         }
 
         // Standard dropdown positioning
         this.window.setPosition(Math.round(x), Math.round(y))
         this.ensureVisibleOnScreen();
+
+        // Temporarily ignore blur events for 300 ms after showing.
+        // This prevents the window from instantly closing if the OS delivers
+        // a blur event before focus settles (common with always-on-top overlays).
+        this.ignoreBlur = true;
+        setTimeout(() => { this.ignoreBlur = false; }, 300);
 
         if (process.platform === 'win32' && this.contentProtection) {
             this.window.setOpacity(0);

@@ -2,6 +2,7 @@ export { CopilotDecisionEngine } from './CopilotDecisionEngine';
 export { CopilotMemory } from './CopilotMemory';
 export { LectureQuestionLLM } from './LectureQuestionLLM';
 export { LectureStrategy } from './LectureStrategy';
+export { ProfessionalMeetingLLM } from './ProfessionalMeetingLLM';
 export { ProfessionalMeetingStrategy } from './ProfessionalMeetingStrategy';
 export { COPILOT_MODE_PROFILES, getCopilotModeProfile, resolveCopilotMode } from './ModeProfiles';
 export type {

@@ -7,6 +7,10 @@ import {
     MODE_TEAM_MEET_PROMPT,
     MODE_LECTURE_PROMPT,
     MODE_TECHNICAL_INTERVIEW_PROMPT,
+    MODE_BUG_TRIAGE_PROMPT,
+    MODE_FEATURE_PLANNING_PROMPT,
+    MODE_ARCHITECTURE_REVIEW_PROMPT,
+    MODE_CODING_ASSESSMENT_PROMPT,
 } from '../llm/prompts';
 
 export type ModeTemplateType =
@@ -16,7 +20,11 @@ export type ModeTemplateType =
     | 'recruiting'
     | 'team-meet'
     | 'lecture'
-    | 'technical-interview';
+    | 'technical-interview'
+    | 'bug-triage'
+    | 'feature-planning'
+    | 'architecture-review'
+    | 'coding-assessment';
 
 export interface Mode {
     id: string;
@@ -49,11 +57,16 @@ export const MODE_TEMPLATES: Array<{
     label: string;
     description: string;
 }> = [
-    { type: 'sales',            label: 'Sales',            description: 'Close deals with strategic discovery and objection handling.' },
-    { type: 'recruiting',       label: 'Recruiting',       description: 'Evaluate candidates with structured interview insights.' },
-    { type: 'team-meet',        label: 'Team Meet',        description: 'Track action items and key decisions from meetings.' },
-    { type: 'looking-for-work', label: 'Looking for work', description: 'Answer interview questions with confidence and clarity.' },
-    { type: 'lecture',          label: 'Lecture',          description: 'Capture key concepts and content from lectures.' },
+    { type: 'sales',                label: 'Sales',                description: 'Close deals with strategic discovery and objection handling.' },
+    { type: 'recruiting',           label: 'Recruiting',           description: 'Evaluate candidates with structured interview insights.' },
+    { type: 'team-meet',            label: 'Team Meet',            description: 'Track action items and key decisions from meetings.' },
+    { type: 'looking-for-work',     label: 'Looking for work',     description: 'Answer interview questions with confidence and clarity.' },
+    { type: 'lecture',              label: 'Lecture',              description: 'Capture key concepts and content from lectures.' },
+    { type: 'technical-interview',  label: 'Technical Interview',  description: 'Solve coding problems and system design with progressive hints.' },
+    { type: 'bug-triage',           label: 'Bug Triage',           description: 'Clarify reproduction, impact, priority, and ownership of bugs.' },
+    { type: 'feature-planning',     label: 'Feature Planning',     description: 'Define scope, acceptance criteria, dependencies, and risks.' },
+    { type: 'architecture-review',  label: 'Architecture Review',  description: 'Surface tradeoffs, failure modes, scalability, and security.' },
+    { type: 'coding-assessment',    label: 'Coding Assessment',    description: 'Progressive coding hints, complexity analysis, edge cases.' },
 ];
 
 // Default note sections seeded when a mode is created from a template
@@ -105,6 +118,34 @@ export const TEMPLATE_NOTE_SECTIONS: Record<ModeTemplateType, Array<{ title: str
         { title: 'Areas to study',    description: 'Topics or gaps identified that need more preparation.' },
         { title: 'Action items',      description: 'Follow-up steps — e.g. send code, study specific topics, await next round.' },
     ],
+    'bug-triage': [
+        { title: 'Bug description',     description: 'What is the bug — expected vs actual behavior.' },
+        { title: 'Reproduction steps',  description: 'Exact steps to reproduce the bug reliably.' },
+        { title: 'Impact assessment',   description: 'Which users, roles, or environments are affected.' },
+        { title: 'Technical hypotheses', description: 'Possible root causes and investigations needed.' },
+        { title: 'Priority & owner',    description: 'Severity level and who is assigned to the fix.' },
+    ],
+    'feature-planning': [
+        { title: 'Feature objective',  description: 'What user problem does this feature solve.' },
+        { title: 'MVP scope',          description: 'Minimum viable version — what ships first.' },
+        { title: 'Acceptance criteria', description: 'How we verify the feature is complete and correct.' },
+        { title: 'Technical risks',    description: 'Dependencies, performance, security, or integration risks.' },
+        { title: 'Frontend / Backend dependencies', description: 'What each side needs to deliver and in what order.' },
+    ],
+    'architecture-review': [
+        { title: 'Decision',              description: 'The technical decision being discussed or made.' },
+        { title: 'Alternatives considered', description: 'Other approaches evaluated and why they were not chosen.' },
+        { title: 'Advantages',            description: 'Benefits of the chosen approach.' },
+        { title: 'Disadvantages / Risks', description: 'Tradeoffs, failure modes, scalability concerns.' },
+        { title: 'Long-term impact',      description: 'Migration cost, maintenance burden, future flexibility.' },
+    ],
+    'coding-assessment': [
+        { title: 'Problem',         description: 'The coding problem as stated.' },
+        { title: 'Approach',        description: 'The algorithm or data structure approach taken.' },
+        { title: 'Edge cases',      description: 'Boundary conditions and edge cases considered.' },
+        { title: 'Complexity',      description: 'Time and space complexity analysis.' },
+        { title: 'Alternative solutions', description: 'Other valid approaches and their tradeoffs.' },
+    ],
 };
 
 const TEMPLATE_SYSTEM_PROMPTS: Record<ModeTemplateType, string> = {
@@ -117,6 +158,10 @@ const TEMPLATE_SYSTEM_PROMPTS: Record<ModeTemplateType, string> = {
     recruiting: MODE_RECRUITING_PROMPT,
     'team-meet': MODE_TEAM_MEET_PROMPT,
     lecture: MODE_LECTURE_PROMPT,
+    'bug-triage': MODE_BUG_TRIAGE_PROMPT,
+    'feature-planning': MODE_FEATURE_PLANNING_PROMPT,
+    'architecture-review': MODE_ARCHITECTURE_REVIEW_PROMPT,
+    'coding-assessment': MODE_CODING_ASSESSMENT_PROMPT,
 };
 
 function rowToMode(row: any): Mode {

@@ -48,7 +48,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       } = require("../premium/electron/services/LicenseManager");
       if (LicenseManager.getInstance().isPremium()) return true;
     } catch {
-      /* premium module not available */
+      /* premium module not available — open-source/local mode: allow all features */
+      return true;
     }
 
     // 2. Active free trial (token present and not expired)
@@ -143,7 +144,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       } = require("../premium/electron/services/LicenseManager");
       return LicenseManager.getInstance().isPremium();
     } catch {
-      return false;
+      return true;
     }
   });
 
@@ -154,7 +155,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       } = require("../premium/electron/services/LicenseManager");
       return LicenseManager.getInstance().getLicenseDetails();
     } catch {
-      return { isPremium: false };
+      return { isPremium: true, plan: "local", provider: "open_source" };
     }
   });
   // Async variant: performs Dodo server-side revocation check on startup.
@@ -167,7 +168,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       } = require("../premium/electron/services/LicenseManager");
       return await LicenseManager.getInstance().isPremiumAsync();
     } catch {
-      return false;
+      return true;
     }
   });
   safeHandle("license:deactivate", async () => {

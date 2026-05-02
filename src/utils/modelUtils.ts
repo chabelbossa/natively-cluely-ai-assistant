@@ -35,9 +35,9 @@ export const STANDARD_CLOUD_MODELS: Record<string, {
     },
     openai: {
         hasKeyCheck: (creds) => !!creds?.hasOpenaiKey,
-        ids: ['gpt-5.4'],
-        names: ['GPT 5.4'],
-        descs: ['OpenAI'],
+        ids: ['gpt-5.4', 'gpt-4o', 'gpt-4o-mini'],
+        names: ['GPT 5.4', 'GPT 4o', 'GPT 4o Mini'],
+        descs: ['OpenAI', 'Vision • Best Quality', 'Fast • Cheap'],
         pmKey: 'openaiPreferredModel'
     },
     claude: {

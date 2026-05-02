@@ -4,6 +4,7 @@ import { CopilotMemory } from './CopilotMemory';
 import { LectureQuestionLLM } from './LectureQuestionLLM';
 import { LectureStrategy } from './LectureStrategy';
 import { getCopilotModeProfile, LECTURE_LIKE_MODES, resolveCopilotMode } from './ModeProfiles';
+import { ProfessionalMeetingLLM } from './ProfessionalMeetingLLM';
 import { ProfessionalMeetingStrategy } from './ProfessionalMeetingStrategy';
 import type {
     CopilotDecision,
@@ -15,11 +16,14 @@ import type {
 export class CopilotDecisionEngine {
     private readonly memory = new CopilotMemory();
     private readonly lectureStrategy: LectureStrategy;
-    private readonly professionalStrategy = new ProfessionalMeetingStrategy();
+    private readonly professionalStrategy: ProfessionalMeetingStrategy;
     private isGenerating = false;
 
     constructor(llmHelper: LLMHelper) {
         this.lectureStrategy = new LectureStrategy(new LectureQuestionLLM(llmHelper));
+        this.professionalStrategy = new ProfessionalMeetingStrategy(
+            new ProfessionalMeetingLLM(llmHelper),
+        );
     }
 
     async handleTranscript(segment: CopilotTranscriptSegment): Promise<CopilotDecision | null> {
@@ -36,10 +40,6 @@ export class CopilotDecisionEngine {
         const conservativeCooldown = this.memory.shouldBeExtraConservative()
             ? Math.round(profile.cooldownMs * 1.5)
             : profile.cooldownMs;
-
-        if (!profile.automaticEnabled) {
-            return this.createWaitDecision(mode, 'Automatic suggestions are disabled for this mode in the MVP.', snapshot.segments);
-        }
 
         if (this.isGenerating) {
             return this.createWaitDecision(mode, 'A copilot suggestion is already being evaluated.', snapshot.segments);

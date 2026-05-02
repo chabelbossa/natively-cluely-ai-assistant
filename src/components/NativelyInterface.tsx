@@ -91,6 +91,8 @@ const shortenModelName = (model: string): string => {
         'gemini-2.5-pro-preview': 'Gemini 2.5 Pro',
         'gpt-5.2': 'GPT 5.2 Codex',
         'gpt-5.1': 'GPT 5.1 Codex',
+        'gpt-4o': 'GPT 4o',
+        'gpt-4o-mini': 'GPT 4o Mini',
     };
     if (map[model]) return map[model];
     if (model.startsWith('ollama-')) return model.replace('ollama-', '');
@@ -2805,6 +2807,8 @@ Provide only the answer, nothing else.`;
                                                     if (m === 'claude-sonnet-4-6') return 'Sonnet 4.6';
                                                     if (m === 'gpt-5.2') return 'GPT 5.2 Codex';
                                                     if (m === 'gpt-5.1') return 'GPT 5.1 Codex';
+                                                    if (m === 'gpt-4o') return 'GPT 4o';
+                                                    if (m === 'gpt-4o-mini') return 'GPT 4o Mini';
                                                     return m;
                                                 })()}
                                             </span>

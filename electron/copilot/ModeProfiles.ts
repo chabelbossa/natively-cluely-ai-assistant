@@ -7,19 +7,19 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
     interview: {
         mode: 'interview',
         label: 'Interview Copilot',
-        automaticEnabled: false,
+        automaticEnabled: true,
         minSegments: 3,
         minContextMs: 30_000,
         cooldownMs: BASE_COOLDOWN_MS,
         minConfidence: 0.75,
         allowedActions: ['WAIT', 'SUGGEST', 'ANSWER'],
         suggestionTypes: ['interview_answer', 'follow_up_question'],
-        systemBehavior: 'Help answer interview questions only when explicitly triggered.'
+        systemBehavior: 'Help answer interview questions when a natural pause occurs.'
     },
     technical_interview: {
         mode: 'technical_interview',
         label: 'Technical Interview Copilot',
-        automaticEnabled: false,
+        automaticEnabled: true,
         minSegments: 3,
         minContextMs: 30_000,
         cooldownMs: BASE_COOLDOWN_MS,
@@ -31,7 +31,7 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
     coding_assessment: {
         mode: 'coding_assessment',
         label: 'Coding Assessment Copilot',
-        automaticEnabled: false,
+        automaticEnabled: true,
         minSegments: 2,
         minContextMs: 20_000,
         cooldownMs: BASE_COOLDOWN_MS,
@@ -43,7 +43,7 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
     manager_meeting: {
         mode: 'manager_meeting',
         label: 'Manager Meeting Copilot',
-        automaticEnabled: false,
+        automaticEnabled: true,
         minSegments: 4,
         minContextMs: BASE_MIN_CONTEXT_MS,
         cooldownMs: BASE_COOLDOWN_MS,
@@ -55,7 +55,7 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
     client_meeting: {
         mode: 'client_meeting',
         label: 'Client Meeting Copilot',
-        automaticEnabled: false,
+        automaticEnabled: true,
         minSegments: 4,
         minContextMs: BASE_MIN_CONTEXT_MS,
         cooldownMs: BASE_COOLDOWN_MS,
@@ -67,7 +67,7 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
     feature_planning: {
         mode: 'feature_planning',
         label: 'Feature Planning Copilot',
-        automaticEnabled: false,
+        automaticEnabled: true,
         minSegments: 4,
         minContextMs: BASE_MIN_CONTEXT_MS,
         cooldownMs: BASE_COOLDOWN_MS,
@@ -79,7 +79,7 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
     bug_triage: {
         mode: 'bug_triage',
         label: 'Bug Triage Copilot',
-        automaticEnabled: false,
+        automaticEnabled: true,
         minSegments: 4,
         minContextMs: BASE_MIN_CONTEXT_MS,
         cooldownMs: BASE_COOLDOWN_MS,
@@ -91,7 +91,7 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
     architecture_review: {
         mode: 'architecture_review',
         label: 'Architecture Review Copilot',
-        automaticEnabled: false,
+        automaticEnabled: true,
         minSegments: 4,
         minContextMs: BASE_MIN_CONTEXT_MS,
         cooldownMs: BASE_COOLDOWN_MS,
@@ -151,9 +151,13 @@ export function resolveCopilotMode(activeMode: ActiveModeLike): CopilotMode | nu
     }
 
     if (activeMode.templateType === 'technical-interview') return 'technical_interview';
+    if (activeMode.templateType === 'coding-assessment') return 'coding_assessment';
     if (activeMode.templateType === 'looking-for-work') return 'interview';
     if (activeMode.templateType === 'sales') return 'client_meeting';
     if (activeMode.templateType === 'team-meet') return 'manager_meeting';
+    if (activeMode.templateType === 'bug-triage') return 'bug_triage';
+    if (activeMode.templateType === 'feature-planning') return 'feature_planning';
+    if (activeMode.templateType === 'architecture-review') return 'architecture_review';
     if (activeMode.templateType === 'recruiting') return 'interview';
 
     return null;
