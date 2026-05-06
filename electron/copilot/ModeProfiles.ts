@@ -44,10 +44,10 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
         mode: 'manager_meeting',
         label: 'Manager Meeting Copilot',
         automaticEnabled: true,
-        minSegments: 4,
-        minContextMs: BASE_MIN_CONTEXT_MS,
+        minSegments: 2,
+        minContextMs: 15_000,
         cooldownMs: BASE_COOLDOWN_MS,
-        minConfidence: 0.78,
+        minConfidence: 0.65,
         allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
         suggestionTypes: ['scope', 'priority', 'deadline', 'acceptance_criteria', 'technical_risk'],
         systemBehavior: 'Clarify scope, ownership, priorities, risks, dependencies, and acceptance criteria.'
@@ -56,10 +56,10 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
         mode: 'client_meeting',
         label: 'Client Meeting Copilot',
         automaticEnabled: true,
-        minSegments: 4,
-        minContextMs: BASE_MIN_CONTEXT_MS,
+        minSegments: 2,
+        minContextMs: 15_000,
         cooldownMs: BASE_COOLDOWN_MS,
-        minConfidence: 0.78,
+        minConfidence: 0.65,
         allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
         suggestionTypes: ['client_need', 'business_goal', 'scope', 'priority', 'acceptance_criteria'],
         systemBehavior: 'Clarify the business need, users, constraints, validation, and ambiguity.'
@@ -68,10 +68,10 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
         mode: 'feature_planning',
         label: 'Feature Planning Copilot',
         automaticEnabled: true,
-        minSegments: 4,
-        minContextMs: BASE_MIN_CONTEXT_MS,
+        minSegments: 2,
+        minContextMs: 15_000,
         cooldownMs: BASE_COOLDOWN_MS,
-        minConfidence: 0.78,
+        minConfidence: 0.65,
         allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
         suggestionTypes: ['scope', 'priority', 'acceptance_criteria', 'api_contract', 'data_model'],
         systemBehavior: 'Clarify feature scope, API contracts, data shape, dependencies, and validation criteria.'
@@ -80,10 +80,10 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
         mode: 'bug_triage',
         label: 'Bug Triage Copilot',
         automaticEnabled: true,
-        minSegments: 4,
-        minContextMs: BASE_MIN_CONTEXT_MS,
+        minSegments: 2,
+        minContextMs: 15_000,
         cooldownMs: BASE_COOLDOWN_MS,
-        minConfidence: 0.78,
+        minConfidence: 0.65,
         allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
         suggestionTypes: ['bug_reproduction', 'technical_risk', 'roles_permissions', 'acceptance_criteria'],
         systemBehavior: 'Clarify reproduction, expected behavior, severity, impact, logs, and ownership.'
@@ -92,13 +92,85 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
         mode: 'architecture_review',
         label: 'Architecture Review Copilot',
         automaticEnabled: true,
-        minSegments: 4,
-        minContextMs: BASE_MIN_CONTEXT_MS,
+        minSegments: 2,
+        minContextMs: 15_000,
         cooldownMs: BASE_COOLDOWN_MS,
-        minConfidence: 0.78,
+        minConfidence: 0.65,
         allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
         suggestionTypes: ['technical_risk', 'security', 'api_contract', 'data_model', 'roles_permissions'],
         systemBehavior: 'Surface architectural tradeoffs, failure modes, scalability, maintainability, and security questions.'
+    },
+    product_owner: {
+        mode: 'product_owner',
+        label: 'Product Owner Copilot',
+        automaticEnabled: true,
+        minSegments: 2,
+        minContextMs: 15_000,
+        cooldownMs: BASE_COOLDOWN_MS,
+        minConfidence: 0.65,
+        allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
+        suggestionTypes: ['business_goal', 'client_need', 'scope', 'acceptance_criteria', 'priority'],
+        systemBehavior: 'Clarify user needs, business value, MVP scope, user stories, and acceptance criteria.'
+    },
+    tech_lead: {
+        mode: 'tech_lead',
+        label: 'Tech Lead Copilot',
+        automaticEnabled: true,
+        minSegments: 2,
+        minContextMs: 15_000,
+        cooldownMs: BASE_COOLDOWN_MS,
+        minConfidence: 0.65,
+        allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
+        suggestionTypes: ['technical_risk', 'api_contract', 'data_model', 'security', 'priority'],
+        systemBehavior: 'Surface architecture decisions, technical debt, tradeoffs, maintainability, and team capacity.'
+    },
+    backend_api: {
+        mode: 'backend_api',
+        label: 'Backend API Copilot',
+        automaticEnabled: true,
+        minSegments: 2,
+        minContextMs: 15_000,
+        cooldownMs: BASE_COOLDOWN_MS,
+        minConfidence: 0.65,
+        allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
+        suggestionTypes: ['api_contract', 'data_model', 'roles_permissions', 'security', 'technical_risk'],
+        systemBehavior: 'Clarify API contracts, auth, pagination, error handling, idempotency, and schema design.'
+    },
+    frontend_handoff: {
+        mode: 'frontend_handoff',
+        label: 'Frontend Handoff Copilot',
+        automaticEnabled: true,
+        minSegments: 2,
+        minContextMs: 15_000,
+        cooldownMs: BASE_COOLDOWN_MS,
+        minConfidence: 0.65,
+        allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
+        suggestionTypes: ['api_contract', 'acceptance_criteria', 'scope', 'roles_permissions'],
+        systemBehavior: 'Clarify UI states (loading, empty, error), responsive behavior, validations, and API contract needs.'
+    },
+    client_discovery: {
+        mode: 'client_discovery',
+        label: 'Client Discovery Copilot',
+        automaticEnabled: true,
+        minSegments: 2,
+        minContextMs: 15_000,
+        cooldownMs: BASE_COOLDOWN_MS,
+        minConfidence: 0.65,
+        allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
+        suggestionTypes: ['client_need', 'business_goal', 'scope', 'priority', 'deadline'],
+        systemBehavior: 'Clarify business objectives, constraints, budget, timeline, decision-makers, and success metrics.'
+    },
+    sprint_planning: {
+        mode: 'sprint_planning',
+        label: 'Sprint Planning Copilot',
+        automaticEnabled: true,
+        minSegments: 2,
+        minContextMs: 15_000,
+        cooldownMs: BASE_COOLDOWN_MS,
+        minConfidence: 0.65,
+        allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
+        suggestionTypes: ['scope', 'priority', 'deadline', 'acceptance_criteria', 'technical_risk'],
+        systemBehavior: 'Clarify priorities, capacity, dependencies, risks, ticket breakdown, and sprint goals.'
     },
     lecture: lectureProfile('lecture', 'Lecture Copilot'),
     course: lectureProfile('course', 'Course Copilot'),
@@ -158,7 +230,32 @@ export function resolveCopilotMode(activeMode: ActiveModeLike): CopilotMode | nu
     if (activeMode.templateType === 'bug-triage') return 'bug_triage';
     if (activeMode.templateType === 'feature-planning') return 'feature_planning';
     if (activeMode.templateType === 'architecture-review') return 'architecture_review';
+    if (activeMode.templateType === 'product-owner') return 'product_owner';
+    if (activeMode.templateType === 'tech-lead') return 'tech_lead';
+    if (activeMode.templateType === 'backend-api') return 'backend_api';
+    if (activeMode.templateType === 'frontend-handoff') return 'frontend_handoff';
+    if (activeMode.templateType === 'client-discovery') return 'client_discovery';
+    if (activeMode.templateType === 'sprint-planning') return 'sprint_planning';
     if (activeMode.templateType === 'recruiting') return 'interview';
+
+    // ── General fallback: infer copilot mode from mode name ─────────
+    if (activeMode.templateType === 'general') {
+        const name = activeMode.name.toLowerCase();
+        if (/\b(bug|triage|reproduction)\b/.test(name)) return 'bug_triage';
+        if (/\b(feature|planning|spec|grooming)\b/.test(name)) return 'feature_planning';
+        if (/\b(arch|architecture|design|system)\b/.test(name)) return 'architecture_review';
+        if (/\b(product owner|po|product)\b/.test(name)) return 'product_owner';
+        if (/\b(tech lead|tech|lead)\b/.test(name)) return 'tech_lead';
+        if (/\b(api|backend|endpoint|rest)\b/.test(name)) return 'backend_api';
+        if (/\b(frontend|ui|ux|handoff)\b/.test(name)) return 'frontend_handoff';
+        if (/\b(discovery|business)\b/.test(name)) return 'client_discovery';
+        if (/\b(sprint|scrum|agile)\b/.test(name)) return 'sprint_planning';
+        if (/\b(client|sales|vente|commercial|nego|meeting)\b/.test(name)) return 'client_meeting';
+        if (/\b(interview|entretien|technical|technique|coding|code|assessment)\b/.test(name)) return 'technical_interview';
+        if (/\b(team|manager|standup)\b/.test(name)) return 'manager_meeting';
+        if (/\b(lecture|cours|course|formation|conf)\b/.test(name)) return 'lecture';
+        return null;
+    }
 
     return null;
 }

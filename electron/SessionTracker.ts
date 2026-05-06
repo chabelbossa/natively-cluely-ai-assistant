@@ -4,6 +4,7 @@
 
 import { RecapLLM } from './llm';
 import { isVerboseLogging } from './verboseLog';
+import type { CanonicalTranscriptRole, TranscriptQualityFlag } from './transcript/types';
 
 export interface TranscriptSegment {
     marker?: string;
@@ -12,6 +13,11 @@ export interface TranscriptSegment {
     timestamp: number;
     final: boolean;
     confidence?: number;
+    canonicalRole?: CanonicalTranscriptRole;
+    source?: 'mic' | 'system' | 'merged';
+    qualityFlags?: TranscriptQualityFlag[];
+    rawSpeaker?: string;
+    speakerId?: number;
 }
 
 export interface SuggestionTrigger {
@@ -25,6 +31,11 @@ export interface ContextItem {
     role: 'interviewer' | 'user' | 'assistant';
     text: string;
     timestamp: number;
+    speaker?: string;
+    confidence?: number;
+    source?: 'live' | 'recorded' | 'assistant';
+    canonicalRole?: CanonicalTranscriptRole;
+    qualityFlags?: TranscriptQualityFlag[];
 }
 
 export interface AssistantResponse {
@@ -191,7 +202,7 @@ export class SessionTracker {
     addTranscript(segment: TranscriptSegment): { role: 'interviewer' | 'user' | 'assistant' } | null {
         if (!segment.final) return null;
 
-        const role = this.mapSpeakerToRole(segment.speaker);
+        const role = this.mapSpeakerToRole(segment.speaker, segment.canonicalRole);
         const text = segment.text.trim();
 
         if (!text) return null;
@@ -208,7 +219,12 @@ export class SessionTracker {
         this.contextItems.push({
             role,
             text,
-            timestamp: segment.timestamp
+            timestamp: segment.timestamp,
+            speaker: segment.speaker,
+            confidence: segment.confidence,
+            source: 'live',
+            canonicalRole: segment.canonicalRole,
+            qualityFlags: segment.qualityFlags
         });
 
         this.evictOldEntries();
@@ -254,7 +270,10 @@ export class SessionTracker {
         this.contextItems.push({
             role: 'assistant',
             text: cleanText,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            speaker: 'assistant',
+            confidence: 1,
+            source: 'assistant'
         });
 
         // Also add to fullTranscript so it persists in the session history (and summaries)
@@ -295,12 +314,13 @@ export class SessionTracker {
      */
     handleTranscript(segment: TranscriptSegment): { role: 'interviewer' | 'user' | 'assistant' } | null {
         // Track interim segments for interviewer to prevent data loss on stop
-        if (segment.speaker === 'user') {
+        const transcriptRole = this.mapSpeakerToRole(segment.speaker, segment.canonicalRole);
+        if (transcriptRole === 'user') {
             if (isVerboseLogging() && (Math.random() < 0.05 || segment.final)) {
                 console.log(`[SessionTracker] RX User Segment: Final=${segment.final} Text="${segment.text.substring(0, 50)}..."`);
             }
         }
-        if (segment.speaker === 'interviewer') {
+        if (transcriptRole === 'interviewer') {
             if (isVerboseLogging() && (Math.random() < 0.05 || segment.final)) {
                 console.log(`[SessionTracker] RX Interviewer Segment: Final=${segment.final} Text="${segment.text.substring(0, 50)}..."`);
             }
@@ -398,34 +418,44 @@ export class SessionTracker {
      * requests, so they can safely fall back to the persisted visible transcript.
      */
     getActionContext(lastSeconds: number = 120): ContextItem[] {
-        const trustedContext = this.getContext(lastSeconds);
+        const trustedContext = this.getContext(lastSeconds).map(item => ({
+            ...item,
+            source: item.source ?? ('live' as const)
+        }));
         const recordedContext = this.getRecordedTranscriptContext(lastSeconds);
 
-        if (recordedContext.length === 0) {
-            return trustedContext;
-        }
+        const merged = recordedContext.length === 0
+            ? trustedContext
+            : this.mergeContextItems(trustedContext, recordedContext);
 
-        const hasTrustedInterviewer = trustedContext.some(item => item.role === 'interviewer');
-        const hasRecordedInterviewer = recordedContext.some(item => item.role === 'interviewer');
-        const shouldTreatMicAsHeardConversation = !hasTrustedInterviewer && !hasRecordedInterviewer;
-
-        const actionRecordedContext = shouldTreatMicAsHeardConversation
-            ? recordedContext.map(item => item.role === 'user'
-                ? { ...item, role: 'interviewer' as const }
-                : item)
-            : recordedContext;
-
-        return this.mergeContextItems(trustedContext, actionRecordedContext);
+        return this.selectReliableActionContext(merged);
     }
 
     getFormattedActionContext(lastSeconds: number = 120): string {
         const items = this.getActionContext(lastSeconds);
-        return items.map(item => {
-            const label = item.role === 'interviewer' ? 'INTERVIEWER' :
-                item.role === 'user' ? 'ME' :
-                    'ASSISTANT (PREVIOUS SUGGESTION)';
-            return `[${label}]: ${item.text}`;
-        }).join('\n');
+        if (items.length === 0) return '';
+
+        return `${this.getActionContextContract()}\n\n${items.map(item => this.formatActionContextItem(item)).join('\n')}`;
+    }
+
+    getActionContextDiagnostics(lastSeconds: number = 120): string[] {
+        const items = this.getActionContext(lastSeconds);
+        const counts = items.reduce((acc, item) => {
+            const key = item.role === 'interviewer'
+                ? this.isUncertainSpeakerLabel(item) ? 'interlocutor_uncertain' : 'interlocutor'
+                : item.role;
+            acc[key] = (acc[key] || 0) + 1;
+            return acc;
+        }, {} as Record<string, number>);
+        const lastInterlocutor = [...items].reverse().find(item => item.role === 'interviewer');
+
+        return [
+            'action_context_policy=interlocutor_first_no_mic_relabel',
+            `action_context_items=${items.length}`,
+            `action_context_counts=${JSON.stringify(counts)}`,
+            `action_context_has_interlocutor=${Boolean(lastInterlocutor)}`,
+            `action_context_last_interlocutor=${lastInterlocutor ? this.truncateForDiagnostics(lastInterlocutor.text, 180) : 'none'}`
+        ];
     }
 
     /**
@@ -455,7 +485,7 @@ export class SessionTracker {
      */
     getFullSessionContext(): string {
         const recentTranscript = this.fullTranscript.map(segment => {
-            const role = this.mapSpeakerToRole(segment.speaker);
+            const role = this.mapSpeakerToRole(segment.speaker, segment.canonicalRole);
             const label = role === 'interviewer' ? 'INTERVIEWER' :
                 role === 'user' ? 'ME' :
                     'ASSISTANT';
@@ -556,9 +586,16 @@ export class SessionTracker {
     // Private Helpers
     // ============================================
 
-    mapSpeakerToRole(speaker: string): 'interviewer' | 'user' | 'assistant' {
-        if (speaker === 'user') return 'user';
-        if (speaker === 'assistant') return 'assistant';
+    mapSpeakerToRole(speaker: string, canonicalRole?: CanonicalTranscriptRole): 'interviewer' | 'user' | 'assistant' {
+        if (canonicalRole) {
+            if (canonicalRole === 'me') return 'user';
+            if (canonicalRole === 'assistant') return 'assistant';
+            return 'interviewer';
+        }
+
+        const normalized = String(speaker || '').toLowerCase();
+        if (['user', 'me', 'mic', 'microphone'].includes(normalized)) return 'user';
+        if (['assistant', 'ai', 'model'].includes(normalized)) return 'assistant';
         return 'interviewer'; // system audio = interviewer
     }
 
@@ -600,11 +637,117 @@ export class SessionTracker {
         return this.fullTranscript
             .filter(segment => segment.final && segment.timestamp >= cutoff)
             .map(segment => ({
-                role: this.mapSpeakerToRole(segment.speaker),
+                role: this.mapSpeakerToRole(segment.speaker, segment.canonicalRole),
                 text: segment.text.trim(),
-                timestamp: segment.timestamp
+                timestamp: segment.timestamp,
+                speaker: segment.speaker,
+                confidence: segment.confidence,
+                source: 'recorded' as const,
+                canonicalRole: segment.canonicalRole,
+                qualityFlags: segment.qualityFlags
             }))
             .filter(item => item.text.length > 0);
+    }
+
+    private getActionContextContract(): string {
+        return `[ACTION CONTEXT CONTRACT]
+- ME / Mic / user = the local user. Use these lines only as the user's own words or explicit question.
+- INTERLOCUTOR = the other participant(s), professor, client, manager, recruiter, or system audio.
+- Canonical roles from TranscriptRouter are authoritative: ME is local mic, INTERLOCUTOR/SPEAKER_* is system audio.
+- Action buttons must primarily answer, clarify, or suggest questions from INTERLOCUTOR context.
+- DIARIZATION_UNCERTAIN can be noisy or mixed. Use it only when it matches nearby INTERLOCUTOR context.
+- If only ME is available, say the conversation context is insufficient instead of inventing what the interlocutor said.`;
+    }
+
+    private selectReliableActionContext(items: ContextItem[]): ContextItem[] {
+        const meaningful = items
+            .filter(item => this.isUsefulActionContextItem(item))
+            .sort((a, b) => a.timestamp - b.timestamp);
+
+        const reliableInterlocutor = meaningful.filter(item =>
+            item.role === 'interviewer' && !this.isUncertainSpeakerLabel(item)
+        );
+        const uncertainInterlocutor = meaningful.filter(item =>
+            item.role === 'interviewer' && this.isUncertainSpeakerLabel(item)
+        );
+        const localUser = meaningful.filter(item => item.role === 'user' && item.text.length <= 1000);
+        const assistant = meaningful.filter(item => item.role === 'assistant');
+
+        const hasInterlocutor = reliableInterlocutor.length > 0 || uncertainInterlocutor.length > 0;
+        const selected: ContextItem[] = [];
+
+        if (hasInterlocutor) {
+            selected.push(...this.takeRecent(reliableInterlocutor, 12));
+            selected.push(...this.takeRecent(uncertainInterlocutor, reliableInterlocutor.length > 0 ? 3 : 7));
+            selected.push(...this.takeRecent(localUser, 2));
+            selected.push(...this.takeRecent(assistant, 2));
+        } else {
+            selected.push(...this.takeRecent(localUser, 6));
+            selected.push(...this.takeRecent(assistant, 2));
+        }
+
+        return this.mergeContextItems([], selected)
+            .sort((a, b) => a.timestamp - b.timestamp)
+            .slice(-18);
+    }
+
+    private isUsefulActionContextItem(item: ContextItem): boolean {
+        const text = item.text.trim();
+        if (!text) return false;
+
+        const normalized = this.normalizeTranscriptForComparison(text);
+        if (!normalized) return false;
+
+        const words = normalized.split(' ').filter(Boolean);
+        if (item.role !== 'interviewer' && words.length < 3) return false;
+
+        if (this.isLowValueTranscriptText(normalized)) return false;
+
+        if (this.isUncertainSpeakerLabel(item) && text.length > 1600) {
+            return false;
+        }
+
+        return true;
+    }
+
+    private isLowValueTranscriptText(normalizedText: string): boolean {
+        if (normalizedText.length < 4) return true;
+        return /^(ok|okay|merci|thank you|thanks|bonjour|hello|allo|oui|non|d accord|daccord|parfait|super)$/.test(normalizedText);
+    }
+
+    private isUncertainSpeakerLabel(item: ContextItem): boolean {
+        if (item.canonicalRole === 'uncertain') return true;
+        if (item.canonicalRole === 'interlocutor' || item.canonicalRole === 'speaker_1' || item.canonicalRole === 'speaker_2') return false;
+        const speaker = String(item.speaker || '').toLowerCase();
+        return /^locuteur[_-]?\d+$/.test(speaker)
+            || /^speaker[_-]?\d+$/.test(speaker)
+            || speaker === 'unknown'
+            || speaker === 'speaker';
+    }
+
+    private takeRecent<T>(items: T[], count: number): T[] {
+        if (count <= 0) return [];
+        return items.slice(-count);
+    }
+
+    private truncateForDiagnostics(text: string, maxLength: number): string {
+        const clean = text.replace(/\s+/g, ' ').trim();
+        if (clean.length <= maxLength) return clean;
+        return `${clean.slice(0, maxLength - 3)}...`;
+    }
+
+    private formatActionContextItem(item: ContextItem): string {
+        const label = item.role === 'interviewer'
+            ? item.canonicalRole === 'interlocutor' || item.canonicalRole === 'speaker_1' || item.canonicalRole === 'speaker_2'
+                ? 'INTERLOCUTOR'
+                : this.isUncertainSpeakerLabel(item)
+                ? 'INTERLOCUTOR (DIARIZATION_UNCERTAIN)'
+                : 'INTERLOCUTOR'
+            : item.role === 'user'
+                ? 'ME (LOCAL MIC)'
+                : 'ASSISTANT (PREVIOUS SUGGESTION)';
+
+        return `[${label}]: ${item.text}`;
     }
 
     private mergeContextItems(primary: ContextItem[], secondary: ContextItem[]): ContextItem[] {
@@ -674,7 +817,7 @@ export class SessionTracker {
             const summarizeCount = 500;
             const oldEntries = this.fullTranscript.slice(0, summarizeCount);
             const summaryInput = oldEntries.map(seg => {
-                const role = this.mapSpeakerToRole(seg.speaker);
+                const role = this.mapSpeakerToRole(seg.speaker, seg.canonicalRole);
                 const label = role === 'interviewer' ? 'INTERVIEWER' :
                     role === 'user' ? 'ME' : 'ASSISTANT';
                 return `[${label}]: ${seg.text}`;

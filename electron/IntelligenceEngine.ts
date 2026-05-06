@@ -5,6 +5,8 @@
 import { EventEmitter } from 'events';
 import { LLMHelper } from './LLMHelper';
 import { SessionTracker, TranscriptSegment, SuggestionTrigger, ContextItem } from './SessionTracker';
+import { ModesManager } from './services/ModesManager';
+import { MeetingAction, MeetingActionOrchestrator } from './meeting/MeetingActionOrchestrator';
 import {
     AnswerLLM, AssistLLM, BrainstormLLM, ClarifyLLM, CodeHintLLM, FollowUpLLM, RecapLLM,
     FollowUpQuestionsLLM, WhatToAnswerLLM,
@@ -96,11 +98,14 @@ export class IntelligenceEngine extends EventEmitter {
     private lastTranscriptTime: number = 0;
     private lastTriggerTime: number = 0;
     private readonly triggerCooldown: number = 3000; // 3 seconds
+    private readonly activeModeContextMaxChars: number = 12_000;
+    private actionOrchestrator: MeetingActionOrchestrator;
 
-    constructor(llmHelper: LLMHelper, session: SessionTracker) {
+    constructor(llmHelper: LLMHelper, session: SessionTracker, getLiveStateBlock?: () => string) {
         super();
         this.llmHelper = llmHelper;
         this.session = session;
+        this.actionOrchestrator = new MeetingActionOrchestrator(getLiveStateBlock);
         this.initializeLLMs();
     }
 
@@ -110,6 +115,67 @@ export class IntelligenceEngine extends EventEmitter {
 
     getRecapLLM(): RecapLLM | null {
         return this.recapLLM;
+    }
+
+    private getActiveModeActionContextBlock(): string {
+        try {
+            const modesManager = ModesManager.getInstance();
+            const mode = modesManager.getActiveMode();
+            const contextBlock = modesManager.buildActiveModeContextBlock().trim();
+
+            if (!mode && !contextBlock) return '';
+
+            const modeHeader = mode
+                ? `<active_mode name="${mode.name}" template="${mode.templateType}" />`
+                : '';
+            const cappedContext = contextBlock.length > this.activeModeContextMaxChars
+                ? `${contextBlock.slice(0, this.activeModeContextMaxChars)}\n[...active mode context truncated]`
+                : contextBlock;
+
+            return [
+                `[PRE-MEETING / MODE CONTEXT]`,
+                modeHeader,
+                cappedContext,
+                `[/PRE-MEETING / MODE CONTEXT]`,
+                `Use this as background memory only. The live transcript remains the source of truth for what is being discussed right now.`,
+            ].filter(Boolean).join('\n');
+        } catch (error: any) {
+            console.warn('[IntelligenceEngine] Failed to load active mode context:', error?.message || error);
+            return '';
+        }
+    }
+
+    private withActiveModeActionContext(context: string, fallback?: string, action: MeetingAction = 'ANSWER'): string {
+        return this.actionOrchestrator.buildActionContext({
+            action,
+            activeModeBlock: this.getActiveModeActionContextBlock(),
+            transcriptContext: context,
+            fallback,
+        });
+    }
+
+    private getFormattedActionContextWithMode(lastSeconds: number, fallback?: string, action: MeetingAction = 'ANSWER'): string {
+        return this.withActiveModeActionContext(
+            this.session.getFormattedActionContext(lastSeconds),
+            fallback,
+            action,
+        );
+    }
+
+    private buildUsageMetadata(action: MeetingAction, systemContext: string, diagnostics?: string[]) {
+        return {
+            action,
+            provider: this.llmHelper.getCurrentProvider(),
+            model: this.llmHelper.getCurrentModel(),
+            systemContext: this.truncateForUsage(systemContext),
+            diagnostics
+        };
+    }
+
+    private truncateForUsage(text: string, maxLength: number = 6000): string {
+        const normalized = String(text || '').replace(/\s+\n/g, '\n').trim();
+        if (normalized.length <= maxLength) return normalized;
+        return `${normalized.slice(0, maxLength - 34)}\n[...usage context truncated]`;
     }
 
     // ============================================
@@ -180,10 +246,7 @@ export class IntelligenceEngine extends EventEmitter {
      * Low-priority observational insights
      */
     async runAssistMode(): Promise<string | null> {
-        if (this.activeMode !== 'idle' && this.activeMode !== 'assist') {
-            return null;
-        }
-
+        // Allow assist to run concurrently with other modes — it's a passive observer
         if (this.assistCancellationToken) {
             this.assistCancellationToken.abort();
         }
@@ -197,7 +260,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.session.getFormattedContext(60);
+            const context = this.withActiveModeActionContext(this.session.getFormattedContext(60), undefined, 'ANSWER');
             if (!context) {
                 this.setMode('idle');
                 return null;
@@ -254,7 +317,7 @@ export class IntelligenceEngine extends EventEmitter {
                     this.setMode('idle');
                     return "Please configure your API Keys in Settings to use this feature.";
                 }
-                const context = this.session.getFormattedActionContext(180);
+                const context = this.getFormattedActionContextWithMode(180, undefined, 'WHAT_TO_SAY');
                 const answer = await this.answerLLM.generate(question || '', context);
                 if (answer) {
                     this.session.addAssistantMessage(answer);
@@ -290,7 +353,11 @@ export class IntelligenceEngine extends EventEmitter {
                 timestamp: item.timestamp
             }));
 
-            const preparedTranscript = prepareTranscriptForWhatToAnswer(transcriptTurns, 12);
+            const preparedTranscript = this.withActiveModeActionContext(
+                prepareTranscriptForWhatToAnswer(transcriptTurns, 12),
+                undefined,
+                'WHAT_TO_SAY',
+            );
 
             const temporalContext = buildTemporalContext(
                 contextItems,
@@ -339,11 +406,14 @@ export class IntelligenceEngine extends EventEmitter {
 
             this.session.addAssistantMessage(fullAnswer);
 
+            const diagnostics = this.session.getActionContextDiagnostics(180);
             this.session.pushUsage({
                 type: 'assist',
                 timestamp: Date.now(),
                 question: question || 'What to Answer',
-                answer: fullAnswer
+                answer: fullAnswer,
+                items: diagnostics,
+                metadata: this.buildUsageMetadata('WHAT_TO_SAY', preparedTranscript, diagnostics)
             });
 
             // CQ-05 fix: only emit the "complete" event after a non-aborted stream.
@@ -381,7 +451,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.session.getFormattedActionContext(60);
+            const context = this.getFormattedActionContextWithMode(60, undefined, 'FOLLOW_UP_QUESTION');
             const refinementRequest = userRequest || intent;
 
             const generationId = this.nextGenerationId('follow_up');
@@ -420,11 +490,14 @@ export class IntelligenceEngine extends EventEmitter {
 
                 const displayQuestion = userRequest || intentMap[intent] || `Refining: ${intent}`;
 
+                const diagnostics = this.session.getActionContextDiagnostics(60);
                 this.session.pushUsage({
                     type: 'followup',
                     timestamp: Date.now(),
                     question: displayQuestion,
-                    answer: fullRefined
+                    answer: fullRefined,
+                    items: diagnostics,
+                    metadata: this.buildUsageMetadata('FOLLOW_UP_QUESTION', context, diagnostics)
                 });
             }
 
@@ -453,7 +526,11 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.session.getFullSessionContext() || this.session.getFormattedContext(600);
+            const context = this.withActiveModeActionContext(
+                this.session.getFullSessionContext() || this.session.getFormattedContext(600),
+                undefined,
+                'RECAP',
+            );
             if (!context) {
                 console.warn('[IntelligenceEngine] No context available for recap');
                 this.setMode('idle');
@@ -484,7 +561,8 @@ export class IntelligenceEngine extends EventEmitter {
                     type: 'chat',
                     timestamp: Date.now(),
                     question: 'Recap Meeting',
-                    answer: fullSummary
+                    answer: fullSummary,
+                    metadata: this.buildUsageMetadata('RECAP', context)
                 });
             }
             this.finishMode('recap', generationId);
@@ -512,9 +590,9 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const rawContext = this.session.getFormattedActionContext(180);
-            // If no transcript yet, use a generic prompt — the LLM will ask a scoping question
-            const context = rawContext || '[No transcript available yet. The candidate just joined the interview. Generate an opening clarifying question to understand the scope and constraints of the upcoming problem.]';
+            const rawContext = this.getFormattedActionContextWithMode(180, undefined, 'CLARIFY');
+            // If no transcript yet, use a generic prompt — the LLM will ask for the missing context.
+            const context = rawContext || '[No reliable interlocutor transcript is available yet. Generate one short, natural question asking for the missing context or the main constraint. Do not invent what the other person said.]';
 
             const generationId = this.nextGenerationId('clarify');
             let fullClarification = "";
@@ -542,11 +620,14 @@ export class IntelligenceEngine extends EventEmitter {
                 this.emit('clarify', fullClarification);
                 this.session.addAssistantMessage(fullClarification);
 
+                const diagnostics = this.session.getActionContextDiagnostics(180);
                 this.session.pushUsage({
                     type: 'chat',
                     timestamp: Date.now(),
                     question: 'Clarify Question',
-                    answer: fullClarification
+                    answer: fullClarification,
+                    items: diagnostics,
+                    metadata: this.buildUsageMetadata('CLARIFY', context, diagnostics)
                 });
             }
             this.finishMode('clarify', generationId);
@@ -574,7 +655,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.session.getFormattedActionContext(120);
+            const context = this.getFormattedActionContextWithMode(120, undefined, 'FOLLOW_UP_QUESTION');
             if (!context) {
                 console.warn('[IntelligenceEngine] No context available for follow-up questions');
                 this.setMode('idle');
@@ -597,11 +678,14 @@ export class IntelligenceEngine extends EventEmitter {
 
             if (fullQuestions && this.isGenerationCurrent('follow_up_questions', generationId)) {
                 this.emit('follow_up_questions_update', fullQuestions);
+                const diagnostics = this.session.getActionContextDiagnostics(120);
                 this.session.pushUsage({
                     type: 'followup_questions',
                     timestamp: Date.now(),
                     question: 'Generate Follow-up Questions',
-                    answer: fullQuestions
+                    answer: fullQuestions,
+                    items: diagnostics,
+                    metadata: this.buildUsageMetadata('FOLLOW_UP_QUESTION', context, diagnostics)
                 });
             }
             this.finishMode('follow_up_questions', generationId);
@@ -628,18 +712,21 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.session.getFormattedActionContext(120);
+            const context = this.getFormattedActionContextWithMode(120, undefined, 'ANSWER');
             const answer = await this.answerLLM.generate(question, context);
 
             if (answer) {
                 this.session.addAssistantMessage(answer);
                 this.emit('manual_answer_result', answer, question);
 
+                const diagnostics = this.session.getActionContextDiagnostics(120);
                 this.session.pushUsage({
                     type: 'chat',
                     timestamp: Date.now(),
                     question: question,
-                    answer: answer
+                    answer: answer,
+                    items: diagnostics,
+                    metadata: this.buildUsageMetadata('ANSWER', context, diagnostics)
                 });
             }
 
@@ -684,7 +771,7 @@ export class IntelligenceEngine extends EventEmitter {
 
             // Pull transcript as fallback context when no question is pinned
             const transcriptContext = questionContext === null
-                ? this.session.getFormattedActionContext(180)
+                ? this.getFormattedActionContextWithMode(180, undefined, 'ANSWER')
                 : null;
 
             console.log(`[IntelligenceEngine] Code hint — question source: ${questionContext ? (questionSource ?? 'passed') : 'none'}, transcript lines: ${transcriptContext ? transcriptContext.split('\n').length : 0}, images: ${imagePaths?.length ?? 0}`);
@@ -724,7 +811,8 @@ export class IntelligenceEngine extends EventEmitter {
                 type: 'assist',
                 timestamp: Date.now(),
                 question: 'Code Hint',
-                answer: fullHint
+                answer: fullHint,
+                metadata: this.buildUsageMetadata('ANSWER', transcriptContext || questionContext || 'Screenshot/code hint context')
             });
 
             this.emit('suggested_answer', fullHint, 'Code Hint', 1.0);
@@ -756,7 +844,7 @@ export class IntelligenceEngine extends EventEmitter {
                 return "Please configure your API Keys in Settings to use this feature.";
             }
 
-            let context = this.session.getFormattedActionContext(180);
+            let context = this.getFormattedActionContextWithMode(180, undefined, 'ANSWER');
             // Prepend the problem statement so the LLM knows exactly what to brainstorm
             const resolvedProblem = problemStatement?.trim() ||
                 this.session.getDetectedCodingQuestion().question?.trim();
@@ -802,7 +890,8 @@ export class IntelligenceEngine extends EventEmitter {
                 type: 'assist',
                 timestamp: Date.now(),
                 question: 'Brainstorm',
-                answer: fullResult
+                answer: fullResult,
+                metadata: this.buildUsageMetadata('ANSWER', context)
             });
 
             this.emit('suggested_answer', fullResult, 'Brainstorming Approaches', 1.0);

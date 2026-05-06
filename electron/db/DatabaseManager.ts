@@ -31,6 +31,13 @@ export interface Meeting {
         question?: string;
         answer?: string;
         items?: string[];
+        metadata?: {
+            model?: string;
+            provider?: string;
+            action?: string;
+            systemContext?: string;
+            diagnostics?: string[];
+        };
     }>;
     calendarEventId?: string;
     source?: 'manual' | 'calendar';
@@ -968,10 +975,22 @@ export class DatabaseManager {
             return;
         }
 
-        const insertMeeting = this.db.prepare(`
-            INSERT OR REPLACE INTO meetings (id, title, start_time, duration_ms, summary_json, created_at, calendar_event_id, source, is_processed)
+        const upsertMeeting = this.db.prepare(`
+            INSERT INTO meetings (id, title, start_time, duration_ms, summary_json, created_at, calendar_event_id, source, is_processed)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                start_time = excluded.start_time,
+                duration_ms = excluded.duration_ms,
+                summary_json = excluded.summary_json,
+                created_at = excluded.created_at,
+                calendar_event_id = excluded.calendar_event_id,
+                source = excluded.source,
+                is_processed = excluded.is_processed
         `);
+
+        const deleteTranscripts = this.db.prepare('DELETE FROM transcripts WHERE meeting_id = ?');
+        const deleteInteractions = this.db.prepare('DELETE FROM ai_interactions WHERE meeting_id = ?');
 
         const insertTranscript = this.db.prepare(`
             INSERT INTO transcripts (meeting_id, speaker, content, timestamp_ms)
@@ -990,7 +1009,7 @@ export class DatabaseManager {
 
         const runTransaction = this.db.transaction(() => {
             // 1. Insert Meeting
-            insertMeeting.run(
+            upsertMeeting.run(
                 meeting.id,
                 meeting.title,
                 startTimeMs,
@@ -1002,8 +1021,11 @@ export class DatabaseManager {
                 meeting.isProcessed ? 1 : 0
             );
 
-            // 2. Insert Transcript
+            // 2. Rewrite transcript rows only when the caller supplied a snapshot.
+            // Do not delete chunks/RAG rows here: they belong to the meeting id and
+            // must survive placeholder -> final summary saves.
             if (meeting.transcript) {
+                deleteTranscripts.run(meeting.id);
                 for (const segment of meeting.transcript) {
                     insertTranscript.run(
                         meeting.id,
@@ -1014,11 +1036,17 @@ export class DatabaseManager {
                 }
             }
 
-            // 3. Insert Interactions
+            // 3. Rewrite interaction rows only when the caller supplied usage.
             if (meeting.usage) {
+                deleteInteractions.run(meeting.id);
                 for (const usage of meeting.usage) {
                     let metadata = null;
-                    if (usage.items) {
+                    if (usage.metadata) {
+                        metadata = JSON.stringify({
+                            ...usage.metadata,
+                            items: usage.items
+                        });
+                    } else if (usage.items) {
                         metadata = JSON.stringify(usage.items);
                     } else if (usage.type === 'followup_questions' && usage.answer) {
                         // Sometimes answer is the array for questions, or we store it in metadata
@@ -1174,6 +1202,7 @@ export class DatabaseManager {
 
         const usage = usageRows.map(row => {
             let items: string[] | undefined;
+            let metadata: any | undefined;
             let answer = row.ai_response;
 
             if (row.metadata_json) {
@@ -1183,6 +1212,14 @@ export class DatabaseManager {
                         items = parsed;
                         // Special case: for 'followup_questions', earlier we treated 'answer' as the array in memory
                         // UI expects appropriate field. If type is 'followup_questions', usually answer is null and items has the questions.
+                    } else if (parsed && typeof parsed === 'object') {
+                        metadata = parsed;
+                        if (Array.isArray(parsed.items)) {
+                            items = parsed.items;
+                        }
+                        if (Array.isArray(parsed.diagnostics) && !items) {
+                            items = parsed.diagnostics;
+                        }
                     }
                 } catch (e) { console.warn('[DatabaseManager] Failed to parse metadata_json for interaction:', row?.id, e); }
             }
@@ -1192,7 +1229,8 @@ export class DatabaseManager {
                 timestamp: row.timestamp,
                 question: row.user_query,
                 answer: answer,
-                items: items
+                items: items,
+                metadata
             };
         });
 

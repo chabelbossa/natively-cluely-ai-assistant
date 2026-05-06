@@ -24,7 +24,13 @@ export type ModeTemplateType =
     | 'bug-triage'
     | 'feature-planning'
     | 'architecture-review'
-    | 'coding-assessment';
+    | 'coding-assessment'
+    | 'product-owner'
+    | 'tech-lead'
+    | 'backend-api'
+    | 'frontend-handoff'
+    | 'client-discovery'
+    | 'sprint-planning';
 
 export interface Mode {
     id: string;
@@ -67,6 +73,12 @@ export const MODE_TEMPLATES: Array<{
     { type: 'feature-planning',     label: 'Feature Planning',     description: 'Define scope, acceptance criteria, dependencies, and risks.' },
     { type: 'architecture-review',  label: 'Architecture Review',  description: 'Surface tradeoffs, failure modes, scalability, and security.' },
     { type: 'coding-assessment',    label: 'Coding Assessment',    description: 'Progressive coding hints, complexity analysis, edge cases.' },
+    { type: 'product-owner',        label: 'Product Owner',         description: 'User needs, business value, MVP scope, user stories, AC.' },
+    { type: 'tech-lead',            label: 'Tech Lead',             description: 'Architecture, technical debt, tradeoffs, team capacity.' },
+    { type: 'backend-api',          label: 'Backend API',           description: 'API contracts, auth, pagination, error handling, DB schema.' },
+    { type: 'frontend-handoff',     label: 'Frontend Handoff',      description: 'UI states, responsive, validations, API contract needs.' },
+    { type: 'client-discovery',     label: 'Client Discovery',      description: 'Business objectives, constraints, budget, decision-makers.' },
+    { type: 'sprint-planning',      label: 'Sprint Planning',       description: 'Priorities, capacity, dependencies, ticket breakdown.' },
 ];
 
 // Default note sections seeded when a mode is created from a template
@@ -146,6 +158,48 @@ export const TEMPLATE_NOTE_SECTIONS: Record<ModeTemplateType, Array<{ title: str
         { title: 'Complexity',      description: 'Time and space complexity analysis.' },
         { title: 'Alternative solutions', description: 'Other valid approaches and their tradeoffs.' },
     ],
+    'product-owner': [
+        { title: 'User need',         description: 'The core user problem this feature solves.' },
+        { title: 'Business value',    description: 'Expected business impact and success metrics.' },
+        { title: 'MVP scope',         description: 'Minimum viable version — what ships first.' },
+        { title: 'User stories',      description: 'Key user stories discussed and their priority.' },
+        { title: 'Acceptance criteria', description: 'How each story will be verified as complete.' },
+    ],
+    'tech-lead': [
+        { title: 'Architecture decisions', description: 'Technical decisions made and their rationale.' },
+        { title: 'Technical debt',    description: 'Debt items identified and whether they block the current work.' },
+        { title: 'Tradeoffs',         description: 'Alternatives considered and why the chosen approach wins.' },
+        { title: 'Team capacity',     description: 'Who is doing what and any resourcing gaps.' },
+        { title: 'Risks & mitigation', description: 'Technical risks and how they will be addressed.' },
+    ],
+    'backend-api': [
+        { title: 'API contract',      description: 'Endpoints, request/response shapes, status codes.' },
+        { title: 'Authentication',    description: 'Auth mechanism, token handling, permissions.' },
+        { title: 'Data model',        description: 'Schema changes, relationships, migrations.' },
+        { title: 'Error handling',    description: 'Error responses, retry logic, idempotency.' },
+        { title: 'Performance',       description: 'Pagination, rate limiting, caching decisions.' },
+    ],
+    'frontend-handoff': [
+        { title: 'UI states',         description: 'Loading, empty, error, and edge case states defined.' },
+        { title: 'Responsive',        description: 'Breakpoints and behavior across screen sizes.' },
+        { title: 'Validations',       description: 'Client-side validation rules and error messages.' },
+        { title: 'API needs',         description: 'What data the frontend needs and in what format.' },
+        { title: 'Accessibility',     description: 'A11y considerations and requirements.' },
+    ],
+    'client-discovery': [
+        { title: 'Business objective', description: 'What the client wants to achieve.' },
+        { title: 'Constraints',        description: 'Budget, timeline, technical, or organizational limits.' },
+        { title: 'Decision-makers',    description: 'Who has authority and what matters to them.' },
+        { title: 'Success metrics',    description: 'How the client will measure success.' },
+        { title: 'Next steps',         description: 'What needs to happen before the next conversation.' },
+    ],
+    'sprint-planning': [
+        { title: 'Sprint goal',        description: 'The primary objective for this sprint.' },
+        { title: 'Prioritized items',  description: 'Tickets ranked by priority and estimated effort.' },
+        { title: 'Dependencies',       description: 'Cross-team or external dependencies.' },
+        { title: 'Risks',              description: 'Anything that could derail the sprint.' },
+        { title: 'Capacity',           description: 'Team availability and any planned time off.' },
+    ],
 };
 
 const TEMPLATE_SYSTEM_PROMPTS: Record<ModeTemplateType, string> = {
@@ -162,6 +216,12 @@ const TEMPLATE_SYSTEM_PROMPTS: Record<ModeTemplateType, string> = {
     'feature-planning': MODE_FEATURE_PLANNING_PROMPT,
     'architecture-review': MODE_ARCHITECTURE_REVIEW_PROMPT,
     'coding-assessment': MODE_CODING_ASSESSMENT_PROMPT,
+    'product-owner': MODE_FEATURE_PLANNING_PROMPT,
+    'tech-lead': MODE_ARCHITECTURE_REVIEW_PROMPT,
+    'backend-api': MODE_ARCHITECTURE_REVIEW_PROMPT,
+    'frontend-handoff': MODE_FEATURE_PLANNING_PROMPT,
+    'client-discovery': MODE_SALES_PROMPT,
+    'sprint-planning': MODE_TEAM_MEET_PROMPT,
 };
 
 function rowToMode(row: any): Mode {

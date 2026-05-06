@@ -17,6 +17,7 @@ export class ModelSelectorWindowHelper {
     private window: BrowserWindow | null = null
     private contentProtection: boolean = false
     private opacityTimeout: NodeJS.Timeout | null = null;
+    private lastAlwaysOnTopLevel: "floating" | "pop-up-menu" | null = null;
 
     // Store offsets relative to main window if needed, but absolute positioning is simpler for dropdowns
     private lastBlurTime: number = 0
@@ -78,11 +79,11 @@ export class ModelSelectorWindowHelper {
             // appears above the always-on-top overlay. "pop-up-menu" is higher than
             // "floating" and is the standard level for transient UI like dropdowns.
             const desiredLevel = isOverlay ? "pop-up-menu" : "floating";
-            const currentLevel = this.window.getAlwaysOnTopLevel();
-            if (this.window.isAlwaysOnTop() && currentLevel === desiredLevel) {
+            if (this.window.isAlwaysOnTop() && this.lastAlwaysOnTopLevel === desiredLevel) {
                 // No change needed — avoids unnecessary NSApp activation.
             } else {
                 this.window.setAlwaysOnTop(true, desiredLevel);
+                this.lastAlwaysOnTopLevel = desiredLevel;
             }
 
             this.window.setHiddenInMissionControl(true);

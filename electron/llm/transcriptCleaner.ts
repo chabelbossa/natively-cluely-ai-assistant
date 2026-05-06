@@ -28,7 +28,7 @@ const ACKNOWLEDGEMENTS = new Set([
  * Removes fillers, acknowledgements, and cleans up formatting
  */
 function cleanText(text: string): string {
-    let result = text.toLowerCase().trim();
+    let result = text.trim();
 
     // Remove repeated words (yeah yeah, okay okay)
     result = result.replace(/\b(\w+)(\s+\1)+\b/gi, '$1');
@@ -36,7 +36,7 @@ function cleanText(text: string): string {
     // Split into words and filter
     const words = result.split(/\s+/);
     const cleaned = words.filter(word => {
-        const normalized = word.replace(/[.,!?;:]/g, '');
+        const normalized = word.toLowerCase().replace(/[.,!?;:]/g, '');
         return !FILLER_WORDS.has(normalized) &&
             !ACKNOWLEDGEMENTS.has(normalized);
     });
@@ -137,8 +137,8 @@ export function sparsifyTranscript(
  */
 export function formatTranscriptForLLM(turns: TranscriptTurn[]): string {
     return turns.map(turn => {
-        const label = turn.role === 'interviewer' ? 'INTERVIEWER' :
-            turn.role === 'user' ? 'ME' : 'ASSISTANT';
+        const label = turn.role === 'interviewer' ? 'INTERLOCUTOR' :
+            turn.role === 'user' ? 'ME (LOCAL MIC)' : 'ASSISTANT';
         return `[${label}]: ${turn.text}`;
     }).join('\n');
 }

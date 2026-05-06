@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
-import { ArrowLeft, Search, Mail, Link, ChevronDown, Play, Copy, Check, MoreHorizontal, Settings, ArrowRight } from 'lucide-react';
+import { ArrowLeft, Search, Mail, Link, ChevronDown, Play, Copy, Check, MoreHorizontal, Settings, ArrowRight, Cpu } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import MeetingChatOverlay from './MeetingChatOverlay';
 import EditableTextBlock from './EditableTextBlock';
@@ -62,6 +62,13 @@ interface Meeting {
         question?: string;
         answer?: string;
         items?: string[];
+        metadata?: {
+            model?: string;
+            provider?: string;
+            action?: string;
+            systemContext?: string;
+            diagnostics?: string[];
+        };
     }>;
 }
 
@@ -118,7 +125,18 @@ ${customSections ? `\n\n${customSections}` : ''}
         } else if (activeTab === 'transcript' && meeting.transcript) {
             textToCopy = meeting.transcript.map(t => `[${formatTime(t.timestamp)}] ${formatSpeakerLabel(t.speaker)}: ${t.text}`).join('\n');
         } else if (activeTab === 'usage' && meeting.usage) {
-            textToCopy = meeting.usage.map(u => `Q: ${u.question || ''}\nA: ${u.answer || ''}`).join('\n\n');
+            textToCopy = meeting.usage.map(u => {
+                const meta = [
+                    u.metadata?.provider ? `Provider: ${u.metadata.provider}` : '',
+                    u.metadata?.model ? `Model: ${u.metadata.model}` : '',
+                    u.metadata?.action ? `Action: ${u.metadata.action}` : '',
+                ].filter(Boolean).join('\n');
+                const systemContext = u.metadata?.systemContext
+                    ? `\nSystem/context received:\n${u.metadata.systemContext}`
+                    : '';
+                const answer = u.answer || u.items?.join('\n') || '';
+                return `${meta ? `${meta}\n` : ''}Q: ${u.question || ''}\nA: ${answer}${systemContext}`;
+            }).join('\n\n---\n\n');
         }
 
         if (!textToCopy) return;
@@ -450,9 +468,48 @@ ${customSections ? `\n\n${customSections}` : ''}
 
                         {activeTab === 'usage' && (
                             <motion.section initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-8 pb-10">
-                                {meeting.usage?.map((interaction, i) => (
+                                {meeting.usage?.map((interaction, i) => {
+                                    const answerText = interaction.answer || interaction.items?.join('\n') || '';
+                                    return (
                                     <div key={i} className="space-y-4">
-                                        {/* User Question */}
+                                        <div className="flex items-center justify-between gap-3">
+                                            <div className="flex flex-wrap items-center gap-2 text-[11px] text-text-tertiary">
+                                                <span className="font-medium">{formatTime(interaction.timestamp)}</span>
+                                                <span className="h-1 w-1 rounded-full bg-text-tertiary" />
+                                                <span className="uppercase tracking-wide">{interaction.type.replace(/_/g, ' ')}</span>
+                                            </div>
+                                            {(interaction.metadata?.model || interaction.metadata?.provider) && (
+                                                <div className="flex items-center gap-1.5 rounded-full border border-border-subtle bg-bg-input px-2 py-1 text-[11px] text-text-secondary">
+                                                    <Cpu size={12} />
+                                                    <span className="text-text-primary">{interaction.metadata?.model || 'Unknown model'}</span>
+                                                    {interaction.metadata?.provider && (
+                                                        <span className="text-text-tertiary">via {interaction.metadata.provider}</span>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {interaction.metadata?.systemContext && (
+                                            <details className="group rounded-xl border border-border-subtle bg-bg-input text-text-secondary">
+                                                <summary className="cursor-default select-none px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-text-tertiary hover:text-text-primary">
+                                                    System/context received
+                                                </summary>
+                                                <pre className="max-h-56 overflow-auto whitespace-pre-wrap border-t border-border-subtle px-3 py-2 text-[11px] leading-relaxed text-text-secondary custom-scrollbar">
+                                                    {interaction.metadata.systemContext}
+                                                </pre>
+                                            </details>
+                                        )}
+
+                                        {interaction.metadata?.diagnostics?.length ? (
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {interaction.metadata.diagnostics.slice(0, 4).map((item, index) => (
+                                                    <span key={index} className="rounded-full border border-border-subtle bg-bg-input px-2 py-1 text-[10px] text-text-tertiary">
+                                                        {item}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        ) : null}
+
                                         {interaction.question && (
                                             <div className="flex justify-end">
                                                 <div className="bg-accent-primary text-white px-5 py-2.5 rounded-2xl rounded-tr-sm max-w-[80%] text-[15px] leading-relaxed shadow-sm">
@@ -461,14 +518,12 @@ ${customSections ? `\n\n${customSections}` : ''}
                                             </div>
                                         )}
 
-                                        {/* AI Answer */}
-                                        {interaction.answer && (
+                                        {answerText && (
                                             <div className="flex items-start gap-4">
                                                 <div className="mt-1 w-6 h-6 rounded-full bg-bg-input flex items-center justify-center border border-border-subtle shrink-0">
                                                     <img src={NativelyLogo} alt="AI" className="w-4 h-4 opacity-50 object-contain force-black-icon" />
                                                 </div>
-                                                <div>
-                                                    <div className="text-[11px] text-text-tertiary mb-1.5 font-medium">{formatTime(interaction.timestamp)}</div>
+                                                <div className="min-w-0 flex-1">
                                                     <div className="text-text-secondary text-[15px] leading-relaxed max-w-none">
                                                         <ReactMarkdown
                                                             remarkPlugins={[remarkGfm]}
@@ -525,14 +580,14 @@ ${customSections ? `\n\n${customSections}` : ''}
                                                                 }
                                                             }}
                                                         >
-                                                            {cleanMarkdown(interaction.answer || '')}
+                                                            {cleanMarkdown(answerText)}
                                                         </ReactMarkdown>
                                                     </div>
                                                 </div>
                                             </div>
                                         )}
                                     </div>
-                                ))}
+                                )})}
                                 {!meeting.usage?.length && <p className="text-text-tertiary">No usage history.</p>}
                             </motion.section>
                         )}

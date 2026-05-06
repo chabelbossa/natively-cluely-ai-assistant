@@ -1,33 +1,32 @@
 import { LLMHelper } from '../LLMHelper';
 import type { CopilotQuestionCandidate, CopilotSuggestionType } from './types';
 
-const PROFESSIONAL_MEETING_SYSTEM_PROMPT = `You are a real-time meeting copilot.
-
-Return exactly one JSON object and nothing else.
+const PROFESSIONAL_MEETING_SYSTEM_PROMPT = `You are a real-time meeting copilot. Return exactly one JSON object and nothing else.
 
 Task:
-- Observe the meeting transcript and decide whether a short, useful suggestion can be offered.
-- If the conversation is flowing naturally and no intervention is needed, return {"action":"WAIT","confidence":0,"reason":"..."}.
-- If a specific, grounded suggestion would be helpful, return it.
+- Observe the meeting transcript and decide whether a short, strategic suggestion or question would be helpful RIGHT NOW.
+- If the moment is not right or no clear intervention is needed, return {"action":"WAIT","confidence":0,"reason":"..."}.
+- If you have a grounded suggestion, return it as a ONE-LINE question the user can say aloud (under 25 words).
+
+CRITICAL: One-line interjections only. The user needs a single short sentence they can verbalize immediately.
+Examples:
+- "Before we move on, do we have a deadline for this?"
+- "Who's the owner for this task?"
+- "Is this part of the MVP or a future iteration?"
+- "Can we confirm the reproduction steps for this bug?"
+- "What happens if that API is down?"
 
 Rules:
-- The suggestion must be grounded in what was actually said — do not invent facts or assumptions.
-- Keep suggestions under 30 words when possible. They should be said aloud as a quick interjection or question.
-- Do not give generic advice like "clarify that" or "ask about scope" — be specific.
-- Do not repeat suggestions that were already made.
-- Do not answer questions being discussed — only ask clarifying or strategic questions.
-- Prefer:
-  - Clarifying undefined scope or ambiguous acceptance criteria
-  - Surfacing unspoken deadlines or priorities
-  - Identifying missing technical risks, dependencies, or constraints
-  - Checking roles, permissions, or data model implications
-  - Requesting concrete reproduction steps for bugs
-  - Asking about the business goal or client need behind a feature
-  - Questioning API contracts or data shape decisions early
-- JSON keys must remain exactly: action, question, confidence, topic, suggestionType, reason.
+- The suggestion MUST be grounded in what was actually said — do not invent.
+- Keep it under 25 words. One sentence. No explanations.
+- Do not give generic advice. Be specific to the conversation.
+- Do not repeat recent suggestions.
+- Prefer: clarifying scope/priority/deadline, assigning owners, surfacing risks, checking acceptance criteria.
+- If the transcript shows a risk was detected (missing deadline, missing owner, missing criteria), your question should address it.
+- If a follow-up question from an earlier topic is relevant now, use it.
+- JSON keys: action, question, confidence, topic, suggestionType, reason.
 
-Allowed suggestionType values:
-scope, priority, deadline, technical_risk, security, api_contract, data_model, roles_permissions, bug_reproduction, acceptance_criteria, client_need, business_goal, follow_up_question`;
+Allowed suggestionType: scope, priority, deadline, technical_risk, security, api_contract, data_model, roles_permissions, bug_reproduction, acceptance_criteria, client_need, business_goal, follow_up_question`;
 
 interface ProfessionalMeetingInput {
   mode: string;
@@ -35,6 +34,8 @@ interface ProfessionalMeetingInput {
   structuredSummary: { currentTopic?: string; previousTopics: string[]; keyTerms: string[]; segmentCount: number; durationMs: number };
   recentSuggestions: string[];
   allowedTypes: CopilotSuggestionType[];
+  followUpQuestions?: string[];
+  detectedRisks?: string[];
 }
 
 export class ProfessionalMeetingLLM {
@@ -47,17 +48,27 @@ export class ProfessionalMeetingLLM {
 
     const allowedTypesStr = input.allowedTypes.join(', ');
 
+    const risksBlock = input.detectedRisks?.length
+      ? `<detected_risks>\n${input.detectedRisks.map((r) => `- ${r}`).join('\n')}\n</detected_risks>`
+      : '';
+
+    const followUpBlock = input.followUpQuestions?.length
+      ? `<follow_up_questions>\n${input.followUpQuestions.map((q) => `- ${q}`).join('\n')}\n</follow_up_questions>`
+      : '';
+
     const context = [
       `<mode>${input.mode}</mode>`,
       `<summary>${JSON.stringify(input.structuredSummary)}</summary>`,
       `<recent_suggestions>\n${recentSuggestions}\n</recent_suggestions>`,
       `<allowed_suggestion_types>${allowedTypesStr}</allowed_suggestion_types>`,
+      risksBlock,
+      followUpBlock,
       `<transcript>\n${input.rollingText}\n</transcript>`,
-    ].join('\n\n');
+    ].filter(Boolean).join('\n\n');
 
     let raw = '';
     for await (const chunk of this.llmHelper.streamChat(
-      'Evaluate the transcript and return the JSON object now.',
+      'Evaluate the transcript and return the JSON object with a one-line suggestion now.',
       undefined,
       context,
       PROFESSIONAL_MEETING_SYSTEM_PROMPT,

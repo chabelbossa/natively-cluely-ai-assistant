@@ -15,6 +15,7 @@ import { useShortcuts } from '../hooks/useShortcuts';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
 import { isMac } from '../utils/platformUtils';
 import WindowControls from './WindowControls';
+import type { MeetingBriefData } from '../types/electron';
 
 interface Meeting {
     id: string;
@@ -81,6 +82,29 @@ const formatTime = (dateStr: string) => {
     return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
 };
 
+const emptyMeetingBrief: MeetingBriefData = {
+    objective: '',
+    myRole: '',
+    participants: '',
+    projectContext: '',
+    expectedDecisions: '',
+    mustAsk: '',
+    sensitiveTopics: '',
+    successCriteria: '',
+};
+
+const hasMeetingBriefContent = (brief: MeetingBriefData) =>
+    Boolean(
+        brief.objective?.trim() ||
+        brief.myRole?.trim() ||
+        brief.participants?.trim() ||
+        brief.projectContext?.trim() ||
+        brief.expectedDecisions?.trim() ||
+        brief.mustAsk?.trim() ||
+        brief.sensitiveTopics?.trim() ||
+        brief.successCriteria?.trim(),
+    );
+
 const Launcher: React.FC<LauncherProps> = ({
     onStartMeeting,
     onOpenSettings,
@@ -111,6 +135,9 @@ const Launcher: React.FC<LauncherProps> = ({
     const [submittedGlobalQuery, setSubmittedGlobalQuery] = useState('');
 
     const [showModesOnboarding, setShowModesOnboarding] = useState(false);
+    const [isBriefOpen, setIsBriefOpen] = useState(false);
+    const [meetingBrief, setMeetingBrief] = useState<MeetingBriefData>(emptyMeetingBrief);
+    const [briefSavedAt, setBriefSavedAt] = useState<number | null>(null);
 
     const fetchMeetings = () => {
         if (window.electronAPI && window.electronAPI.getRecentMeetings) {
@@ -171,6 +198,16 @@ const Launcher: React.FC<LauncherProps> = ({
             window.electronAPI.getUndetectable().then((undetectable) => {
                 if (mounted) setIsDetectable(!undetectable);
             });
+        }
+
+        if (window.electronAPI?.getMeetingBrief) {
+            window.electronAPI.getMeetingBrief()
+                .then((brief) => {
+                    if (!mounted || !brief) return;
+                    setMeetingBrief({ ...emptyMeetingBrief, ...brief });
+                    if (hasMeetingBriefContent(brief)) setIsBriefOpen(true);
+                })
+                .catch(err => console.error("Failed to load meeting brief:", err));
         }
 
         // Listen for undetectable changes
@@ -253,6 +290,32 @@ const Launcher: React.FC<LauncherProps> = ({
     const handlePrepare = (event: any) => {
         setPreparedEvent(event);
         setIsPrepared(true);
+        setMeetingBrief((prev) => ({
+            ...prev,
+            title: event?.title || prev.title,
+            participants: prev.participants || event?.participants || '',
+        }));
+        setIsBriefOpen(true);
+    };
+
+    const updateBriefField = (field: keyof MeetingBriefData, value: string) => {
+        setMeetingBrief((prev) => ({ ...prev, [field]: value }));
+    };
+
+    const saveBriefNow = async (override?: MeetingBriefData) => {
+        const briefToSave = {
+            ...meetingBrief,
+            ...(override || {}),
+            updatedAt: Date.now(),
+        };
+        setMeetingBrief(briefToSave);
+        if (!window.electronAPI?.saveMeetingBrief) return briefToSave;
+        const result = await window.electronAPI.saveMeetingBrief(briefToSave);
+        if (result?.success) {
+            setBriefSavedAt(Date.now());
+            if (result.brief) setMeetingBrief({ ...emptyMeetingBrief, ...result.brief });
+        }
+        return result?.brief || briefToSave;
     };
 
     const handleStartPreparedMeeting = async (allowMicOnly = false) => {
@@ -268,10 +331,12 @@ const Launcher: React.FC<LauncherProps> = ({
                 outputDeviceId = 'sck';
             }
 
+            const brief = await saveBriefNow({ title: preparedEvent.title });
             const result = await window.electronAPI.startMeeting({
                 title: preparedEvent.title,
                 calendarEventId: preparedEvent.id,
                 source: 'calendar',
+                meetingBrief: brief,
                 audio: { inputDeviceId, outputDeviceId, allowMicOnly }
             });
             if (result?.success) {
@@ -685,7 +750,7 @@ const Launcher: React.FC<LauncherProps> = ({
                                                         animate={{ opacity: 1, scale: 1, y: 0 }}
                                                         exit={{ opacity: 0, scale: 0.9, y: 10 }}
                                                         transition={{ type: "spring", stiffness: 400, damping: 25 }}
-                                                        className={`flex items-center gap-2 px-4 py-2 rounded-full backdrop-blur-xl ${isLight ? 'bg-bg-elevated border border-border-muted shadow-[0_4px_16px_rgba(0,0,0,0.1)]' : 'bg-bg-elevated/80 border border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.3)]'}`}
+                                                        className={`flex items-center gap-2 px-4 py-2 rounded-full backdrop-blur-xl ${isLight ? 'bg-bg-elevated border border-border-muted shadow-[0_4px_16px_rgba(0,0,0,0.1)]' : 'bg-bg-elevated border border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.3)]'}`}
                                                     >
                                                         {ollamaPullStatus === 'downloading' ? (
                                                             <DownloadCloud size={14} className="text-blue-400 animate-pulse shrink-0" />
@@ -714,7 +779,7 @@ const Launcher: React.FC<LauncherProps> = ({
 
                                         {/* Unified CTA pill — same jelly shape, morphs between idle and active-meeting state */}
                                         <motion.button
-                                            onClick={() => {
+                                            onClick={async () => {
                                                 if (isStartingMeeting) return;
                                                 if (isMeetingActive) {
                                                     // inactive=true: overlay appears on top but doesn't activate
@@ -725,6 +790,7 @@ const Launcher: React.FC<LauncherProps> = ({
                                                     window.electronAPI?.setWindowMode?.('overlay', true);
                                                     analytics.trackCommandExecuted('resume_meeting_from_launcher');
                                                 } else {
+                                                    await saveBriefNow();
                                                     onStartMeeting();
                                                     analytics.trackCommandExecuted('start_natively_cta');
                                                 }
@@ -796,6 +862,132 @@ const Launcher: React.FC<LauncherProps> = ({
                                         </motion.button>
                                     </div>
 
+                                    <div className={`rounded-xl border overflow-hidden ${isLight ? 'bg-bg-elevated border-border-subtle shadow-sm' : 'bg-bg-secondary border-white/10'}`}>
+                                        <button
+                                            onClick={() => setIsBriefOpen((prev) => !prev)}
+                                            className="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-bg-item-surface transition-colors"
+                                        >
+                                            <div className="min-w-0">
+                                                <div className="flex items-center gap-2">
+                                                    <Zap size={14} className="text-emerald-400" />
+                                                    <span className="text-sm font-semibold text-text-primary">Prepare meeting</span>
+                                                    {hasMeetingBriefContent(meetingBrief) && (
+                                                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                                                            active
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <p className="mt-1 text-xs text-text-tertiary truncate">
+                                                    Objective, project context, must-ask questions, sensitive topics and success criteria.
+                                                </p>
+                                            </div>
+                                            <ChevronDown
+                                                size={16}
+                                                className={`text-text-secondary transition-transform ${isBriefOpen ? 'rotate-180' : ''}`}
+                                            />
+                                        </button>
+
+                                        <AnimatePresence initial={false}>
+                                            {isBriefOpen && (
+                                                <motion.div
+                                                    initial={{ height: 0, opacity: 0 }}
+                                                    animate={{ height: 'auto', opacity: 1 }}
+                                                    exit={{ height: 0, opacity: 0 }}
+                                                    transition={{ duration: 0.18, ease: 'easeOut' }}
+                                                    className="overflow-hidden"
+                                                >
+                                                    <div className="px-4 pb-4 pt-1 border-t border-border-subtle">
+                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                            <BriefInput
+                                                                label="Meeting objective"
+                                                                value={meetingBrief.objective || ''}
+                                                                onChange={(value) => updateBriefField('objective', value)}
+                                                                placeholder="Clarify requirements, validate priorities, prepare next steps..."
+                                                                isLight={isLight}
+                                                            />
+                                                            <BriefInput
+                                                                label="My role"
+                                                                value={meetingBrief.myRole || ''}
+                                                                onChange={(value) => updateBriefField('myRole', value)}
+                                                                placeholder="Backend developer, project lead, candidate..."
+                                                                isLight={isLight}
+                                                            />
+                                                            <BriefInput
+                                                                label="Expected participants"
+                                                                value={meetingBrief.participants || ''}
+                                                                onChange={(value) => updateBriefField('participants', value)}
+                                                                placeholder="Manager, client, architect, recruiter..."
+                                                                isLight={isLight}
+                                                            />
+                                                            <BriefInput
+                                                                label="Expected decisions"
+                                                                value={meetingBrief.expectedDecisions || ''}
+                                                                onChange={(value) => updateBriefField('expectedDecisions', value)}
+                                                                placeholder="Scope, deadline, MVP, API contract..."
+                                                                isLight={isLight}
+                                                            />
+                                                            <BriefInput
+                                                                label="Project context"
+                                                                value={meetingBrief.projectContext || ''}
+                                                                onChange={(value) => updateBriefField('projectContext', value)}
+                                                                placeholder="Project, domain, current constraints..."
+                                                                multiline
+                                                                isLight={isLight}
+                                                            />
+                                                            <BriefInput
+                                                                label="Must ask"
+                                                                value={meetingBrief.mustAsk || ''}
+                                                                onChange={(value) => updateBriefField('mustAsk', value)}
+                                                                placeholder="Questions I must not forget..."
+                                                                multiline
+                                                                isLight={isLight}
+                                                            />
+                                                            <BriefInput
+                                                                label="Sensitive topics"
+                                                                value={meetingBrief.sensitiveTopics || ''}
+                                                                onChange={(value) => updateBriefField('sensitiveTopics', value)}
+                                                                placeholder="Risks, ambiguous zones, traps to avoid..."
+                                                                multiline
+                                                                isLight={isLight}
+                                                            />
+                                                            <BriefInput
+                                                                label="Success criteria"
+                                                                value={meetingBrief.successCriteria || ''}
+                                                                onChange={(value) => updateBriefField('successCriteria', value)}
+                                                                placeholder="What must be clear by the end..."
+                                                                multiline
+                                                                isLight={isLight}
+                                                            />
+                                                        </div>
+                                                        <div className="mt-3 flex items-center justify-between gap-3">
+                                                            <div className="text-[11px] text-text-tertiary">
+                                                                {briefSavedAt ? 'Saved for the next meeting.' : 'Saved automatically when you start, or save now.'}
+                                                            </div>
+                                                            <div className="flex items-center gap-2">
+                                                                <button
+                                                                    onClick={async () => {
+                                                                        setMeetingBrief(emptyMeetingBrief);
+                                                                        await window.electronAPI?.clearMeetingBrief?.();
+                                                                        setBriefSavedAt(null);
+                                                                    }}
+                                                                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${isLight ? 'text-text-secondary hover:bg-bg-item-surface' : 'text-text-secondary hover:bg-white/10'}`}
+                                                                >
+                                                                    Clear
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => saveBriefNow()}
+                                                                    className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 text-white hover:bg-emerald-400 transition-colors active:scale-95"
+                                                                >
+                                                                    Save brief
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </motion.div>
+                                            )}
+                                        </AnimatePresence>
+                                    </div>
+
                                     <AnimatePresence>
                                         {activeStartError && (
                                             <motion.div
@@ -829,11 +1021,12 @@ const Launcher: React.FC<LauncherProps> = ({
                                                                 Open Settings
                                                             </button>
                                                             <button
-                                                                onClick={() => {
+                                                                onClick={async () => {
                                                                     clearStartError();
                                                                     if (isPrepared && preparedEvent) {
                                                                         handleStartPreparedMeeting(true);
                                                                     } else {
+                                                                        await saveBriefNow();
                                                                         onStartMeeting({ allowMicOnly: true });
                                                                     }
                                                                 }}
@@ -925,7 +1118,7 @@ const Launcher: React.FC<LauncherProps> = ({
                                                     </div>
 
                                                     {/* Actions */}
-                                                    <div className="p-4 bg-bg-elevated/50 border-t border-border-subtle flex items-center gap-3">
+                                                    <div className="p-4 bg-bg-elevated border-t border-border-subtle flex items-center gap-3">
                                                         <button
                                                             onClick={() => handlePrepare(nextMeeting)}
                                                             className={`flex-1 border px-4 py-2 rounded-lg text-xs font-medium transition-all flex items-center justify-center gap-2 ${isLight ? 'bg-bg-item-surface hover:bg-bg-item-active border-border-muted text-text-primary' : 'bg-white/10 hover:bg-white/20 border-white/10 text-white'}`}
@@ -934,7 +1127,10 @@ const Launcher: React.FC<LauncherProps> = ({
                                                             Prepare
                                                         </button>
                                                         <button
-                                                            onClick={() => onStartMeeting()}
+                                                            onClick={async () => {
+                                                                await saveBriefNow({ title: nextMeeting.title });
+                                                                onStartMeeting();
+                                                            }}
                                                             className={`px-4 py-2 rounded-lg text-xs font-medium text-text-secondary hover:text-text-primary transition-all ${isLight ? 'hover:bg-bg-item-surface' : 'hover:bg-white/5'}`}
                                                         >
                                                             Start now
@@ -1131,7 +1327,7 @@ const Launcher: React.FC<LauncherProps> = ({
                         animate={{ x: 0, opacity: 1, scale: 1 }}
                         exit={{ x: 300, opacity: 0, scale: 0.95 }}
                         transition={{ type: "spring", stiffness: 350, damping: 30, mass: 1 }}
-                        className={`fixed bottom-10 right-10 z-[2000] flex items-center gap-4 pl-4 pr-6 py-3.5 rounded-[18px] backdrop-blur-xl saturate-[180%] ring-1 ring-black/10 ${isLight ? 'bg-bg-elevated/90 border border-border-muted shadow-[0_8px_32px_rgba(0,0,0,0.15),inset_0_1px_0_rgba(255,255,255,0.9)]' : 'bg-[#2A2A2E]/40 border border-white/10 shadow-[0_40px_80px_-20px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-1px_0_rgba(255,255,255,0.05)]'}`}
+                        className={`fixed bottom-10 right-10 z-[2000] flex items-center gap-4 pl-4 pr-6 py-3.5 rounded-[18px] backdrop-blur-xl saturate-[180%] ring-1 ring-black/10 ${isLight ? 'bg-bg-elevated border border-border-muted shadow-[0_8px_32px_rgba(0,0,0,0.15),inset_0_1px_0_rgba(255,255,255,0.9)]' : 'bg-[#2A2A2E]/40 border border-white/10 shadow-[0_40px_80px_-20px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.3),inset_0_-1px_0_rgba(255,255,255,0.05)]'}`}
                     >
                         {/* Liquid Icon Orb */}
                         <div className="relative flex items-center justify-center w-9 h-9 rounded-full bg-gradient-to-b from-blue-400/20 to-blue-600/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] border border-white/5">
@@ -1165,3 +1361,48 @@ const Launcher: React.FC<LauncherProps> = ({
 };
 
 export default Launcher;
+
+function BriefInput({
+    label,
+    value,
+    onChange,
+    placeholder,
+    multiline = false,
+    isLight,
+}: {
+    label: string;
+    value: string;
+    onChange: (value: string) => void;
+    placeholder: string;
+    multiline?: boolean;
+    isLight: boolean;
+}) {
+    const baseClass = `w-full rounded-lg border px-3 py-2 text-xs outline-none transition-colors focus:ring-2 focus:ring-emerald-400/10 ${
+        isLight
+            ? "border-border-muted bg-bg-input text-text-primary placeholder:text-text-tertiary focus:border-emerald-500/60"
+            : "border-white/15 bg-bg-input text-text-primary placeholder:text-text-secondary focus:border-emerald-400/60"
+    }`;
+    return (
+        <label className="block">
+            <span className="block mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">
+                {label}
+            </span>
+            {multiline ? (
+                <textarea
+                    value={value}
+                    onChange={(event) => onChange(event.target.value)}
+                    placeholder={placeholder}
+                    rows={3}
+                    className={`${baseClass} resize-none leading-relaxed`}
+                />
+            ) : (
+                <input
+                    value={value}
+                    onChange={(event) => onChange(event.target.value)}
+                    placeholder={placeholder}
+                    className={baseClass}
+                />
+            )}
+        </label>
+    );
+}

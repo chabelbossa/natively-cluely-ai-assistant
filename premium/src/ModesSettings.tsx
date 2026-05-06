@@ -23,6 +23,12 @@ import {
   Blocks,
   GitBranch,
   Terminal,
+  Target,
+  Shield,
+  Server,
+  Monitor,
+  Users,
+  Calendar,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -38,7 +44,13 @@ type TemplateType =
   | 'bug-triage'
   | 'feature-planning'
   | 'architecture-review'
-  | 'coding-assessment';
+  | 'coding-assessment'
+  | 'product-owner'
+  | 'tech-lead'
+  | 'backend-api'
+  | 'frontend-handoff'
+  | 'client-discovery'
+  | 'sprint-planning';
 
 interface Mode {
   id: string;
@@ -88,6 +100,12 @@ const TEMPLATE_LABELS: Record<TemplateType, string> = {
   'feature-planning': 'Feature Planning',
   'architecture-review': 'Architecture Review',
   'coding-assessment': 'Coding Assessment',
+  'product-owner': 'Product Owner',
+  'tech-lead': 'Tech Lead',
+  'backend-api': 'Backend API',
+  'frontend-handoff': 'Frontend Handoff',
+  'client-discovery': 'Client Discovery',
+  'sprint-planning': 'Sprint Planning',
 };
 
 const TEMPLATE_DESCRIPTIONS: Record<TemplateType, string> = {
@@ -102,6 +120,12 @@ const TEMPLATE_DESCRIPTIONS: Record<TemplateType, string> = {
   'feature-planning': 'Feature planning copilot — define scope, acceptance criteria, dependencies.',
   'architecture-review': 'Architecture review copilot — tradeoffs, failure modes, scalability.',
   'coding-assessment': 'Coding assessment copilot — progressive hints, complexity analysis.',
+  'product-owner': 'Product owner copilot — user needs, business value, MVP scope, user stories.',
+  'tech-lead': 'Tech lead copilot — architecture, technical debt, tradeoffs, team capacity.',
+  'backend-api': 'Backend API copilot — contracts, auth, pagination, error handling, schema.',
+  'frontend-handoff': 'Frontend handoff copilot — UI states, responsive, validations, API needs.',
+  'client-discovery': 'Client discovery copilot — objectives, constraints, budget, stakeholders.',
+  'sprint-planning': 'Sprint planning copilot — priorities, capacity, dependencies, ticket breakdown.',
 };
 
 const TEMPLATE_ICONS: Record<TemplateType, React.ReactNode> = {
@@ -116,6 +140,12 @@ const TEMPLATE_ICONS: Record<TemplateType, React.ReactNode> = {
   'feature-planning': <Blocks size={16} />,
   'architecture-review': <GitBranch size={16} />,
   'coding-assessment': <Terminal size={16} />,
+  'product-owner': <Target size={16} />,
+  'tech-lead': <Shield size={16} />,
+  'backend-api': <Server size={16} />,
+  'frontend-handoff': <Monitor size={16} />,
+  'client-discovery': <Users size={16} />,
+  'sprint-planning': <Calendar size={16} />,
 };
 
 const CONTEXT_MAX_LENGTH = 4000;
@@ -160,21 +190,24 @@ const ModesSettings: React.FC<ModesSettingsProps> = ({
   const nameInputRef = useRef<HTMLInputElement>(null);
 
   // ─── Load modes ──────────────────────────────────────────────
+  const hasSelectedRef = useRef(false);
+
   const loadModes = useCallback(async () => {
     try {
       const all = await window.electronAPI?.modesGetAll?.();
       const active = await window.electronAPI?.modesGetActive?.();
       setModes((all || []) as Mode[]);
       setActiveModeId(active?.id || null);
-      if (all?.length && !selectedModeId) {
+      if (all?.length && !hasSelectedRef.current) {
         setSelectedModeId(all[0].id);
+        hasSelectedRef.current = true;
       }
     } catch (e) {
       console.error('[ModesSettings] Failed to load modes:', e);
     } finally {
       setIsLoading(false);
     }
-  }, [selectedModeId]);
+  }, []);
 
   useEffect(() => {
     loadModes();

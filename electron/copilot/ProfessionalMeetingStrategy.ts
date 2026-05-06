@@ -6,6 +6,8 @@ import type {
   CopilotSuggestionType,
 } from './types';
 import type { ProfessionalMeetingLLM } from './ProfessionalMeetingLLM';
+import type { TimingScorer } from './TimingScorer';
+import type { DecisionTracker } from './DecisionTracker';
 
 // ─── Meeting-specific point-end detection ──────────────────────────
 // Meetings are faster-paced than lectures — shorter segments, more back-and-forth.
@@ -26,6 +28,8 @@ const CONTINUATION_PATTERNS = [
 export class ProfessionalMeetingStrategy {
   constructor(
     private readonly llm: ProfessionalMeetingLLM,
+    private readonly timingScorer?: TimingScorer,
+    private readonly tracker?: DecisionTracker,
     private readonly now: () => number = () => Date.now(),
   ) {}
 
@@ -41,6 +45,7 @@ export class ProfessionalMeetingStrategy {
 
     // Gate 1 — Minimum segments
     if (snapshot.segments.length < profile.minSegments) {
+      console.log(`[ProfessionalMeetingStrategy] Gate 1 BLOCKED: ${snapshot.segments.length} < ${profile.minSegments} segments`);
       return {
         ...base,
         action: 'WAIT',
@@ -51,6 +56,7 @@ export class ProfessionalMeetingStrategy {
 
     // Gate 2 — Minimum context duration
     if (snapshot.structuredSummary.durationMs < profile.minContextMs) {
+      console.log(`[ProfessionalMeetingStrategy] Gate 2 BLOCKED: ${snapshot.structuredSummary.durationMs}ms < ${profile.minContextMs}ms`);
       return {
         ...base,
         action: 'WAIT',
@@ -62,6 +68,7 @@ export class ProfessionalMeetingStrategy {
     // Gate 3 — Detect whether a discussion point may have ended
     const pointEnd = this.detectMeetingPause(snapshot);
     if (!pointEnd.ended) {
+      console.log(`[ProfessionalMeetingStrategy] Gate 3 BLOCKED: ${pointEnd.reason} (confidence ${pointEnd.confidence.toFixed(2)})`);
       return {
         ...base,
         action: 'WAIT',
@@ -70,7 +77,14 @@ export class ProfessionalMeetingStrategy {
       };
     }
 
+    console.log(`[ProfessionalMeetingStrategy] Gates 1-3 passed. Calling LLM...`);
+
     // Gate 4 — LLM-based suggestion generation
+    const followUpQuestions = this.tracker
+      ? this.tracker.getFollowUpQuestions(snapshot.structuredSummary.keyTerms)
+      : [];
+    const detectedRisks = snapshot.detectedRisks || [];
+
     const candidate = await this.llm.generateSuggestion({
       mode: snapshot.mode,
       rollingText: snapshot.rollingText,
@@ -79,9 +93,12 @@ export class ProfessionalMeetingStrategy {
         .map((d) => d.suggestion)
         .filter((s): s is string => !!s),
       allowedTypes: profile.suggestionTypes,
+      followUpQuestions: followUpQuestions.map((q) => q.question),
+      detectedRisks: detectedRisks.map((r) => `${r.type}: ${r.explanation}`),
     });
 
     if (!candidate) {
+      console.log(`[ProfessionalMeetingStrategy] Gate 4 BLOCKED: LLM returned null (WAIT or parse error)`);
       return {
         ...base,
         action: 'WAIT',
@@ -93,6 +110,7 @@ export class ProfessionalMeetingStrategy {
     // Gate 5 — Confidence threshold
     const confidence = clamp(candidate.confidence, 0, 1);
     if (confidence < profile.minConfidence) {
+      console.log(`[ProfessionalMeetingStrategy] Gate 5 BLOCKED: confidence ${confidence.toFixed(2)} < ${profile.minConfidence}`);
       return {
         ...base,
         action: 'WAIT',
@@ -104,6 +122,7 @@ export class ProfessionalMeetingStrategy {
 
     // Gate 6 — Grounding check
     if (!this.isGrounded(candidate.question, snapshot.rollingText, candidate.topic)) {
+      console.log(`[ProfessionalMeetingStrategy] Gate 6 BLOCKED: not grounded`);
       return {
         ...base,
         action: 'WAIT',
@@ -112,6 +131,8 @@ export class ProfessionalMeetingStrategy {
         reason: 'Suggestion not grounded enough in the transcript.',
       };
     }
+
+    console.log(`[ProfessionalMeetingStrategy] All gates passed → SUGGEST: "${candidate.question.substring(0, 60)}..."`);
 
     // ─── Passed all gates → SUGGEST ──────────────────────────
     return {
@@ -140,8 +161,8 @@ export class ProfessionalMeetingStrategy {
       .join(' ');
     const lastText = last.text.trim();
 
-    // Short segments → probably still talking
-    if (lastText.length < 20) {
+    // Short segments → probably still talking (STT often emits short chunks)
+    if (lastText.length < 10) {
       return {
         ended: false,
         confidence: 0.2,

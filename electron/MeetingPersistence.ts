@@ -6,6 +6,7 @@ import { SessionTracker, TranscriptSegment } from './SessionTracker';
 import { LLMHelper } from './LLMHelper';
 import { DatabaseManager, Meeting } from './db/DatabaseManager';
 import { GROQ_TITLE_PROMPT, GROQ_SUMMARY_JSON_PROMPT } from './llm';
+import { MeetingBriefManager } from './meeting/MeetingBriefManager';
 const crypto = require('crypto');
 
 export class MeetingPersistence {
@@ -95,6 +96,7 @@ export class MeetingPersistence {
     ): Promise<void> {
         let title = "Untitled Session";
         let summaryData: { overview?: string; actionItems: string[], keyPoints: string[], sections?: Array<{ title: string; bullets: string[] }> } = { actionItems: [], keyPoints: [] };
+        const meetingContextForLLM = this.buildMeetingSummaryContext(data.transcript, data.context);
 
         // Use passed-in metadata snapshot (NOT this.session.getMeetingMetadata() which is already cleared)
         let calendarEventId: string | undefined;
@@ -112,7 +114,7 @@ export class MeetingPersistence {
                 const titlePrompt = `Generate a concise 3-6 word title for this meeting context. Output ONLY the title text. Do not use quotes or conversational filler.`;
                 const groqTitlePrompt = GROQ_TITLE_PROMPT;
 
-                const generatedTitle = await this.llmHelper.generateMeetingSummary(titlePrompt, data.context.substring(0, 5000), groqTitlePrompt);
+                const generatedTitle = await this.llmHelper.generateMeetingSummary(titlePrompt, meetingContextForLLM.substring(0, 5000), groqTitlePrompt);
                 if (generatedTitle) title = generatedTitle.replace(/["*]/g, '').trim();
             }
 
@@ -204,7 +206,7 @@ Return ONLY valid JSON (no markdown code blocks):
                     groqSummaryPrompt = GROQ_SUMMARY_JSON_PROMPT;
                 }
 
-                const generatedSummary = await this.llmHelper.generateMeetingSummary(summaryPrompt, data.context.substring(0, 10000), groqSummaryPrompt);
+                const generatedSummary = await this.llmHelper.generateMeetingSummary(summaryPrompt, meetingContextForLLM, groqSummaryPrompt);
 
                 if (generatedSummary) {
                     // Strip markdown fences if present
@@ -290,6 +292,85 @@ Return ONLY valid JSON (no markdown code blocks):
         if (summary.actionItems?.length > 0) return true;
         if (summary.keyPoints?.length > 0) return true;
         return Boolean(summary.sections?.some(section => section.bullets.length > 0));
+    }
+
+    private buildMeetingSummaryContext(transcript: TranscriptSegment[], fallbackContext: string): string {
+        const lines = transcript
+            .filter(segment => segment.final !== false)
+            .filter(segment => segment.text?.trim())
+            .filter(segment => !['system', 'ai', 'assistant', 'model'].includes(String(segment.speaker || '').toLowerCase()))
+            .map(segment => {
+                const speaker = String(segment.speaker || '').toLowerCase();
+                const label = segment.canonicalRole === 'me' || speaker === 'user' || speaker === 'mic'
+                    ? 'ME'
+                    : segment.canonicalRole === 'uncertain' || /^locuteur[_-]?\d+$/i.test(speaker) || /^speaker[_-]?\d+$/i.test(speaker)
+                        ? 'INTERLOCUTOR (DIARIZATION_LABEL)'
+                        : 'INTERLOCUTOR';
+                return `[${label}]: ${this.truncateAtWord(segment.text, 1400)}`;
+            })
+            .filter(line => line.length > 0);
+
+        const transcriptContext = lines.join('\n');
+        const rawContext = transcriptContext || fallbackContext || '';
+        const compacted = this.compactContextForLLM(rawContext, 28000);
+
+        const briefBlock = MeetingBriefManager.getInstance().buildContextBlock();
+
+        return `${briefBlock ? `${briefBlock}\n\n` : ''}[MEETING TRANSCRIPT DIGEST]
+Speaker contract:
+- ME = local microphone / the app user.
+- INTERLOCUTOR = the other participant(s), professor, client, manager, interviewer, or system audio.
+- DIARIZATION_LABEL means the STT speaker label may be imperfect; use it as a hint, not as identity proof.
+- Meeting brief is background only; transcript remains the source of truth for what was actually said.
+- Summaries must cover the whole digest, including the middle and final excerpts.
+
+${compacted}`;
+    }
+
+    private compactContextForLLM(text: string, maxChars: number): string {
+        const clean = text.replace(/\n{3,}/g, '\n\n').trim();
+        if (clean.length <= maxChars) return clean;
+
+        const firstBudget = Math.floor(maxChars * 0.34);
+        const middleBudget = Math.floor(maxChars * 0.28);
+        const lastBudget = Math.floor(maxChars * 0.34);
+
+        const middleStart = Math.max(0, Math.floor(clean.length / 2) - Math.floor(middleBudget / 2));
+        const lastStart = Math.max(0, clean.length - lastBudget);
+
+        const first = this.sliceContext(clean, 0, firstBudget);
+        const middle = this.sliceContext(clean, middleStart, middleBudget);
+        const last = this.sliceContext(clean, lastStart, lastBudget);
+
+        return [
+            '[BEGINNING EXCERPT]',
+            first,
+            '[MIDDLE EXCERPT]',
+            middle,
+            '[FINAL EXCERPT]',
+            last,
+        ].join('\n\n');
+    }
+
+    private sliceContext(text: string, start: number, length: number): string {
+        let sliceStart = Math.max(0, start);
+        let sliceEnd = Math.min(text.length, sliceStart + length);
+
+        if (sliceStart > 0) {
+            const nextBreak = text.indexOf('\n', sliceStart);
+            if (nextBreak >= 0 && nextBreak < sliceStart + 400) {
+                sliceStart = nextBreak + 1;
+            }
+        }
+
+        if (sliceEnd < text.length) {
+            const prevBreak = text.lastIndexOf('\n', sliceEnd);
+            if (prevBreak > sliceStart + Math.floor(length * 0.65)) {
+                sliceEnd = prevBreak;
+            }
+        }
+
+        return text.slice(sliceStart, sliceEnd).trim();
     }
 
     private buildLocalTitle(transcript: TranscriptSegment[]): string {

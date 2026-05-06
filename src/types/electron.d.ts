@@ -13,6 +13,44 @@ export interface CopilotDecisionPayload {
   sourceSegmentIds: string[]
 }
 
+export interface MeetingHealthData {
+  clarityScore: number
+  openRisks: number
+  confirmedDecisions: number
+  unassignedActions: number
+  openQuestions: number
+  readyToSuggest: number
+  decisions?: { what: string; owner?: string }[]
+  risks?: { description: string; severity: string }[]
+  actions?: { task: string; owner?: string; deadline?: string }[]
+  constraints?: string[]
+  topics?: string[]
+  deadlines?: string[]
+  responsibilities?: string[]
+  summarySoFar?: string
+}
+
+export interface DetectedRiskData {
+  type: string
+  explanation: string
+  severity: string
+  suggestion?: string
+}
+
+export interface MeetingBriefData {
+  id?: string
+  title?: string
+  objective?: string
+  myRole?: string
+  participants?: string
+  projectContext?: string
+  expectedDecisions?: string
+  mustAsk?: string
+  sensitiveTopics?: string
+  successCriteria?: string
+  updatedAt?: number
+}
+
 type LlmProviderId = 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude' | 'codex'
 type RuntimeLlmProviderId = 'ollama' | LlmProviderId | 'natively' | 'custom'
 
@@ -149,7 +187,7 @@ export interface ElectronAPI {
   onCredentialsChanged: (callback: () => void) => () => void
 
   // Native Audio Service Events
-  onNativeAudioTranscript: (callback: (transcript: { speaker: string; text: string; final: boolean }) => void) => () => void
+  onNativeAudioTranscript: (callback: (transcript: { speaker: string; text: string; final: boolean; canonicalRole?: string; source?: 'mic' | 'system' | 'merged'; qualityFlags?: string[]; rawSpeaker?: string; speakerId?: number; confidence?: number }) => void) => () => void
   onNativeAudioSuggestion: (callback: (suggestion: { context: string; lastQuestion: string; confidence: number }) => void) => () => void
   onNativeAudioConnected: (callback: () => void) => () => void
   onNativeAudioDisconnected: (callback: () => void) => () => void
@@ -210,6 +248,9 @@ export interface ElectronAPI {
 
   // Meeting Lifecycle
   startMeeting: (metadata?: any) => Promise<{ success: boolean; error?: string }>
+  getMeetingBrief: () => Promise<MeetingBriefData | null>
+  saveMeetingBrief: (brief: MeetingBriefData) => Promise<{ success: boolean; brief?: MeetingBriefData | null; error?: string }>
+  clearMeetingBrief: () => Promise<{ success: boolean; error?: string }>
   endMeeting: () => Promise<{ success: boolean; error?: string }>
   finalizeMicSTT: () => Promise<void>
   getRecentMeetings: () => Promise<Array<{ id: string; title: string; date: string; duration: string; summary: string }>>
@@ -237,6 +278,7 @@ export interface ElectronAPI {
   onIntelligenceError: (callback: (data: { error: string, mode: string }) => void) => () => void;
   onCopilotSuggestion: (callback: (data: CopilotDecisionPayload) => void) => () => void
   onCopilotError: (callback: (data: { error: string }) => void) => () => void
+  getMeetingHealth: () => Promise<{ health: MeetingHealthData | null; risks: DetectedRiskData[] }>
   // Session Management
   onSessionReset: (callback: () => void) => () => void;
 

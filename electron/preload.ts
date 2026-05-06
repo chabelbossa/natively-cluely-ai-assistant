@@ -15,6 +15,44 @@ interface CopilotDecisionPayload {
   sourceSegmentIds: string[]
 }
 
+interface MeetingHealthData {
+  clarityScore: number
+  openRisks: number
+  confirmedDecisions: number
+  unassignedActions: number
+  openQuestions: number
+  readyToSuggest: number
+  decisions?: { what: string; owner?: string }[]
+  risks?: { description: string; severity: string }[]
+  actions?: { task: string; owner?: string; deadline?: string }[]
+  constraints?: string[]
+  topics?: string[]
+  deadlines?: string[]
+  responsibilities?: string[]
+  summarySoFar?: string
+}
+
+interface DetectedRiskData {
+  type: string
+  explanation: string
+  severity: string
+  suggestion?: string
+}
+
+interface MeetingBriefData {
+  id?: string
+  title?: string
+  objective?: string
+  myRole?: string
+  participants?: string
+  projectContext?: string
+  expectedDecisions?: string
+  mustAsk?: string
+  sensitiveTopics?: string
+  successCriteria?: string
+  updatedAt?: number
+}
+
 // Types for the exposed Electron API
 interface ElectronAPI {
   updateContentDimensions: (dimensions: {
@@ -110,7 +148,7 @@ interface ElectronAPI {
   onCredentialsChanged: (callback: () => void) => () => void
 
   // Native Audio Service Events
-  onNativeAudioTranscript: (callback: (transcript: { speaker: string; text: string; final: boolean }) => void) => () => void
+  onNativeAudioTranscript: (callback: (transcript: { speaker: string; text: string; final: boolean; canonicalRole?: string; source?: 'mic' | 'system' | 'merged'; qualityFlags?: string[]; rawSpeaker?: string; speakerId?: number; confidence?: number }) => void) => () => void
   onNativeAudioSuggestion: (callback: (suggestion: { context: string; lastQuestion: string; confidence: number }) => void) => () => void
   onNativeAudioConnected: (callback: () => void) => () => void
   onNativeAudioDisconnected: (callback: () => void) => () => void
@@ -143,6 +181,9 @@ interface ElectronAPI {
 
   // Meeting Lifecycle
   startMeeting: (metadata?: any) => Promise<{ success: boolean; error?: string }>
+  getMeetingBrief: () => Promise<MeetingBriefData | null>
+  saveMeetingBrief: (brief: MeetingBriefData) => Promise<{ success: boolean; brief?: MeetingBriefData | null; error?: string }>
+  clearMeetingBrief: () => Promise<{ success: boolean; error?: string }>
   endMeeting: () => Promise<{ success: boolean; error?: string }>
   finalizeMicSTT: () => Promise<void>
   getRecentMeetings: () => Promise<Array<{ id: string; title: string; date: string; duration: string; summary: string }>>
@@ -164,6 +205,7 @@ interface ElectronAPI {
   onIntelligenceError: (callback: (data: { error: string; mode: string }) => void) => () => void
   onCopilotSuggestion: (callback: (data: CopilotDecisionPayload) => void) => () => void
   onCopilotError: (callback: (data: { error: string }) => void) => () => void
+  getMeetingHealth: () => Promise<{ health: MeetingHealthData | null; risks: DetectedRiskData[] }>
 
   // Model Management
   getDefaultModel: () => Promise<{ model: string }>
@@ -645,7 +687,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   // Native Audio Service Events
-  onNativeAudioTranscript: (callback: (transcript: { speaker: string; text: string; final: boolean }) => void) => {
+  onNativeAudioTranscript: (callback: (transcript: { speaker: string; text: string; final: boolean; canonicalRole?: string; source?: 'mic' | 'system' | 'merged'; qualityFlags?: string[]; rawSpeaker?: string; speakerId?: number; confidence?: number }) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("native-audio-transcript", subscription)
     return () => {
@@ -755,6 +797,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Meeting Lifecycle
   startMeeting: (metadata?: any) => ipcRenderer.invoke("start-meeting", metadata),
+  getMeetingBrief: () => ipcRenderer.invoke("meeting-brief:get"),
+  saveMeetingBrief: (brief: MeetingBriefData) => ipcRenderer.invoke("meeting-brief:save", brief),
+  clearMeetingBrief: () => ipcRenderer.invoke("meeting-brief:clear"),
   endMeeting: () => ipcRenderer.invoke("end-meeting"),
   finalizeMicSTT: () => ipcRenderer.invoke("finalize-mic-stt"),
   getRecentMeetings: () => ipcRenderer.invoke("get-recent-meetings"),
@@ -894,6 +939,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener("copilot-error", subscription)
     }
   },
+  getMeetingHealth: () => ipcRenderer.invoke("get-meeting-health"),
   onSessionReset: (callback: () => void) => {
     const subscription = () => callback()
     ipcRenderer.on("session-reset", subscription)

@@ -4,6 +4,7 @@ import { ArrowUp, Check, Clock3, Copy, Cpu } from 'lucide-react';
 import { motion } from 'framer-motion';
 import nativelyIcon from './icon.png';
 import { ModelSelector } from './ui/ModelSelector';
+import { useResolvedTheme } from '../hooks/useResolvedTheme';
 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -117,6 +118,7 @@ const UserMessage: React.FC<{ content: string }> = ({ content }) => (
 
 const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean; modelUsed?: string; durationMs?: number; source?: 'rag' | 'fallback' }> = ({ content, isStreaming, modelUsed, durationMs, source }) => {
     const [copied, setCopied] = useState(false);
+    const isLight = useResolvedTheme() === 'light';
 
     const handleCopy = async () => {
         try {
@@ -135,7 +137,7 @@ const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean; model
             transition={{ duration: 0.15 }}
             className="flex flex-col items-start mb-6"
         >
-            <div className="text-text-primary text-[15px] leading-relaxed max-w-[85%]">
+            <div className={`text-[15px] leading-relaxed max-w-[85%] ${isLight ? 'text-text-primary' : 'text-slate-100'}`}>
                 <div className="markdown-content">
                     <ReactMarkdown
                         remarkPlugins={[remarkGfm, remarkMath]}
@@ -150,8 +152,8 @@ const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean; model
                                 const lang = match ? match[1] : '';
 
                                 return !isInline ? (
-                                    <div className="my-3 rounded-xl overflow-hidden border border-white/[0.08] shadow-lg bg-zinc-800/60 backdrop-blur-md">
-                                        <div className="bg-white/[0.04] px-3 py-1.5 border-b border-white/[0.08]">
+                                    <div className={`my-3 rounded-xl overflow-hidden border shadow-lg backdrop-blur-md ${isLight ? 'border-border-subtle bg-bg-input' : 'border-white/[0.10] bg-zinc-900/90'}`}>
+                                        <div className={`${isLight ? 'bg-bg-secondary border-border-subtle' : 'bg-white/[0.05] border-white/[0.08]'} px-3 py-1.5 border-b`}>
                                             <span className="text-[10px] uppercase tracking-widest font-semibold text-white/40 font-mono">
                                                 {lang || 'CODE'}
                                             </span>
@@ -179,7 +181,7 @@ const AssistantMessage: React.FC<{ content: string; isStreaming?: boolean; model
                                         </div>
                                     </div>
                                 ) : (
-                                    <code className="bg-bg-tertiary px-1.5 py-0.5 rounded text-[13px] font-mono text-text-primary border border-border-subtle whitespace-pre-wrap" {...props}>
+                                    <code className="bg-bg-input px-1.5 py-0.5 rounded text-[13px] font-mono text-text-primary border border-border-subtle whitespace-pre-wrap" {...props}>
                                         {children}
                                     </code>
                                 );
@@ -240,6 +242,7 @@ const MeetingChatOverlay: React.FC<MeetingChatOverlayProps> = ({
     initialQuery = '',
     // onNewQuery
 }) => {
+    const isLight = useResolvedTheme() === 'light';
     const [messages, setMessages] = useState<Message[]>([]);
     const [chatState, setChatState] = useState<ChatState>('idle');
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -552,9 +555,17 @@ ${contextString}`;
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.18 }}
-            className="mb-8 rounded-[24px] border border-border-subtle bg-bg-primary shadow-sm overflow-hidden"
+            className={`mb-8 rounded-[24px] border shadow-sm overflow-hidden ${
+                isLight
+                    ? 'border-border-subtle bg-bg-card'
+                    : 'border-white/10 bg-[#18181B] shadow-[0_18px_44px_rgba(0,0,0,0.35)]'
+            }`}
         >
-            <div className="flex items-start justify-between gap-4 px-5 py-4 border-b border-border-subtle bg-bg-secondary/70">
+            <div className={`flex items-start justify-between gap-4 px-5 py-4 border-b ${
+                isLight
+                    ? 'border-border-subtle bg-bg-secondary/70'
+                    : 'border-white/10 bg-white/[0.045]'
+            }`}>
                 <div className="min-w-0">
                     <div className="flex items-center gap-2 text-text-primary">
                         <img src={nativelyIcon} className="w-4 h-4 force-black-icon opacity-70" alt="Natively" />
@@ -571,9 +582,15 @@ ${contextString}`;
                 </div>
             </div>
 
-            <div className="max-h-[420px] min-h-[180px] overflow-y-auto px-6 py-5 custom-scrollbar bg-bg-primary">
+            <div className={`max-h-[420px] min-h-[180px] overflow-y-auto px-6 py-5 custom-scrollbar ${
+                isLight ? 'bg-bg-card' : 'bg-[#111113]'
+            }`}>
                 {messages.length === 0 && chatState === 'idle' && (
-                    <div className="rounded-2xl border border-dashed border-border-subtle bg-bg-secondary/60 px-5 py-6 text-sm text-text-secondary">
+                    <div className={`rounded-2xl border border-dashed px-5 py-6 text-sm ${
+                        isLight
+                            ? 'border-border-subtle bg-bg-secondary/60 text-text-secondary'
+                            : 'border-white/10 bg-white/[0.04] text-slate-300'
+                    }`}>
                         Pose une question sur cette réunion. L'historique restera dans cette carte.
                     </div>
                 )}
@@ -599,7 +616,11 @@ ${contextString}`;
                 <div ref={messagesEndRef} />
             </div>
 
-            <div className="border-t border-border-subtle bg-bg-secondary/70 p-4">
+            <div className={`border-t p-4 ${
+                isLight
+                    ? 'border-border-subtle bg-bg-secondary/70'
+                    : 'border-white/10 bg-white/[0.045]'
+            }`}>
                 <div className="relative">
                     <input
                         type="text"
@@ -612,7 +633,11 @@ ${contextString}`;
                             }
                         }}
                         placeholder="Demander quelque chose sur cette réunion..."
-                        className="w-full rounded-2xl border border-border-subtle bg-bg-primary px-4 py-3 pr-12 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent-primary/30"
+                        className={`w-full rounded-2xl border px-4 py-3 pr-12 text-sm placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent-primary/30 ${
+                            isLight
+                                ? 'border-border-subtle bg-bg-card text-text-primary'
+                                : 'border-white/10 bg-[#1E1E22] text-slate-100'
+                        }`}
                     />
                     <button
                         type="button"

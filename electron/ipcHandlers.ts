@@ -18,6 +18,7 @@ import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
 import { AudioDevices } from "./audio/AudioDevices";
+import { MeetingBriefManager } from "./meeting/MeetingBriefManager";
 
 import {
   RECOGNITION_LANGUAGES,
@@ -581,22 +582,27 @@ export function initializeIpcHandlers(appState: AppState): void {
 
         let fullResponse = "";
 
-        // Context Injection for "Answer" button (100s rolling window)
-        if (!context) {
-          // User requested 100 seconds of context for the answer button
-          // Logic: If no explicit context provided (like from manual override), auto-inject from IntelligenceManager
-          try {
-            const autoContext =
-              intelligenceManager.getFormattedActionContext(100);
-            if (autoContext && autoContext.trim().length > 0) {
-              context = autoContext;
-              console.log(
-                `[IPC] Auto - injected 100s context for gemini - chat - stream(${context.length} chars)`,
-              );
-            }
-          } catch (ctxErr) {
-            console.warn("[IPC] Failed to auto-inject context:", ctxErr);
+        // Live transcript context is required even when the renderer passes UI
+        // chat history or screenshot instructions. Without this merge, "Ask
+        // anything..." can answer without seeing the current meeting.
+        try {
+          const autoContext = intelligenceManager.getFormattedActionContext(180);
+          if (autoContext && autoContext.trim().length > 0) {
+            const providedContext = context?.trim() || "";
+            context = providedContext.includes("[ACTION CONTEXT CONTRACT]")
+              ? providedContext
+              : [
+                  providedContext,
+                  "[LIVE MEETING TRANSCRIPT CONTEXT]",
+                  autoContext.trim(),
+                  "[/LIVE MEETING TRANSCRIPT CONTEXT]",
+                ].filter(Boolean).join("\n\n");
+            console.log(
+              `[IPC] Merged live action context for gemini-chat-stream (${autoContext.length} chars transcript, provided=${providedContext.length} chars)`,
+            );
           }
+        } catch (ctxErr) {
+          console.warn("[IPC] Failed to merge live action context:", ctxErr);
         }
 
         try {
@@ -2962,6 +2968,20 @@ export function initializeIpcHandlers(appState: AppState): void {
     }
   });
 
+  safeHandle("meeting-brief:get", async () => {
+    return MeetingBriefManager.getInstance().getActiveBrief();
+  });
+
+  safeHandle("meeting-brief:save", async (_, brief: any) => {
+    const saved = MeetingBriefManager.getInstance().saveActiveBrief(brief);
+    return { success: true, brief: saved };
+  });
+
+  safeHandle("meeting-brief:clear", async () => {
+    MeetingBriefManager.getInstance().clearActiveBrief();
+    return { success: true };
+  });
+
   safeHandle("end-meeting", async () => {
     try {
       await appState.endMeeting();
@@ -3274,6 +3294,41 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
     },
   );
+
+  // Dashboard: meeting health + detected risks for the overlay panel
+  safeHandle("get-meeting-health", async () => {
+    try {
+      const mgr = appState.getIntelligenceManager();
+      const health = mgr.getMeetingHealth();
+      const risks = mgr.getDetectedRisks();
+      return {
+        health: health ? {
+          clarityScore: health.clarityScore,
+          openRisks: health.openRisks,
+          confirmedDecisions: health.confirmedDecisions,
+          unassignedActions: health.unassignedActions,
+          openQuestions: health.openQuestions,
+          readyToSuggest: health.readyToSuggest,
+          decisions: health.decisions || [],
+          risks: health.risks || [],
+          actions: health.actions || [],
+          constraints: health.constraints || [],
+          topics: health.topics || [],
+          deadlines: health.deadlines || [],
+          responsibilities: health.responsibilities || [],
+          summarySoFar: health.summarySoFar || '',
+        } : null,
+        risks: risks.map(r => ({
+          type: r.type,
+          explanation: r.explanation,
+          severity: r.severity,
+          suggestion: r.suggestion,
+        })),
+      };
+    } catch (error: any) {
+      return { health: null, risks: [] };
+    }
+  });
 
   // Service Account Selection
   safeHandle("select-service-account", async () => {

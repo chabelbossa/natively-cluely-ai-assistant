@@ -174,6 +174,8 @@ import { ThemeManager } from "./ThemeManager"
 import { RAGManager } from "./rag/RAGManager"
 import { DatabaseManager } from "./db/DatabaseManager"
 import { warmupIntentClassifier } from "./llm"
+import { TranscriptRouter } from "./transcript/TranscriptRouter"
+import { MeetingBriefManager } from "./meeting/MeetingBriefManager"
 
 /** Unified type for all STT providers with optional extended capabilities */
 type STTProvider = (GoogleSTT | RestSTT | LocalSTT | ParakeetStreamingSTT | DeepgramStreamingSTT | SonioxStreamingSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT | NativelyProSTT) & {
@@ -884,10 +886,15 @@ export class AppState {
   private _pendingMicHeldCount = 0;
   private _pendingMicDroppedCount = 0;
   private _pendingMicDroppedPartialCount = 0;
+  private _pendingMicDroppedAmbiguousCount = 0;
+  private _pendingMicAllowedInterventionCount = 0;
   private _pendingMicReleasedCount = 0;
   private _lastSystemAudioNonSilentAt = 0;
   private readonly _MIC_ECHO_GRACE_MS = 2500;
+  private readonly _MIC_INTERVENTION_GRACE_MS = 900;
   private readonly _SYSTEM_AUDIO_ACTIVE_WINDOW_MS = 3500;
+  private readonly transcriptRouter = new TranscriptRouter();
+  private readonly meetingBriefManager = MeetingBriefManager.getInstance();
 
   /**
    * Normalized similarity between two strings (Dice coefficient on word bigrams).
@@ -944,6 +951,52 @@ export class AppState {
     };
   }
 
+  private findRecentSystemEchoMatch(
+    text: string,
+    timestamp: number,
+  ): { match: boolean; similarity: number; text: string; effectiveSpeaker: string } | null {
+    const recentSystem = this._recentTranscripts
+      .filter(recent =>
+        recent.channel === 'interviewer' &&
+        timestamp - recent.timestamp <= this._DEDUP_WINDOW_MS
+      )
+      .sort((a, b) => b.timestamp - a.timestamp);
+
+    for (const recent of recentSystem) {
+      const match = this.getEchoMatch(text, recent.text);
+      if (match.match) {
+        return {
+          match: true,
+          similarity: match.similarity,
+          text: recent.text,
+          effectiveSpeaker: recent.effectiveSpeaker,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  private looksLikeLocalUserIntervention(text: string): boolean {
+    const normalized = this.normalizeForEchoComparison(text);
+    if (!normalized) return false;
+
+    const words = normalized.split(' ').filter(Boolean);
+    if (words.length < 3) return false;
+
+    const hasQuestionSignal = /\?$/.test(text.trim()) ||
+      /\b(est ce que|est ce qu|pourquoi|comment|quand|qui|quel|quelle|quels|quelles|combien|où|what|why|how|when|where|who|which|can you|could you|do you|does it)\b/i.test(normalized);
+
+    const hasLearnerSignal = /\b(si je comprends|je comprends|si j ai bien compris|j ai bien compris|je ne comprends|je n ai pas compris|je veux comprendre|ca veut dire|ça veut dire|donc si|pour mieux comprendre|que dire)\b/i.test(normalized);
+
+    const hasPromptingSignal = /\b(explique|expliquez|precise|précise|clarifie|clarifiez|reprends|reprenez|dis nous|dites nous|dis moi|dites moi|peux tu|pouvez vous|tu peux|vous pouvez|tell me|explain|clarify)\b/i.test(normalized);
+
+    const hasTurnSignal = /\b(ok|okay|d accord|daccord|attends|attendez|pardon|excuse moi|excusez moi|je te suis|je vous suis)\b/i.test(normalized) &&
+      words.length >= 5;
+
+    return hasQuestionSignal || hasLearnerSignal || hasPromptingSignal || hasTurnSignal;
+  }
+
   private isSystemAudioRecentlyActive(timestamp: number): boolean {
     if (timestamp - this._lastSystemAudioNonSilentAt <= this._SYSTEM_AUDIO_ACTIVE_WINDOW_MS) {
       return true;
@@ -994,6 +1047,15 @@ export class AppState {
     if (text.length < 8) return false;
     if (!this.isSystemAudioRecentlyActive(timestamp)) return false;
 
+    const recentEcho = this.findRecentSystemEchoMatch(text, timestamp);
+    if (recentEcho) {
+      this._pendingMicDroppedCount++;
+      if (this._pendingMicDroppedCount <= 12 || this._pendingMicDroppedCount % 25 === 0) {
+        console.log(`[STT][echo-delay] drop-mic-recent-system #${this._pendingMicDroppedCount} provider=${meta.provider} matched=${recentEcho.effectiveSpeaker} sim=${recentEcho.similarity.toFixed(2)} final=${meta.isFinal} mic="${text.substring(0, 90)}" system="${recentEcho.text.substring(0, 90)}"`);
+      }
+      return true;
+    }
+
     // Live previews are noisy by nature: when system audio is active, mic
     // partials are almost always room echo and make the overlay look like the
     // user is speaking. Drop partials immediately; keep finals delayed below so
@@ -1006,6 +1068,20 @@ export class AppState {
       return true;
     }
 
+    const looksLikeUserIntervention = this.looksLikeLocalUserIntervention(text);
+    if (!looksLikeUserIntervention) {
+      this._pendingMicDroppedAmbiguousCount++;
+      if (this._pendingMicDroppedAmbiguousCount <= 12 || this._pendingMicDroppedAmbiguousCount % 25 === 0) {
+        console.log(`[STT][echo-delay] drop-mic-ambiguous #${this._pendingMicDroppedAmbiguousCount} provider=${meta.provider} final=${meta.isFinal} text="${text.substring(0, 90)}"`);
+      }
+      return true;
+    }
+
+    this._pendingMicAllowedInterventionCount++;
+    if (this._pendingMicAllowedInterventionCount <= 12 || this._pendingMicAllowedInterventionCount % 25 === 0) {
+      console.log(`[STT][echo-delay] hold-user-intervention #${this._pendingMicAllowedInterventionCount} provider=${meta.provider} grace=${this._MIC_INTERVENTION_GRACE_MS}ms text="${text.substring(0, 90)}"`);
+    }
+
     const id = ++this._pendingMicEchoSeq;
     const timer = setTimeout(() => {
       const index = this._pendingMicEchoTranscripts.findIndex(pending => pending.id === id);
@@ -1016,7 +1092,7 @@ export class AppState {
         console.log(`[STT][echo-delay] release-mic #${this._pendingMicReleasedCount} provider=${pending.provider} final=${pending.final} waited=${Date.now() - pending.timestamp}ms text="${pending.text.substring(0, 90)}"`);
       }
       pending.deliver();
-    }, this._MIC_ECHO_GRACE_MS);
+    }, this._MIC_INTERVENTION_GRACE_MS);
 
     this._pendingMicEchoTranscripts.push({
       id,
@@ -1030,7 +1106,7 @@ export class AppState {
 
     this._pendingMicHeldCount++;
     if (this._pendingMicHeldCount <= 12 || this._pendingMicHeldCount % 25 === 0) {
-      console.log(`[STT][echo-delay] hold-mic #${this._pendingMicHeldCount} provider=${meta.provider} final=${meta.isFinal} grace=${this._MIC_ECHO_GRACE_MS}ms text="${text.substring(0, 90)}"`);
+      console.log(`[STT][echo-delay] hold-mic #${this._pendingMicHeldCount} provider=${meta.provider} final=${meta.isFinal} grace=${this._MIC_INTERVENTION_GRACE_MS}ms text="${text.substring(0, 90)}"`);
     }
     return true;
   }
@@ -1072,8 +1148,8 @@ export class AppState {
     const otherChannel = channel === 'interviewer' ? 'user' : 'interviewer';
     for (const recent of this._recentTranscripts) {
       if (recent.channel !== otherChannel) continue;
-      const sim = this.textSimilarity(text, recent.text);
-      if (sim >= this._DEDUP_SIMILARITY_THRESHOLD) {
+      const match = this.getEchoMatch(text, recent.text);
+      if (match.match) {
         // Speaker/system audio is the canonical source for "the other person".
         // If mic echo arrives first, do NOT suppress the later system transcript;
         // preserving system context is more important than avoiding one visible
@@ -1081,14 +1157,14 @@ export class AppState {
         if (channel === 'interviewer') {
           this._dedupPreservedSystemCount++;
           if (this._dedupPreservedSystemCount <= 10 || this._dedupPreservedSystemCount % 20 === 0) {
-            console.log(`[STT][dedup] preserve-system #${this._dedupPreservedSystemCount} provider=${meta.provider} effective=${effectiveSpeaker} matched=${recent.effectiveSpeaker} sim=${sim.toFixed(2)} final=${meta.isFinal} diarized=${meta.diarized} speakerId=${meta.speakerId ?? 'none'} text="${text.substring(0, 80)}..."`);
+            console.log(`[STT][dedup] preserve-system #${this._dedupPreservedSystemCount} provider=${meta.provider} effective=${effectiveSpeaker} matched=${recent.effectiveSpeaker} sim=${match.similarity.toFixed(2)} final=${meta.isFinal} diarized=${meta.diarized} speakerId=${meta.speakerId ?? 'none'} text="${text.substring(0, 80)}..."`);
           }
           break;
         }
 
         this._dedupSuppressedCount++;
         if (this._dedupSuppressedCount <= 10 || this._dedupSuppressedCount % 20 === 0) {
-          console.log(`[STT][dedup] suppress-mic-echo #${this._dedupSuppressedCount} provider=${meta.provider} effective=${effectiveSpeaker} matched=${recent.effectiveSpeaker} sim=${sim.toFixed(2)} final=${meta.isFinal} text="${text.substring(0, 80)}..."`);
+          console.log(`[STT][dedup] suppress-mic-echo #${this._dedupSuppressedCount} provider=${meta.provider} effective=${effectiveSpeaker} matched=${recent.effectiveSpeaker} sim=${match.similarity.toFixed(2)} final=${meta.isFinal} text="${text.substring(0, 80)}..."`);
         }
         return true;
       }
@@ -1386,23 +1462,54 @@ export class AppState {
       const deliverTranscript = () => {
         if (!this.isMeetingActive) return;
 
-        const helper = this.getWindowHelper();
-        const payload = {
+        const route = this.transcriptRouter.route({
+          channel: speaker === 'user' ? 'mic' : 'system',
+          provider: sttProvider,
           speaker: effectiveSpeaker,
           text: segment.text,
           timestamp,
           final: segment.isFinal,
-          confidence: segment.confidence
+          confidence: segment.confidence,
+          speakerId: segment.speakerId,
+          diarized: isDiarized,
+          systemAudioActive: this.isSystemAudioRecentlyActive(timestamp),
+        });
+
+        if (route.suppressed || !route.segment) {
+          if (segment.isFinal || this.shouldLogSttTranscriptTrace(`${sttProvider}:${speaker}:${effectiveSpeaker}:router`, false)) {
+            console.log(`[STT][router] suppress provider=${sttProvider} channel=${speaker} effective=${effectiveSpeaker} reason=${route.reason || 'unknown'} sim=${route.similarity?.toFixed(2) || 'n/a'} text="${trimmedText.substring(0, 100)}"`);
+          }
+          return;
+        }
+
+        const canonical = route.segment;
+        const helper = this.getWindowHelper();
+        const payload = {
+          speaker: canonical.speaker,
+          text: canonical.text,
+          timestamp,
+          final: canonical.final,
+          confidence: canonical.confidence,
+          canonicalRole: canonical.role,
+          source: canonical.source,
+          qualityFlags: canonical.qualityFlags,
+          rawSpeaker: canonical.rawSpeaker,
+          speakerId: canonical.speakerId,
         };
         helper.getLauncherWindow()?.webContents.send('native-audio-transcript', payload);
         helper.getOverlayWindow()?.webContents.send('native-audio-transcript', payload);
 
         const transcriptSegment = {
-          speaker: effectiveSpeaker,
-          text: segment.text,
-          timestamp,
-          final: segment.isFinal,
-          confidence: segment.confidence
+          speaker: canonical.speaker,
+          text: canonical.text,
+          timestamp: canonical.timestamp,
+          final: canonical.final,
+          confidence: canonical.confidence,
+          canonicalRole: canonical.role,
+          source: canonical.source,
+          qualityFlags: canonical.qualityFlags,
+          rawSpeaker: canonical.rawSpeaker,
+          speakerId: canonical.speakerId,
         };
 
         // Passive meeting intelligence should trust the system-audio channel.
@@ -1411,13 +1518,14 @@ export class AppState {
         // transcript/summary, but keep them out of passive answer context by default.
         // Diarized speakers (locuteur_X) also come from system audio → feed context.
         const includeMicContext = process.env.NATIVELY_INCLUDE_MIC_CONTEXT === '1';
-        const isSystemAudio = speaker === 'interviewer' || effectiveSpeaker.startsWith('locuteur_');
+        const isSystemAudio = canonical.source === 'system' || canonical.role === 'interlocutor' || canonical.role.startsWith('speaker_');
         const shouldFeedPassiveContext = isSystemAudio || includeMicContext;
         if (segment.isFinal && this.shouldLogSttTranscriptTrace(`${sttProvider}:${speaker}:${effectiveSpeaker}:context`, true)) {
           console.log(`[STT][context] provider=${sttProvider} channel=${speaker} effective=${effectiveSpeaker} passive=${shouldFeedPassiveContext ? 'feed' : 'record-only'} includeMic=${includeMicContext} text="${trimmedText.substring(0, 100)}"`);
         }
         if (!shouldFeedPassiveContext) {
           this.intelligenceManager.recordTranscriptOnly(transcriptSegment);
+          this.intelligenceManager.feedCopilotContext(transcriptSegment);
           return;
         }
 
@@ -1426,15 +1534,15 @@ export class AppState {
         // Feed final transcript to JIT RAG indexer
         if (segment.isFinal && this.ragManager) {
           this.ragManager.feedLiveTranscript([{
-            speaker: effectiveSpeaker,
-            text: segment.text,
-            timestamp
+            speaker: canonical.speaker,
+            text: canonical.text,
+            timestamp: canonical.timestamp
           }]);
         }
 
         // Feed final recruiter (system audio) transcripts to negotiation tracker
-        if (segment.isFinal && speaker === 'interviewer') {
-          this.knowledgeOrchestrator?.feedInterviewerUtterance?.(segment.text);
+        if (segment.isFinal && isSystemAudio) {
+          this.knowledgeOrchestrator?.feedInterviewerUtterance?.(canonical.text);
         }
       };
 
@@ -1777,6 +1885,7 @@ export class AppState {
   public async reconfigureSttProvider(): Promise<void> {
     console.log('[Main] Reconfiguring STT Provider...');
     this.clearPendingMicEchoTranscripts('stt_reconfigure', false);
+    this.transcriptRouter.reset();
     this._recentTranscripts = [];
 
     // RC-01 fix: pause audio captures FIRST so their EventEmitter queues drain
@@ -2007,9 +2116,14 @@ export class AppState {
   public async startMeeting(metadata?: any): Promise<void> {
     console.log('[Main] Starting Meeting...', metadata);
     this.clearPendingMicEchoTranscripts('new_meeting', false);
+    this.transcriptRouter.reset();
     this._recentTranscripts = [];
     this._lastSystemAudioLevel = null;
     this._lastSystemAudioNonSilentAt = 0;
+    const activeBrief = this.meetingBriefManager.activateForMeeting(metadata?.meetingBrief, { title: metadata?.title });
+    if (activeBrief) {
+      metadata = { ...(metadata || {}), meetingBrief: activeBrief };
+    }
 
     // PR #173: Reset audio recovery state for fresh session
     this._systemAudioRecoveryInProgress = false;

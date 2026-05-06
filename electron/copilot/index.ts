@@ -1,5 +1,8 @@
 export { CopilotDecisionEngine } from './CopilotDecisionEngine';
 export { CopilotMemory } from './CopilotMemory';
+export { DecisionTracker } from './DecisionTracker';
+export { RiskRadar } from './RiskRadar';
+export { TimingScorer } from './TimingScorer';
 export { LectureQuestionLLM } from './LectureQuestionLLM';
 export { LectureStrategy } from './LectureStrategy';
 export { ProfessionalMeetingLLM } from './ProfessionalMeetingLLM';
@@ -18,5 +21,7 @@ export type {
     CopilotQuestionGenerator,
     CopilotStructuredSummary,
     CopilotSuggestionType,
-    CopilotTranscriptSegment
+    CopilotTranscriptSegment,
+    MeetingHealthSnapshot,
+    DetectedRisk,
 } from './types';

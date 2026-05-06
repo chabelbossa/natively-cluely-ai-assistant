@@ -70,6 +70,14 @@ const _modesSettings = import.meta.glob<any>(
   '../../premium/src/ModesSettings.tsx',
   { eager: true }
 );
+const _meetingDashboard = import.meta.glob<any>(
+  '../../premium/src/MeetingDashboard.tsx',
+  { eager: true }
+);
+const _ticketDraft = import.meta.glob<any>(
+  '../../premium/src/TicketDraft.tsx',
+  { eager: true }
+);
 
 // ─── Helper ──────────────────────────────────────────────────────────
 function get<T>(mods: Record<string, any>, name: string, fallback: T): T {
@@ -110,3 +118,9 @@ export const MaxUltraUpgradeToaster: React.FC<any> =
 
 export const ModesSettings: React.FC<any> =
   get(_modesSettings, 'default', NullComponent);
+
+export const MeetingDashboard: React.FC<any> =
+  get(_meetingDashboard, 'MeetingDashboard', NullComponent);
+
+export const TicketDraft: React.FC<any> =
+  get(_ticketDraft, 'TicketDraft', NullComponent);

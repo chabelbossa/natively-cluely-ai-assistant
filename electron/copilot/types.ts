@@ -11,6 +11,12 @@ export type CopilotMode =
     | 'feature_planning'
     | 'bug_triage'
     | 'architecture_review'
+    | 'product_owner'
+    | 'tech_lead'
+    | 'backend_api'
+    | 'frontend_handoff'
+    | 'client_discovery'
+    | 'sprint_planning'
     | 'lecture'
     | 'course'
     | 'conference'
@@ -70,6 +76,11 @@ export interface CopilotTranscriptSegment {
     timestamp: number;
     final: boolean;
     confidence?: number;
+    canonicalRole?: string;
+    source?: 'mic' | 'system' | 'merged';
+    qualityFlags?: string[];
+    rawSpeaker?: string;
+    speakerId?: number;
 }
 
 export interface CopilotStructuredSummary {
@@ -88,6 +99,36 @@ export interface CopilotContextSnapshot {
     lastSuggestionAt: number | null;
     recentSuggestions: CopilotDecision[];
     recentFeedback: CopilotFeedback[];
+    /** Aggregated meeting health metrics for the dashboard */
+    meetingHealth?: MeetingHealthSnapshot;
+    /** Risks detected by the risk radar */
+    detectedRisks?: DetectedRisk[];
+}
+
+/** Live meeting health for the dashboard UI */
+export interface MeetingHealthSnapshot {
+    clarityScore: number;
+    openRisks: number;
+    confirmedDecisions: number;
+    unassignedActions: number;
+    openQuestions: number;
+    readyToSuggest: number;
+    decisions: { what: string; owner?: string }[];
+    risks: { description: string; severity: string }[];
+    actions?: { task: string; owner?: string; deadline?: string }[];
+    constraints?: string[];
+    topics?: string[];
+    deadlines?: string[];
+    responsibilities?: string[];
+    summarySoFar?: string;
+}
+
+/** A risk detected by the RiskRadar */
+export interface DetectedRisk {
+    type: string;
+    explanation: string;
+    severity: 'low' | 'medium' | 'high';
+    suggestion?: string;
 }
 
 export interface CopilotModeProfile {

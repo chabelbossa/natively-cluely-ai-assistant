@@ -38,9 +38,9 @@ export class IntelligenceManager extends EventEmitter {
     constructor(llmHelper: LLMHelper) {
         super();
         this.session = new SessionTracker();
-        this.engine = new IntelligenceEngine(llmHelper, this.session);
-        this.persistence = new MeetingPersistence(this.session, llmHelper);
         this.copilot = new CopilotDecisionEngine(llmHelper);
+        this.engine = new IntelligenceEngine(llmHelper, this.session, () => this.copilot.getMeetingStateContextBlock());
+        this.persistence = new MeetingPersistence(this.session, llmHelper);
 
         // Forward all engine events through the facade
         this.forwardEngineEvents();
@@ -142,12 +142,26 @@ export class IntelligenceManager extends EventEmitter {
         this.session.recordTranscriptOnly(segment);
     }
 
+    /** Feed a transcript segment to the copilot without feeding the main engine.
+     *  Used for mic audio so the copilot still has full conversational context. */
+    feedCopilotContext(segment: import('./SessionTracker').TranscriptSegment): void {
+        this.processCopilotTranscript(segment);
+    }
+
     async handleSuggestionTrigger(trigger: import('./SessionTracker').SuggestionTrigger): Promise<void> {
         return this.engine.handleSuggestionTrigger(trigger);
     }
 
     submitCopilotFeedback(feedback: CopilotFeedback): void {
         this.copilot.submitFeedback(feedback);
+    }
+
+    getMeetingHealth(): import('./copilot/types').MeetingHealthSnapshot | null {
+        return this.copilot.getMeetingHealth();
+    }
+
+    getDetectedRisks(): import('./copilot/types').DetectedRisk[] {
+        return this.copilot.getDetectedRisks();
     }
 
     // ============================================
@@ -254,7 +268,12 @@ export class IntelligenceManager extends EventEmitter {
             text: segment.text,
             timestamp: segment.timestamp,
             final: segment.final,
-            confidence: segment.confidence
+            confidence: segment.confidence,
+            canonicalRole: segment.canonicalRole,
+            source: segment.source,
+            qualityFlags: segment.qualityFlags,
+            rawSpeaker: segment.rawSpeaker,
+            speakerId: segment.speakerId,
         };
 
         void this.copilot.handleTranscript(copilotSegment)

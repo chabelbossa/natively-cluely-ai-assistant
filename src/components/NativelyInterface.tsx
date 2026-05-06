@@ -52,7 +52,8 @@ import {
 import { ModelSelector } from "./ui/ModelSelector";
 import TopPill from "./ui/TopPill";
 import RollingTranscript from "./ui/RollingTranscript";
-import { NegotiationCoachingCard } from "../premium";
+import { NegotiationCoachingCard, MeetingDashboard } from "../premium";
+import type { MeetingHealthData, DetectedRiskData } from "../types/electron";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -226,6 +227,10 @@ interface LiveTranscriptTurn {
   text: string;
   final: boolean;
   timestamp: number;
+  canonicalRole?: string;
+  source?: "mic" | "system" | "merged";
+  qualityFlags?: string[];
+  rawSpeaker?: string;
 }
 
 const MAX_LIVE_TRANSCRIPT_TURNS = 120;
@@ -280,7 +285,12 @@ const transcriptTextSimilarity = (a: string, b: string) => {
   return union === 0 ? 0 : intersection / union;
 };
 
-const normalizeLiveSpeaker = (speaker: string) => {
+const normalizeLiveSpeaker = (speaker: string, canonicalRole?: string) => {
+  if (canonicalRole === "me") return "me";
+  if (canonicalRole === "interlocutor") return "interlocutor";
+  if (canonicalRole === "speaker_1") return "speaker_1";
+  if (canonicalRole === "speaker_2") return "speaker_2";
+  if (canonicalRole === "uncertain") return "uncertain";
   const value = String(speaker || "").trim();
   return value || "interviewer";
 };
@@ -343,10 +353,15 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const [sttInterviewerError, setSttInterviewerError] = useState<string>("");
   const [sttInterviewerProvider, setSttInterviewerProvider] =
     useState<string>("");
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
+  const incrementPending = () => setPendingCount((c) => c + 1);
+  const decrementPending = () => setPendingCount((c) => Math.max(0, c - 1));
+  const isProcessing = pendingCount > 0;
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>(
     {},
   );
+  const [meetingHealth, setMeetingHealth] = useState<MeetingHealthData | null>(null);
+  const [meetingRisks, setMeetingRisks] = useState<DetectedRiskData[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [conversationContext, setConversationContext] = useState<string>("");
   const [isManualRecording, setIsManualRecording] = useState(false);
@@ -778,7 +793,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setTranscriptPage(0);
       setRollingTranscript("");
       setVoiceInput("");
-      setIsProcessing(false);
+      decrementPending();
       // Optionally reset connection status if needed, but connection persists
 
       // Track new conversation/session if applicable?
@@ -803,6 +818,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     speaker: string;
     text: string;
     final: boolean;
+    canonicalRole?: string;
+    source?: "mic" | "system" | "merged";
+    qualityFlags?: string[];
+    rawSpeaker?: string;
   }) => {
     const text = transcript.text?.trim();
     if (!text) return;
@@ -813,7 +832,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     setShowTranscript(true);
     localStorage.setItem("natively_interviewer_transcript", "true");
 
-    const speaker = normalizeLiveSpeaker(transcript.speaker);
+    const speaker = normalizeLiveSpeaker(transcript.speaker, transcript.canonicalRole);
     const timestamp = Date.now();
     const turn: LiveTranscriptTurn = {
       id: `${transcript.final ? "final" : "partial"}-${speaker}-${timestamp}-${Math.random().toString(16).slice(2)}`,
@@ -821,6 +840,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       text,
       final: transcript.final,
       timestamp,
+      canonicalRole: transcript.canonicalRole,
+      source: transcript.source,
+      qualityFlags: transcript.qualityFlags,
+      rawSpeaker: transcript.rawSpeaker,
     };
 
     if (!transcript.final) {
@@ -832,6 +855,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           text,
           final: false,
           timestamp,
+          canonicalRole: transcript.canonicalRole,
+          source: transcript.source,
+          qualityFlags: transcript.qualityFlags,
+          rawSpeaker: transcript.rawSpeaker,
         },
       }));
       setLiveTranscriptTurns((prev) =>
@@ -880,6 +907,32 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     });
   }, []);
 
+  // ── Meeting Dashboard polling ────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const data = await window.electronAPI?.getMeetingHealth?.();
+        if (cancelled) return;
+        if (data) {
+          setMeetingHealth(data.health);
+          setMeetingRisks(data.risks || []);
+        }
+      } catch {
+        // Silently ignore — dashboard is best-effort
+      }
+    };
+
+    poll(); // immediate first call
+    const interval = setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
   // Connect to Native Audio Backend
   useEffect(() => {
     const cleanups: (() => void)[] = [];
@@ -910,7 +963,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
         // When Answer button is active, capture USER transcripts for voice input
         // Use ref to avoid stale closure issue
-        if (isRecordingRef.current && transcript.speaker === "user") {
+        const isLocalMicTranscript =
+          transcript.canonicalRole === "me" ||
+          transcript.source === "mic" ||
+          transcript.speaker === "user" ||
+          transcript.speaker === "me";
+
+        if (isRecordingRef.current && isLocalMicTranscript) {
           if (transcript.final) {
             // Accumulate final transcripts
             setVoiceInput((prev) => {
@@ -930,12 +989,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
         // User mic transcripts are shown in the live transcript feed above.
         // They stay out of the chat unless the user is explicitly dictating an answer.
-        if (transcript.speaker === "user") {
+        if (isLocalMicTranscript) {
           return; // Skip user mic input - only relevant when Answer button is active
         }
 
         // Only show interviewer (system audio) transcripts in rolling bar
-        if (transcript.speaker === "user") {
+        if (isLocalMicTranscript) {
           return; // User mic is already visible in the live transcript panel.
         }
 
@@ -969,14 +1028,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // AI Suggestions from native audio (legacy)
     cleanups.push(
       window.electronAPI.onSuggestionProcessingStart(() => {
-        setIsProcessing(true);
+        incrementPending();
         setIsExpanded(true);
       }),
     );
 
     cleanups.push(
       window.electronAPI.onSuggestionGenerated((data) => {
-        setIsProcessing(false);
+        decrementPending();
         setMessages((prev) => [
           ...prev,
           {
@@ -990,7 +1049,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
     cleanups.push(
       window.electronAPI.onSuggestionError((err) => {
-        setIsProcessing(false);
+        decrementPending();
         setMessages((prev) => [
           ...prev,
           {
@@ -1028,7 +1087,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
     cleanups.push(
       window.electronAPI.onIntelligenceSuggestedAnswer((data) => {
-        setIsProcessing(false);
         setActionLoading((prev) => ({ ...prev, whatToSay: false }));
         const intent = getSuggestedAnswerIntent(data.question);
         const durationMs =
@@ -1058,7 +1116,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
     cleanups.push(
       window.electronAPI.onIntelligenceRefinedAnswer((data) => {
-        setIsProcessing(false);
         const durationMs =
           Date.now() - (streamStartTimesRef.current[data.intent] || Date.now());
         delete streamStartTimesRef.current[data.intent];
@@ -1151,7 +1208,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
     cleanups.push(
       window.electronAPI.onIntelligenceManualResult((data) => {
-        setIsProcessing(false);
+        decrementPending();
         setMessages((prev) => [
           ...prev,
           {
@@ -1165,8 +1222,22 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
     cleanups.push(
       window.electronAPI.onIntelligenceError((data) => {
-        setIsProcessing(false);
-        setActionLoading({});
+        // Only clear the loading state for the specific mode that failed
+        const modeToKey: Record<string, string> = {
+          what_to_say: 'whatToSay',
+          follow_up: 'followUp',
+          recap: 'recap',
+          clarify: 'clarify',
+          follow_up_questions: 'followUpQuestions',
+          code_hint: 'codeHint',
+          brainstorm: 'brainstorm',
+          manual: 'manual',
+          assist: 'assist',
+        };
+        const key = modeToKey[data.mode];
+        if (key) {
+          setActionLoading((prev) => ({ ...prev, [key]: false }));
+        }
         setMessages((prev) => [
           ...prev,
           {
@@ -1249,6 +1320,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const handleWhatToSay = async () => {
     setIsExpanded(true);
     setActionLoading((prev) => ({ ...prev, whatToSay: true }));
+    incrementPending();
     analytics.trackCommandExecuted("what_to_say");
 
     // Capture and clear attached image context.
@@ -1298,12 +1370,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       ]);
     } finally {
       setActionLoading((prev) => ({ ...prev, whatToSay: false }));
+      decrementPending();
     }
   };
 
   const handleFollowUp = async (intent: string = "rephrase") => {
     setIsExpanded(true);
-    setIsProcessing(true);
+    incrementPending();
     analytics.trackCommandExecuted("follow_up_" + intent);
 
     try {
@@ -1318,13 +1391,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         },
       ]);
     } finally {
-      setIsProcessing(false);
+      decrementPending();
     }
   };
 
   const handleRecap = async () => {
     setIsExpanded(true);
     setActionLoading((prev) => ({ ...prev, recap: true }));
+    incrementPending();
     analytics.trackCommandExecuted("recap");
 
     try {
@@ -1340,12 +1414,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       ]);
     } finally {
       setActionLoading((prev) => ({ ...prev, recap: false }));
+      decrementPending();
     }
   };
 
   const handleFollowUpQuestions = async () => {
     setIsExpanded(true);
     setActionLoading((prev) => ({ ...prev, followUpQuestions: true }));
+    incrementPending();
     analytics.trackCommandExecuted("suggest_questions");
 
     try {
@@ -1361,12 +1437,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       ]);
     } finally {
       setActionLoading((prev) => ({ ...prev, followUpQuestions: false }));
+      decrementPending();
     }
   };
 
   const handleClarify = async () => {
     setIsExpanded(true);
     setActionLoading((prev) => ({ ...prev, clarify: true }));
+    incrementPending();
     analytics.trackCommandExecuted("clarify");
 
     try {
@@ -1382,12 +1460,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       ]);
     } finally {
       setActionLoading((prev) => ({ ...prev, clarify: false }));
+      decrementPending();
     }
   };
 
   const handleCodeHint = async () => {
     setIsExpanded(true);
     setActionLoading((prev) => ({ ...prev, codeHint: true }));
+    incrementPending();
     analytics.trackCommandExecuted("code_hint");
 
     const currentAttachments = attachedContext;
@@ -1427,12 +1507,14 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       ]);
     } finally {
       setActionLoading((prev) => ({ ...prev, codeHint: false }));
+      decrementPending();
     }
   };
 
   const handleBrainstorm = async () => {
     setIsExpanded(true);
     setActionLoading((prev) => ({ ...prev, brainstorm: true }));
+    incrementPending();
     analytics.trackCommandExecuted("brainstorm");
 
     const currentAttachments = attachedContext;
@@ -1472,6 +1554,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       ]);
     } finally {
       setActionLoading((prev) => ({ ...prev, brainstorm: false }));
+      decrementPending();
     }
   };
 
@@ -1559,7 +1642,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Stream Done
     cleanups.push(
       window.electronAPI.onGeminiStreamDone(() => {
-        setIsProcessing(false);
+        decrementPending();
 
         // Calculate latency if we have a start time
         let latency = 0;
@@ -1618,7 +1701,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Stream Error
     cleanups.push(
       window.electronAPI.onGeminiStreamError((error) => {
-        setIsProcessing(false);
+        decrementPending();
         requestStartTimeRef.current = null; // Clear timer on error
         setMessages((prev) => {
           // Append error to the current message or add new one?
@@ -1696,7 +1779,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     if (window.electronAPI.onRAGStreamComplete) {
       cleanups.push(
         window.electronAPI.onRAGStreamComplete(() => {
-          setIsProcessing(false);
+          decrementPending();
           requestStartTimeRef.current = null;
           setMessages((prev) => {
             const lastMsg = prev[prev.length - 1];
@@ -1735,7 +1818,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     if (window.electronAPI.onRAGStreamError) {
       cleanups.push(
         window.electronAPI.onRAGStreamError((data: { error: string }) => {
-          setIsProcessing(false);
+          decrementPending();
           requestStartTimeRef.current = null;
           setMessages((prev) => {
             const lastMsg = prev[prev.length - 1];
@@ -1847,7 +1930,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         },
       ]);
 
-      setIsProcessing(true);
+      incrementPending();
 
       try {
         let prompt = "";
@@ -1893,7 +1976,7 @@ Provide only the answer, nothing else.`;
         );
       } catch (err) {
         // Initial invocation failing (e.g. IPC error before stream starts)
-        setIsProcessing(false);
+        decrementPending();
         setMessages((prev) => {
           const last = prev[prev.length - 1];
           // If we just added the empty streaming placeholder, remove it or fill it with error
@@ -1972,7 +2055,7 @@ Provide only the answer, nothing else.`;
     ]);
 
     setIsExpanded(true);
-    setIsProcessing(true);
+    incrementPending();
 
     try {
       // JIT RAG pre-flight: try to use indexed meeting context first
@@ -1996,7 +2079,7 @@ Provide only the answer, nothing else.`;
         conversationContext, // Pass context so "answer this" works
       );
     } catch (err) {
-      setIsProcessing(false);
+      decrementPending();
       setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last && last.isStreaming && last.text === "") {
@@ -2628,7 +2711,7 @@ Provide only the answer, nothing else.`;
     processScreenshots: handleWhatToSay,
     resetCancel: async () => {
       if (isProcessing) {
-        setIsProcessing(false);
+        decrementPending();
       } else {
         await window.electronAPI.resetIntelligence();
         setMessages([]);
@@ -2670,7 +2753,7 @@ Provide only the answer, nothing else.`;
     processScreenshots: handleWhatToSay,
     resetCancel: async () => {
       if (isProcessing) {
-        setIsProcessing(false);
+        decrementPending();
       } else {
         await window.electronAPI.resetIntelligence();
         setMessages([]);
@@ -2864,7 +2947,11 @@ Provide only the answer, nothing else.`;
   const getTranscriptSpeakerLabel = (
     speaker: LiveTranscriptTurn["speaker"],
   ) => {
-    if (speaker === "interviewer") return "Speaker";
+    if (speaker === "me") return "Me";
+    if (speaker === "interlocutor" || speaker === "interviewer") return "Speaker";
+    if (speaker === "speaker_1") return "Speaker 1";
+    if (speaker === "speaker_2") return "Speaker 2";
+    if (speaker === "uncertain") return "Uncertain";
     const diarizedMatch = /^locuteur[_-](\d+)$/i.exec(speaker);
     if (diarizedMatch) return `Locuteur ${Number(diarizedMatch[1]) + 1}`;
     if (/^speaker[_-](\d+)$/i.test(speaker)) {
@@ -3234,7 +3321,7 @@ Provide only the answer, nothing else.`;
                           className="group/transcript grid grid-cols-[72px_minmax(0,1fr)_24px] gap-2 text-[12px] leading-snug"
                         >
                           <div
-                            className={`font-semibold ${turn.speaker === "user" ? "text-emerald-400" : "overlay-text-muted"}`}
+                            className={`font-semibold ${turn.speaker === "user" || turn.speaker === "me" ? "text-emerald-400" : "overlay-text-muted"}`}
                           >
                             {getTranscriptSpeakerLabel(turn.speaker)}
                           </div>
@@ -3337,6 +3424,17 @@ Provide only the answer, nothing else.`;
                       </div>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {/* Meeting Dashboard — live health panel */}
+              {meetingHealth && (
+                <div className="mx-4 mt-1 mb-2 no-drag">
+                  <MeetingDashboard
+                    health={meetingHealth}
+                    risks={meetingRisks}
+                    isLightTheme={isLightTheme}
+                  />
                 </div>
               )}
 
