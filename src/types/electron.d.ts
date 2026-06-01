@@ -11,6 +11,17 @@ export interface CopilotDecisionPayload {
   suggestion?: string
   createdAt: number
   sourceSegmentIds: string[]
+  contextQuality?: {
+    score: number
+    status: 'ready' | 'listening' | 'weak' | 'cooldown' | 'generating'
+    label: string
+    reason: string
+    reliableInterlocutorSegments: number
+    meSegments: number
+    totalSegments: number
+    latestInterlocutorAgeMs?: number
+  }
+  nextBestAction?: 'say_this' | 'ask_this' | 'listen' | 'wait'
 }
 
 export interface MeetingHealthData {
@@ -49,6 +60,16 @@ export interface MeetingBriefData {
   sensitiveTopics?: string
   successCriteria?: string
   updatedAt?: number
+}
+
+export interface StartMeetingMetadata {
+  debugAudioRecording?: boolean
+  audio?: {
+    inputDeviceId?: string | null
+    outputDeviceId?: string | null
+    allowMicOnly?: boolean
+  }
+  [key: string]: any
 }
 
 type LlmProviderId = 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude' | 'codex'
@@ -191,6 +212,8 @@ export interface ElectronAPI {
   onNativeAudioSuggestion: (callback: (suggestion: { context: string; lastQuestion: string; confidence: number }) => void) => () => void
   onNativeAudioConnected: (callback: () => void) => () => void
   onNativeAudioDisconnected: (callback: () => void) => () => void
+  onSystemAudioSilent: (callback: (data: { message: string; rms?: number; peak?: number }) => void) => () => void
+  onSystemAudioActive: (callback: (data: { message: string; rms?: number; peak?: number }) => void) => () => void
   onSuggestionGenerated: (callback: (data: { question: string; suggestion: string; confidence: number }) => void) => () => void
   onSuggestionProcessingStart: (callback: () => void) => () => void
   onSuggestionError: (callback: (error: { error: string }) => void) => () => void
@@ -247,7 +270,7 @@ export interface ElectronAPI {
   modesRemoveAllNoteSections: (modeId: string) => Promise<{ success: boolean; error?: string }>
 
   // Meeting Lifecycle
-  startMeeting: (metadata?: any) => Promise<{ success: boolean; error?: string }>
+  startMeeting: (metadata?: StartMeetingMetadata) => Promise<{ success: boolean; error?: string }>
   getMeetingBrief: () => Promise<MeetingBriefData | null>
   saveMeetingBrief: (brief: MeetingBriefData) => Promise<{ success: boolean; brief?: MeetingBriefData | null; error?: string }>
   clearMeetingBrief: () => Promise<{ success: boolean; error?: string }>
@@ -276,6 +299,7 @@ export interface ElectronAPI {
   onIntelligenceManualResult: (callback: (data: { answer: string; question: string }) => void) => () => void
   onIntelligenceModeChanged: (callback: (data: { mode: string }) => void) => () => void
   onIntelligenceError: (callback: (data: { error: string, mode: string }) => void) => () => void;
+  onCopilotDecision: (callback: (data: CopilotDecisionPayload) => void) => () => void
   onCopilotSuggestion: (callback: (data: CopilotDecisionPayload) => void) => () => void
   onCopilotError: (callback: (data: { error: string }) => void) => () => void
   getMeetingHealth: () => Promise<{ health: MeetingHealthData | null; risks: DetectedRiskData[] }>

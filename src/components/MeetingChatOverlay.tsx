@@ -63,6 +63,7 @@ const getModelDisplayName = (model: string): string => {
         'gpt-4o-mini': 'GPT 4o Mini',
         'gpt-5.2': 'GPT 5.2 Codex',
         'gpt-5.1': 'GPT 5.1 Codex',
+        'codex:gpt-5.5': 'GPT 5.5 Codex',
         'codex:gpt-5.4': 'GPT 5.4 Codex',
         'codex:gpt-5.4-mini': 'GPT 5.4 Mini Codex',
         'codex:gpt-5.3': 'GPT 5.3 Codex',

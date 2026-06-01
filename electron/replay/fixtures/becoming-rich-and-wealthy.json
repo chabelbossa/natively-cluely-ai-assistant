@@ -1,0 +1,95 @@
+{
+  "name": "Becoming Rich and Wealthy",
+  "description": "French course/video with system speaker plus a short local learner intervention.",
+  "thresholds": {
+    "maxFalseMeRate": 0,
+    "maxDuplicateRate": 0.18,
+    "minInterlocutorFinals": 5,
+    "maxSuppressedExpectedMe": 0
+  },
+  "events": [
+    {
+      "channel": "system",
+      "provider": "deepgram",
+      "speaker": "interviewer",
+      "text": "Millionnaire de Harvey Cœur. Ce livre a aidé des millions de personnes à passer d'un état d'esprit pauvre à un état d'esprit riche.",
+      "timestamp": 1000,
+      "final": true,
+      "confidence": 0.97,
+      "expectedRole": "interlocutor"
+    },
+    {
+      "channel": "mic",
+      "provider": "deepgram",
+      "speaker": "user",
+      "text": "Millionnaire de Harvey Cœur. Ce livre a aidé des millions de personnes à passer d'un état d'esprit pauvre à un état d'esprit riche.",
+      "timestamp": 1300,
+      "final": true,
+      "confidence": 0.95,
+      "systemAudioActive": true,
+      "expectedRole": "suppressed"
+    },
+    {
+      "channel": "mic",
+      "provider": "deepgram",
+      "speaker": "user",
+      "text": "Si je comprends bien, avec ce livre je vais changer mon état d'esprit ?",
+      "timestamp": 5200,
+      "final": true,
+      "confidence": 0.96,
+      "systemAudioActive": false,
+      "expectedRole": "me"
+    },
+    {
+      "channel": "system",
+      "provider": "deepgram",
+      "speaker": "interviewer",
+      "text": "Partie 1. Comment les gens riches pensent et agissent. Caractéristique numéro 1.",
+      "timestamp": 7600,
+      "final": true,
+      "confidence": 0.98,
+      "expectedRole": "interlocutor"
+    },
+    {
+      "channel": "system",
+      "provider": "deepgram",
+      "speaker": "interviewer",
+      "text": "Les gens riches gèrent bien leur argent, les gens pauvres gèrent mal leur argent.",
+      "timestamp": 9900,
+      "final": true,
+      "confidence": 0.99,
+      "expectedRole": "interlocutor"
+    },
+    {
+      "channel": "mic",
+      "provider": "deepgram",
+      "speaker": "user",
+      "text": "Les gens riches gèrent bien leur argent, les gens pauvres gèrent mal leur argent.",
+      "timestamp": 10300,
+      "final": true,
+      "confidence": 0.97,
+      "systemAudioActive": true,
+      "expectedRole": "suppressed"
+    },
+    {
+      "channel": "system",
+      "provider": "deepgram",
+      "speaker": "interviewer",
+      "text": "Imaginez que vous achetiez une glace pour votre fils de cinq ans. Le vendeur met une seule boule dans un cornet.",
+      "timestamp": 13500,
+      "final": true,
+      "confidence": 0.98,
+      "expectedRole": "interlocutor"
+    },
+    {
+      "channel": "system",
+      "provider": "deepgram",
+      "speaker": "interviewer",
+      "text": "Quelques secondes plus tard, elle tombe par terre. Il se met à pleurer.",
+      "timestamp": 16200,
+      "final": true,
+      "confidence": 0.95,
+      "expectedRole": "interlocutor"
+    }
+  ]
+}

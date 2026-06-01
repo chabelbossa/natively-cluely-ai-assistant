@@ -1,5 +1,5 @@
 import Foundation
-import FluidAudio
+@preconcurrency import FluidAudio
 
 struct HelperEvent: Encodable {
     let type: String
@@ -206,7 +206,7 @@ actor ParakeetEngine {
             // Keep one speaker manager for the system stream. The mic stream is
             // intentionally not diarized and must not reset the system speaker IDs.
             if channel == "system" {
-                diarizerManager?.speakerManager.reset()
+                await diarizerManager?.speakerManager.reset()
                 emit(.init(
                     type: "status",
                     sessionId: sessionId,
@@ -357,7 +357,7 @@ actor ParakeetEngine {
             if channel == "system", diarizationAvailable, let diarizer = diarizerManager, !samples.isEmpty {
                 do {
                     let diarStarted = Date()
-                    let diarResult = try diarizer.performCompleteDiarization(
+                    let diarResult = try await diarizer.performCompleteDiarization(
                         samples,
                         sampleRate: sampleRate,
                         atTime: timeOffset
@@ -396,10 +396,26 @@ actor ParakeetEngine {
                 }
             }
 
-            // Reset session buffer for the next utterance
+            // Reset only the audio range that this finalization actually
+            // processed. The actor can accept new audio while ASR/diarization
+            // awaits, so replacing the whole SessionState here would silently
+            // drop chunks captured during a periodic live finalization.
             let audioDuration = Double(samples.count) / Double(sampleRate)
             let nextTimeOffset = channel == "system" ? timeOffset + audioDuration : timeOffset
-            sessions[sessionId] = SessionState(channel: channel, diarizedTimeOffset: nextTimeOffset)
+            if var latestSession = sessions[sessionId] {
+                if latestSession.samples.count > samples.count {
+                    latestSession.samples = Array(latestSession.samples.dropFirst(samples.count))
+                } else {
+                    latestSession.samples = []
+                }
+                latestSession.lastPartialSampleCount = 0
+                latestSession.lastPartialText = ""
+                latestSession.isPartialRunning = false
+                latestSession.diarizedTimeOffset = nextTimeOffset
+                sessions[sessionId] = latestSession
+            } else {
+                sessions[sessionId] = SessionState(channel: channel, diarizedTimeOffset: nextTimeOffset)
+            }
 
             if !text.isEmpty {
                 emit(.init(
@@ -424,19 +440,23 @@ actor ParakeetEngine {
         let modelDir = home
             .appendingPathComponent("Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v3")
 
-        let required = [
-            "Encoder.mlmodelc",
-            "Decoder.mlmodelc",
-            "JointDecision.mlmodelc",
-            "Preprocessor.mlmodelc",
+        let requiredGroups = [
+            ["Encoder.mlmodelc"],
+            ["Decoder.mlmodelc"],
+            ["Preprocessor.mlmodelc"],
+            // FluidAudio's current Parakeet V3 cache stores this as
+            // JointDecisionv3.mlmodelc. Older caches used JointDecision.mlmodelc.
+            ["JointDecisionv3.mlmodelc", "JointDecision.mlmodelc"],
         ]
 
-        return required.allSatisfy { name in
-            var isDirectory: ObjCBool = false
-            return FileManager.default.fileExists(
-                atPath: modelDir.appendingPathComponent(name).path,
-                isDirectory: &isDirectory
-            ) && isDirectory.boolValue
+        return requiredGroups.allSatisfy { candidates in
+            candidates.contains { name in
+                var isDirectory: ObjCBool = false
+                return FileManager.default.fileExists(
+                    atPath: modelDir.appendingPathComponent(name).path,
+                    isDirectory: &isDirectory
+                ) && isDirectory.boolValue
+            }
         }
     }
 

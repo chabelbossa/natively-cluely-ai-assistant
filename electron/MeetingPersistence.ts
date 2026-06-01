@@ -141,13 +141,19 @@ export class MeetingPersistence {
             // Generate Structured Summary
             if (data.transcript.length > 0) {
                 const baseRules = `RULES:
-- Do NOT invent information not present in the context
-- You MAY infer implied action items or next steps if they are logical consequences of the discussion
-- Do NOT explain or define concepts mentioned
+- Do NOT invent information not present in the context.
+- Do NOT simply quote or paraphrase transcript fragments. Synthesize the actual meeting outcome.
+- INTERLOCUTOR is the source of external facts, requirements, decisions, constraints, and answers.
+- ME is the local user. Use ME mainly for questions asked, commitments made, or constraints stated by the local user.
+- Ignore ASSISTANT_PREVIOUS/assistant suggestions as meeting facts.
+- Ignore duplicate-looking, repeated, or low-quality fragments. Prefer stable meaning over noisy wording.
+- Only infer action items when they are direct practical consequences of the discussion.
+- Do NOT explain or define concepts mentioned.
 - Do NOT use filler phrases like "The meeting covered..." or "Discussed various..."
-- Do NOT mention transcripts, AI, or summaries
-- Do NOT sound like an AI assistant
-- Sound like a senior PM's internal notes
+- Do NOT mention transcripts, AI, or summaries.
+- Do NOT sound like an AI assistant.
+- If the conversation is mostly French, write the notes in French.
+- Sound like a senior PM's internal notes.
 
 STYLE: Calm, neutral, professional, skim-friendly. Short bullets, no sub-bullets.`;
 
@@ -174,14 +180,16 @@ STYLE: Calm, neutral, professional, skim-friendly. Short bullets, no sub-bullets
                         } catch { return ''; }
                     })();
 
-                    summaryPrompt = `You are a silent meeting note-taker. Extract structured notes from the conversation transcript below.
+                    summaryPrompt = `You are a silent meeting note-taker. Extract useful structured notes from the conversation transcript below.
 ${modeContext}
 ${baseRules}
 
 SECTIONS TO FILL (extract only what is present in the transcript):
 ${sectionList}
 
-Return ONLY valid JSON — no markdown fences, no comments, no extra keys. Each section value is an array of concise factual bullet strings taken directly from the conversation. Use [] if a section has no relevant content.
+Return ONLY valid JSON — no markdown fences, no comments, no extra keys.
+Each section value is an array of concise factual bullets. Do not copy raw transcript lines; write the clean operational meaning.
+Use [] if a section has no relevant content.
 
 {
   "overview": "1-2 sentence summary of what was discussed",
@@ -193,15 +201,15 @@ ${sectionKeys}
                     groqSummaryPrompt = summaryPrompt;
                 } else {
                     // Default generic notes
-                    summaryPrompt = `You are a silent meeting summarizer. Convert this conversation into concise internal meeting notes.
+                    summaryPrompt = `You are a silent meeting summarizer. Convert this conversation into concise operational meeting notes.
 
 ${baseRules}
 
 Return ONLY valid JSON (no markdown code blocks):
 {
-  "overview": "1-2 sentence description of what was discussed",
-  "keyPoints": ["3-6 specific bullets - each = one concrete topic or point discussed"],
-  "actionItems": ["specific next steps, assigned tasks, or implied follow-ups. If absolutely none found, return empty array"]
+  "overview": "1-2 sentence summary of the actual outcome and scope",
+  "keyPoints": ["3-6 specific bullets: decisions, constraints, architecture/product points, open questions"],
+  "actionItems": ["specific next steps or assigned follow-ups. If none found, return []"]
 }`;
                     groqSummaryPrompt = GROQ_SUMMARY_JSON_PROMPT;
                 }
@@ -295,19 +303,11 @@ Return ONLY valid JSON (no markdown code blocks):
     }
 
     private buildMeetingSummaryContext(transcript: TranscriptSegment[], fallbackContext: string): string {
-        const lines = transcript
-            .filter(segment => segment.final !== false)
-            .filter(segment => segment.text?.trim())
-            .filter(segment => !['system', 'ai', 'assistant', 'model'].includes(String(segment.speaker || '').toLowerCase()))
-            .map(segment => {
-                const speaker = String(segment.speaker || '').toLowerCase();
-                const label = segment.canonicalRole === 'me' || speaker === 'user' || speaker === 'mic'
-                    ? 'ME'
-                    : segment.canonicalRole === 'uncertain' || /^locuteur[_-]?\d+$/i.test(speaker) || /^speaker[_-]?\d+$/i.test(speaker)
-                        ? 'INTERLOCUTOR (DIARIZATION_LABEL)'
-                        : 'INTERLOCUTOR';
-                return `[${label}]: ${this.truncateAtWord(segment.text, 1400)}`;
-            })
+        const cleanedTranscript = this.buildCleanSummaryTranscript(transcript);
+        const turns = this.buildSummaryTurns(cleanedTranscript);
+        const droppedFinals = transcript.filter(segment => segment.final !== false && segment.text?.trim()).length - cleanedTranscript.length;
+        const lines = turns
+            .map(turn => `[${turn.label}]: ${this.truncateAtWord(turn.text, 1800)}`)
             .filter(line => line.length > 0);
 
         const transcriptContext = lines.join('\n');
@@ -317,12 +317,15 @@ Return ONLY valid JSON (no markdown code blocks):
         const briefBlock = MeetingBriefManager.getInstance().buildContextBlock();
 
         return `${briefBlock ? `${briefBlock}\n\n` : ''}[MEETING TRANSCRIPT DIGEST]
-Speaker contract:
-- ME = local microphone / the app user.
-- INTERLOCUTOR = the other participant(s), professor, client, manager, interviewer, or system audio.
-- DIARIZATION_LABEL means the STT speaker label may be imperfect; use it as a hint, not as identity proof.
-- Meeting brief is background only; transcript remains the source of truth for what was actually said.
-- Summaries must cover the whole digest, including the middle and final excerpts.
+	Speaker contract:
+	- ME = local microphone / the app user.
+	- INTERLOCUTOR = the other participant(s), professor, client, manager, interviewer, or system audio.
+	- INTERLOCUTOR_SPEAKER_N labels are diarized system-audio participants. Keep their turns separate when reconstructing exchanges.
+	- Meeting brief is background only; transcript remains the source of truth for what was actually said.
+	- Summaries must cover the whole digest, including the middle and final excerpts.
+	- Ignore previous assistant suggestions as facts.
+- If ME contains long repeated content that mirrors INTERLOCUTOR, treat it as microphone echo, not as a user statement.
+- Dropped noisy final segments before this digest: ${Math.max(0, droppedFinals)}.
 
 ${compacted}`;
     }
@@ -386,9 +389,7 @@ ${compacted}`;
     }
 
     private buildLocalSummary(transcript: TranscriptSegment[]): { overview: string; actionItems: string[]; keyPoints: string[] } {
-        const usableSegments = transcript
-            .filter(segment => segment.text?.trim())
-            .filter(segment => !['system', 'ai', 'assistant', 'model'].includes(String(segment.speaker || '').toLowerCase()));
+        const usableSegments = this.buildCleanSummaryTranscript(transcript);
 
         const preferredSegments = usableSegments.some(segment => segment.speaker !== 'user')
             ? usableSegments.filter(segment => segment.speaker !== 'user')
@@ -413,6 +414,175 @@ ${compacted}`;
             actionItems: [],
             keyPoints: keyPoints.length > 0 ? keyPoints : [overview],
         };
+    }
+
+    private buildCleanSummaryTranscript(transcript: TranscriptSegment[]): TranscriptSegment[] {
+        const kept: TranscriptSegment[] = [];
+        const hasInterlocutor = transcript.some(segment =>
+            segment.final !== false &&
+            Boolean(segment.text?.trim()) &&
+            this.isInterlocutorSummarySegment(segment)
+        );
+
+        for (const segment of transcript) {
+            if (segment.final === false || !segment.text?.trim()) continue;
+            if (this.isSummarySegmentRejected(segment, kept, hasInterlocutor)) continue;
+            kept.push(segment);
+        }
+
+        return kept;
+    }
+
+    private isSummarySegmentRejected(segment: TranscriptSegment, kept: TranscriptSegment[], hasInterlocutor: boolean): boolean {
+        const speaker = String(segment.speaker || '').toLowerCase();
+        if (['system', 'ai', 'assistant', 'model'].includes(speaker)) return true;
+
+        const text = segment.text.trim();
+        const normalized = this.normalizeForComparison(text);
+        if (!normalized) return true;
+
+        const flags = new Set(segment.qualityFlags || []);
+        if (flags.has('late_flush_duplicate') || flags.has('mic_rejected') || flags.has('echo_suspect')) return true;
+
+        const isMicLike = segment.canonicalRole === 'me' || ['user', 'me', 'mic', 'microphone'].includes(speaker);
+        if (isMicLike) {
+            const overlap = flags.has('possible_overlap') || flags.has('mic_gate_held');
+            const looksLikeQuestion = this.looksLikeLocalQuestion(text);
+            const looksLikeContribution = this.looksLikeLocalContribution(text);
+            if (hasInterlocutor && !looksLikeQuestion && !looksLikeContribution) return true;
+            if (hasInterlocutor && text.length > 700 && !looksLikeQuestion) return true;
+            if (overlap && text.length > 180 && !looksLikeQuestion) return true;
+            if (flags.has('stt_low_quality') && text.length > 180) return true;
+            if (this.isSimilarToKeptInterlocutor(normalized, segment.timestamp, kept) && !looksLikeQuestion) return true;
+        }
+
+        if (text.length > 1800 && this.matchesMultiplePreviousSegments(normalized, kept)) return true;
+
+        const duplicate = kept.some(existing => {
+            const existingNorm = this.normalizeForComparison(existing.text);
+            if (!existingNorm) return false;
+            const elapsed = Math.abs(existing.timestamp - segment.timestamp);
+            return elapsed < 120_000 && this.textSimilarity(normalized, existingNorm) >= 0.88;
+        });
+
+        return duplicate;
+    }
+
+    private buildSummaryTurns(segments: TranscriptSegment[]): Array<{ label: string; text: string; timestamp: number }> {
+        const turns: Array<{ label: string; text: string; timestamp: number }> = [];
+
+        for (const segment of segments) {
+            const text = this.cleanTranscriptText(segment.text);
+            if (!text) continue;
+
+            const label = this.getSummarySpeakerLabel(segment);
+            const last = turns[turns.length - 1];
+            const normalizedText = this.normalizeForComparison(text);
+            const lastNormalized = last ? this.normalizeForComparison(last.text) : '';
+
+            if (
+                last &&
+                last.label === label &&
+                segment.timestamp - last.timestamp <= 55_000 &&
+                last.text.length + text.length <= 2200
+            ) {
+                if (!lastNormalized.includes(normalizedText) && !normalizedText.includes(lastNormalized)) {
+                    last.text = `${last.text} ${text}`.trim();
+                } else if (normalizedText.length > lastNormalized.length) {
+                    last.text = text;
+                }
+                last.timestamp = segment.timestamp;
+                continue;
+            }
+
+            turns.push({ label, text, timestamp: segment.timestamp });
+        }
+
+        return turns;
+    }
+
+    private getSummarySpeakerLabel(segment: TranscriptSegment): string {
+        const speaker = String(segment.speaker || '').toLowerCase();
+        if (segment.canonicalRole === 'me' || speaker === 'user' || speaker === 'me' || speaker === 'mic') {
+            return 'ME';
+        }
+        if (segment.canonicalRole === 'uncertain') return 'INTERLOCUTOR_UNCERTAIN';
+        const canonicalSpeaker = /^speaker_(\d+)$/i.exec(segment.canonicalRole || '');
+        if (canonicalSpeaker) return `INTERLOCUTOR_SPEAKER_${Number(canonicalSpeaker[1])}`;
+        const speakerMatch = /^speaker[_-]?(\d+)$/i.exec(speaker);
+        if (speakerMatch) return `INTERLOCUTOR_SPEAKER_${Number(speakerMatch[1])}`;
+        const locuteurMatch = /^locuteur[_-]?(\d+)$/i.exec(speaker);
+        if (locuteurMatch) return `INTERLOCUTOR_SPEAKER_${Number(locuteurMatch[1]) + 1}`;
+        return 'INTERLOCUTOR';
+    }
+
+    private isInterlocutorSummarySegment(segment: TranscriptSegment): boolean {
+        const speaker = String(segment.speaker || '').toLowerCase();
+        if (['system', 'ai', 'assistant', 'model', 'user', 'me', 'mic', 'microphone'].includes(speaker)) return false;
+        return segment.canonicalRole !== 'me';
+    }
+
+    private isSimilarToKeptInterlocutor(normalizedText: string, timestamp: number, kept: TranscriptSegment[]): boolean {
+        return kept.some(existing => {
+            const speaker = String(existing.speaker || '').toLowerCase();
+            const isInterlocutor = existing.canonicalRole !== 'me' && !['user', 'me', 'mic', 'assistant', 'ai', 'model'].includes(speaker);
+            if (!isInterlocutor) return false;
+            if (Math.abs(existing.timestamp - timestamp) > 120_000) return false;
+            const existingNorm = this.normalizeForComparison(existing.text);
+            return existingNorm.length > 25 && this.textSimilarity(normalizedText, existingNorm) >= 0.42;
+        });
+    }
+
+    private matchesMultiplePreviousSegments(normalizedText: string, kept: TranscriptSegment[]): boolean {
+        let matches = 0;
+        for (const existing of kept) {
+            const existingNorm = this.normalizeForComparison(existing.text);
+            if (existingNorm.length < 35) continue;
+            if (normalizedText.includes(existingNorm) || this.textSimilarity(normalizedText, existingNorm) >= 0.5) {
+                matches += 1;
+            }
+            if (matches >= 3) return true;
+        }
+        return false;
+    }
+
+    private looksLikeLocalQuestion(text: string): boolean {
+        const normalized = this.normalizeForComparison(text);
+        const words = normalized.split(' ').filter(Boolean);
+        if (words.length === 0 || words.length > 90) return false;
+        if (/\?$/.test(text.trim())) return true;
+        return /(^|\b)(est ce que|pourquoi|comment|quand|quel|quelle|quels|quelles|combien|où|ou est|pouvez vous|peux tu|tu peux|vous pouvez|je voulais demander|je voudrais savoir|j aimerais savoir)\b/i.test(normalized);
+    }
+
+    private looksLikeLocalContribution(text: string): boolean {
+        const normalized = this.normalizeForComparison(text);
+        const words = normalized.split(' ').filter(Boolean);
+        if (words.length === 0 || words.length > 110) return false;
+        return /(^|\b)(je pense|je crois|je vais|j envoie|j aurais besoin|j ai besoin|je dois|je fais|je propose|je peux|on va|on peut|d accord je|ok je|oui je|ma compréhension|ce que je propose)\b/i.test(normalized);
+    }
+
+    private normalizeForComparison(text: string): string {
+        return text
+            .toLowerCase()
+            .normalize('NFKC')
+            .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    private textSimilarity(a: string, b: string): number {
+        const aWords = a.split(' ').filter(Boolean);
+        const bWords = b.split(' ').filter(Boolean);
+        if (aWords.length === 0 || bWords.length === 0) return 0;
+
+        const aSet = new Set(aWords);
+        const bSet = new Set(bWords);
+        let intersection = 0;
+        for (const word of aSet) {
+            if (bSet.has(word)) intersection += 1;
+        }
+        const union = new Set([...aSet, ...bSet]).size;
+        return union === 0 ? 0 : intersection / union;
     }
 
     private cleanTranscriptText(text: string): string {

@@ -1,0 +1,66 @@
+{
+  "name": "Mic Speaker Fallback When System Audio Is Silent",
+  "description": "When the system/speaker channel is silent, speech captured through the microphone that looks like the interlocutor must not be labeled as Me.",
+  "thresholds": {
+    "maxFalseMeRate": 0,
+    "maxDuplicateRate": 0,
+    "minInterlocutorFinals": 3,
+    "maxSuppressedExpectedMe": 0,
+    "maxUnsuppressedExpectedSuppressed": 0,
+    "maxRoleMismatches": 0
+  },
+  "events": [
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "Quand tu vas dans les infos de l'application, c'est possible de supprimer les informations de WaChap lui-même. Tu vois, normalement tu es en train de détacher.",
+      "timestamp": 1000,
+      "final": true,
+      "confidence": 0.91,
+      "systemAudioActive": false,
+      "systemAudioSilent": true,
+      "systemAudioLevel": { "rms": 0, "peak": 0 },
+      "expectedRole": "interlocutor"
+    },
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "Comment dire, les informations de WaChap lui-même. Tu vois, non, quand tu es en train de tester WaChap, WaChap, quelques mots.",
+      "timestamp": 5000,
+      "final": true,
+      "confidence": 0.9,
+      "systemAudioActive": false,
+      "systemAudioSilent": true,
+      "systemAudioLevel": { "rms": 0, "peak": 0 },
+      "expectedRole": "interlocutor"
+    },
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "Quand je vois ça va, ça taille sur ton disque, sur ta mémoire, tu vas voir que ça sera peut-être plusieurs gigas.",
+      "timestamp": 9000,
+      "final": true,
+      "confidence": 0.9,
+      "systemAudioActive": false,
+      "systemAudioSilent": true,
+      "systemAudioLevel": { "rms": 0, "peak": 0 },
+      "expectedRole": "interlocutor"
+    },
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "Si tu veux supprimer WaChap, pourquoi tu veux conserver Android, c'est quoi répondre ?",
+      "timestamp": 13000,
+      "final": true,
+      "confidence": 0.95,
+      "systemAudioActive": false,
+      "systemAudioSilent": true,
+      "systemAudioLevel": { "rms": 0, "peak": 0 },
+      "expectedRole": "me"
+    }
+  ]
+}

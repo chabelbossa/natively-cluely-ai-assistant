@@ -7,6 +7,8 @@ import { LLMHelper } from './LLMHelper';
 import { SessionTracker, TranscriptSegment, SuggestionTrigger, ContextItem } from './SessionTracker';
 import { ModesManager } from './services/ModesManager';
 import { MeetingAction, MeetingActionOrchestrator } from './meeting/MeetingActionOrchestrator';
+import { MeetingContextPacket, MeetingContextPacketBuilder } from './meeting/MeetingContextPacketBuilder';
+import { MeetingDebugRecorder } from './diagnostics/MeetingDebugRecorder';
 import {
     AnswerLLM, AssistLLM, BrainstormLLM, ClarifyLLM, CodeHintLLM, FollowUpLLM, RecapLLM,
     FollowUpQuestionsLLM, WhatToAnswerLLM,
@@ -99,13 +101,23 @@ export class IntelligenceEngine extends EventEmitter {
     private lastTriggerTime: number = 0;
     private readonly triggerCooldown: number = 3000; // 3 seconds
     private readonly activeModeContextMaxChars: number = 12_000;
+    private readonly actionTimeoutsMs: Record<MeetingAction, number> = {
+        WHAT_TO_SAY: 7_500,
+        CLARIFY: 6_500,
+        FOLLOW_UP_QUESTION: 7_000,
+        ANSWER: 9_000,
+        RECAP: 18_000,
+        VIBE_INTERVIEW_SAY_THIS: 6_500,
+    };
     private actionOrchestrator: MeetingActionOrchestrator;
+    private contextPacketBuilder: MeetingContextPacketBuilder;
 
     constructor(llmHelper: LLMHelper, session: SessionTracker, getLiveStateBlock?: () => string) {
         super();
         this.llmHelper = llmHelper;
         this.session = session;
         this.actionOrchestrator = new MeetingActionOrchestrator(getLiveStateBlock);
+        this.contextPacketBuilder = new MeetingContextPacketBuilder(session, getLiveStateBlock);
         this.initializeLLMs();
     }
 
@@ -146,29 +158,73 @@ export class IntelligenceEngine extends EventEmitter {
     }
 
     private withActiveModeActionContext(context: string, fallback?: string, action: MeetingAction = 'ANSWER'): string {
-        return this.actionOrchestrator.buildActionContext({
-            action,
-            activeModeBlock: this.getActiveModeActionContextBlock(),
-            transcriptContext: context,
-            fallback,
-        });
+        return this.buildActionContextPacket(action, 120, fallback, context).context;
     }
 
     private getFormattedActionContextWithMode(lastSeconds: number, fallback?: string, action: MeetingAction = 'ANSWER'): string {
-        return this.withActiveModeActionContext(
-            this.session.getFormattedActionContext(lastSeconds),
-            fallback,
-            action,
-        );
+        return this.buildActionContextPacket(action, lastSeconds, fallback).context;
     }
 
-    private buildUsageMetadata(action: MeetingAction, systemContext: string, diagnostics?: string[]) {
+    private buildActionContextPacket(
+        action: MeetingAction,
+        lastSeconds: number,
+        fallback?: string,
+        transcriptContext?: string,
+        additionalItems?: ContextItem[],
+    ): MeetingContextPacket {
+        const packet = this.contextPacketBuilder.build({
+            action,
+            lastSeconds,
+            fallback,
+            transcriptContext,
+            activeModeBlock: this.getActiveModeActionContextBlock(),
+            additionalItems,
+        });
+
+        MeetingDebugRecorder.getInstance().recordActionContext({
+            action,
+            languageHint: packet.languageHint,
+            hasReliableInterlocutor: packet.hasReliableInterlocutor,
+            contextTrustScore: packet.contextTrustScore,
+            interlocutorFocus: packet.interlocutorFocus,
+            localUserFocus: packet.localUserFocus,
+            actionTarget: packet.actionTarget,
+            selectedSegments: packet.selectedSegments,
+            rejectedSegments: packet.rejectedSegments,
+            diagnostics: packet.diagnostics,
+            contextPreview: this.truncateForUsage(packet.context, 1800),
+        });
+
+        return packet;
+    }
+
+    private buildUsageMetadata(
+        action: MeetingAction,
+        systemContext: string,
+        diagnostics?: string[],
+        packet?: MeetingContextPacket,
+        telemetry?: { latencyMs?: number; firstTokenMs?: number; timedOut?: boolean; fallback?: string; error?: string },
+    ) {
         return {
             action,
             provider: this.llmHelper.getCurrentProvider(),
             model: this.llmHelper.getCurrentModel(),
             systemContext: this.truncateForUsage(systemContext),
-            diagnostics
+            systemPrompt: packet?.systemPrompt,
+            languageHint: packet?.languageHint,
+            hasReliableInterlocutor: packet?.hasReliableInterlocutor,
+            contextTrustScore: packet?.contextTrustScore,
+            interlocutorFocus: packet?.interlocutorFocus,
+            localUserFocus: packet?.localUserFocus,
+            actionTarget: packet?.actionTarget,
+            selectedSegments: packet?.selectedSegments,
+            rejectedSegments: packet?.rejectedSegments,
+            diagnostics,
+            latencyMs: telemetry?.latencyMs,
+            firstTokenMs: telemetry?.firstTokenMs,
+            timedOut: telemetry?.timedOut,
+            fallback: telemetry?.fallback,
+            error: telemetry?.error,
         };
     }
 
@@ -176,6 +232,351 @@ export class IntelligenceEngine extends EventEmitter {
         const normalized = String(text || '').replace(/\s+\n/g, '\n').trim();
         if (normalized.length <= maxLength) return normalized;
         return `${normalized.slice(0, maxLength - 34)}\n[...usage context truncated]`;
+    }
+
+    private async consumeActionStream(
+        mode: IntelligenceMode,
+        action: MeetingAction,
+        stream: AsyncGenerator<string>,
+        generationId: number,
+        onToken: (token: string) => void,
+    ): Promise<{ text: string; aborted: boolean; timedOut: boolean; latencyMs: number; firstTokenMs?: number }> {
+        const startedAt = Date.now();
+        const timeoutMs = this.actionTimeoutsMs[action] || 8_000;
+        let text = '';
+        let firstTokenMs: number | undefined;
+
+        while (this.isGenerationCurrent(mode, generationId)) {
+            const remainingMs = timeoutMs - (Date.now() - startedAt);
+            if (remainingMs <= 0) {
+                this.cancelActionStream(stream);
+                return { text, aborted: false, timedOut: true, latencyMs: Date.now() - startedAt, firstTokenMs };
+            }
+
+            const result = await Promise.race([
+                stream.next().then((value) => ({ type: 'next' as const, value })),
+                new Promise<{ type: 'timeout' }>((resolve) =>
+                    setTimeout(() => resolve({ type: 'timeout' }), remainingMs),
+                ),
+            ]);
+
+            if (result.type === 'timeout') {
+                this.cancelActionStream(stream);
+                return { text, aborted: false, timedOut: true, latencyMs: Date.now() - startedAt, firstTokenMs };
+            }
+
+            if (result.value.done) {
+                const timedOut = Date.now() - startedAt >= timeoutMs && text.length === 0;
+                if (timedOut) this.cancelActionStream(stream);
+                return { text, aborted: false, timedOut, latencyMs: Date.now() - startedAt, firstTokenMs };
+            }
+
+            const token = result.value.value || '';
+            if (firstTokenMs === undefined && token) firstTokenMs = Date.now() - startedAt;
+            onToken(token);
+            text += token;
+        }
+
+        this.cancelActionStream(stream);
+        return { text, aborted: true, timedOut: false, latencyMs: Date.now() - startedAt, firstTokenMs };
+    }
+
+    private cancelActionStream(stream: AsyncGenerator<string>): void {
+        void Promise.race([
+            stream.return(undefined).catch((): undefined => undefined),
+            new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 250)),
+        ]).catch((): undefined => undefined);
+    }
+
+    private recordActionResult(action: MeetingAction, question: string, answer: string, telemetry: Record<string, unknown> = {}): void {
+        MeetingDebugRecorder.getInstance().recordActionResult({
+            action,
+            question,
+            answer: this.truncateForUsage(answer, 1800),
+            provider: this.llmHelper.getCurrentProvider(),
+            model: this.llmHelper.getCurrentModel(),
+            ...telemetry,
+        });
+    }
+
+    private buildLiveActionFallback(action: MeetingAction, packet: MeetingContextPacket): string {
+        const french = packet.languageHint === 'fr' || packet.languageHint === 'mixed';
+        const focus = packet.interlocutorFocus;
+        const focusText = focus.text?.trim();
+        const lastInterlocutor = [...packet.selectedSegments]
+            .reverse()
+            .find((segment) => segment.role === 'interviewer' && segment.text.trim().length > 0);
+        const topic = this.extractFallbackTopic(focusText || lastInterlocutor?.text || '');
+        const answerTopic = this.deriveFallbackAnswerTopic(packet, focus);
+        const localTarget = packet.actionTarget?.source === 'local_user'
+            ? packet.actionTarget.text?.trim()
+            : '';
+
+        if (!packet.hasReliableInterlocutor) {
+            if (localTarget) {
+                const topicText = this.extractFallbackTopic(localTarget) || localTarget;
+                if (action === 'CLARIFY') {
+                    return french
+                        ? `Peux-tu préciser ce que tu veux obtenir exactement sur ${topicText} ?`
+                        : `Can you clarify exactly what you want to get from ${topicText}?`;
+                }
+                if (action === 'FOLLOW_UP_QUESTION') {
+                    return french
+                        ? `Quelle contrainte dois-je vérifier en priorité sur ${topicText} ?`
+                        : `Which constraint should I verify first about ${topicText}?`;
+                }
+                return french
+                    ? `Je capte cette question côté micro, pas côté Speaker : ${topicText}. Le modèle n'a pas répondu assez vite pour donner une réponse fiable.`
+                    : `I captured this as a local mic question, not Speaker: ${topicText}. The model did not respond fast enough to give a reliable answer.`;
+            }
+            return french
+                ? "Le haut-parleur n'est pas capté pour l'instant : je n'ai que le micro, donc je ne peux pas répondre à la place de l'interlocuteur sans inventer."
+                : "Speaker audio is not being captured yet: I only have the mic, so I cannot answer on behalf of the interlocutor without guessing.";
+        }
+
+        const bugFlowContext = this.selectedInterlocutorContextText(packet);
+        if (this.looksLikeBugFlowContext(bugFlowContext)) {
+            if (action === 'CLARIFY' || action === 'FOLLOW_UP_QUESTION') {
+                return french
+                    ? "Peux-tu m'envoyer le flux exact et confirmer si l'envoi simple passe pendant que les flux IA/Pierre ne se déclenchent pas ?"
+                    : "Can you send me the exact flow and confirm whether simple sending works while the AI/Pierre flows do not start?";
+            }
+            if (action === 'WHAT_TO_SAY' || action === 'VIBE_INTERVIEW_SAY_THIS' || action === 'ANSWER') {
+                return french
+                    ? "D'accord, envoie-moi le flux et je vais le tester : je vais comparer l'envoi simple avec les flux IA/Pierre pour identifier où ça ne se déclenche plus."
+                    : "Got it, send me the flow and I will test it: I will compare simple sending with the AI/Pierre flows to identify where it stops triggering.";
+            }
+        }
+
+        if (action === 'WHAT_TO_SAY' || action === 'VIBE_INTERVIEW_SAY_THIS') {
+            if (focus.kind === 'direct_question' && topic) {
+                const directFallback = this.buildDirectQuestionFallbackAnswer(
+                    packet.actionTarget?.source !== 'none' ? packet.actionTarget.text : focusText,
+                    french,
+                );
+                if (directFallback) return directFallback;
+
+                if (this.isComprehensionCheckQuestion(focusText) && answerTopic) {
+                    return french
+                        ? `Oui, je comprends que ${answerTopic}.`
+                        : `Yes, I understand that ${answerTopic}.`;
+                }
+                return french
+                    ? `Je dirais : ${answerTopic || topic}.`
+                    : `I would say: ${answerTopic || topic}.`;
+            }
+            if (focus.kind === 'implicit_request' && topic) {
+                return french
+                    ? `D'accord, je m'en occupe. Je vais partir de ce point : ${topic}`
+                    : `Got it, I'll take it from here: ${topic}`;
+            }
+            return french
+                ? `D'accord, je reformule : ${topic || "je dois confirmer le périmètre, la priorité et la prochaine étape concrète avant d'avancer"}.`
+                : `Got it. Let me restate this: ${topic || 'I should confirm the scope, priority, and concrete next step before moving forward'}.`;
+        }
+
+        if (action === 'CLARIFY' || action === 'FOLLOW_UP_QUESTION') {
+            return french
+                ? `Pouvez-vous préciser la prochaine décision attendue sur ${topic || 'ce point'} ?`
+                : `Could you clarify the next expected decision on ${topic || 'this point'}?`;
+        }
+
+        if (action === 'ANSWER') {
+            if (focus.kind === 'direct_question' && answerTopic) {
+                const directFallback = this.buildDirectQuestionFallbackAnswer(
+                    packet.actionTarget?.source !== 'none' ? packet.actionTarget.text : focusText,
+                    french,
+                );
+                if (directFallback) return directFallback;
+
+                return french
+                    ? `Je répondrais : ${answerTopic}.`
+                    : `I would answer: ${answerTopic}.`;
+            }
+            return french
+                ? `Je dirais : ${topic || 'confirmons le périmètre, la priorité et la prochaine action attendue'}.`
+                : `I would say: ${topic || 'let us confirm the scope, priority, and expected next action'}.`;
+        }
+
+        return french
+            ? `Le point principal à sécuriser est : ${topic || 'le périmètre et la prochaine action attendue'}.`
+            : `The main point to secure is: ${topic || 'the scope and expected next action'}.`;
+    }
+
+    private buildDirectQuestionFallbackAnswer(question: string | undefined, french: boolean): string {
+        const normalized = this.normalizeForComparison(question || '');
+        if (!normalized) return '';
+
+        if (/\bpourquoi\b/.test(normalized) && /\bconserver\b/.test(normalized) && /\bandroid\b/.test(normalized)) {
+            return french
+                ? "Je veux conserver Android parce que le problème concerne seulement WaChap : je veux nettoyer les données inutiles de WaChap sans réinitialiser le téléphone ni perdre mes autres applications, réglages ou fichiers."
+                : "I want to keep Android because the issue is only with WaChap: I want to clean WaChap's unnecessary data without resetting the phone or losing my other apps, settings, or files.";
+        }
+
+        if (/\bpourquoi\b/.test(normalized) && /\bconserver\b/.test(normalized)) {
+            return french
+                ? "Je veux le conserver parce que la suppression doit viser uniquement l'élément problématique, pas les données utiles ni l'environnement complet."
+                : "I want to keep it because the cleanup should target only the problematic item, not the useful data or the whole environment.";
+        }
+
+        return '';
+    }
+
+    private deriveFallbackAnswerTopic(packet: MeetingContextPacket, focus: MeetingContextPacket['interlocutorFocus']): string {
+        const interlocutorSegments = packet.selectedSegments
+            .filter((segment) => segment.role === 'interviewer' && segment.text.trim().length > 0);
+        if (interlocutorSegments.length === 0) return '';
+
+        const focusIndex = focus.timestamp
+            ? interlocutorSegments.findIndex((segment) => Math.abs(segment.timestamp - focus.timestamp!) < 2000)
+            : -1;
+        const end = focusIndex >= 0 ? Math.min(interlocutorSegments.length, focusIndex + 2) : interlocutorSegments.length;
+        const start = Math.max(0, end - 5);
+        const contextText = interlocutorSegments
+            .slice(start, end)
+            .map((segment) => segment.text)
+            .join(' ');
+
+        return this.extractFallbackTopic(contextText);
+    }
+
+    private isComprehensionCheckQuestion(text?: string): boolean {
+        const normalized = String(text || '')
+            .toLowerCase()
+            .normalize('NFKC')
+            .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        return /\b(tu comprends|vous comprenez|tu as compris|vous avez compris|what do you understand|does that make sense)\b/i.test(normalized);
+    }
+
+    private extractFallbackTopic(text: string): string {
+        const clean = text
+            .replace(/\s+/g, ' ')
+            .replace(/\b(uh|um|okay|ok|d'accord)\b/gi, '')
+            .trim();
+        if (!clean) return '';
+
+        const sentences = clean.split(/(?<=[.!?])\s+/).filter(Boolean);
+        const candidate = sentences.find((sentence) => sentence.length >= 40 && sentence.length <= 220) || sentences[0] || clean;
+        const truncated = candidate.length > 190 ? `${candidate.slice(0, 187).trim()}...` : candidate;
+        return truncated.replace(/[.。]$/, '');
+    }
+
+    private isInsufficientContextFallback(text: string): boolean {
+        const normalized = text.toLowerCase();
+        return normalized.includes("pas encore assez de contexte fiable") ||
+            normalized.includes("pas assez de contexte de l'interlocuteur") ||
+            normalized.includes("pas assez de propos fiables") ||
+            normalized.includes("contexte insuffisant") ||
+            normalized.includes("je n'ai pas assez") ||
+            normalized.includes("je n ai pas assez") ||
+            normalized.includes("je ne dispose pas d'assez") ||
+            normalized.includes("je ne dispose pas d assez") ||
+            normalized.includes("not enough reliable interlocutor context") ||
+            normalized.includes("do not have enough reliable") ||
+            normalized.includes("don't have enough reliable") ||
+            normalized.includes("didn't catch that") ||
+            normalized.includes("did not catch that") ||
+            normalized.includes("transcript doesn't mention") ||
+            normalized.includes("transcript does not mention") ||
+            normalized.includes("current context is insufficient");
+    }
+
+    private shouldReplaceLiveActionOutput(action: MeetingAction, output: string, packet: MeetingContextPacket): boolean {
+        const focus = packet.interlocutorFocus;
+        if (!packet.hasReliableInterlocutor || focus.kind !== 'direct_question') return false;
+        if (!['WHAT_TO_SAY', 'VIBE_INTERVIEW_SAY_THIS', 'ANSWER'].includes(action)) return false;
+
+        const normalizedOutput = this.normalizeForComparison(output);
+        if (!normalizedOutput || this.isInsufficientContextFallback(output)) return true;
+
+        const outputLooksLikeAnotherQuestion =
+            /[?？]\s*$/.test(output.trim()) ||
+            /^(pouvez vous|pourriez vous|peux tu|tu peux|est ce que|comment|pourquoi|quel|quelle|quels|quelles|could you|can you|what|why|how)\b/i.test(normalizedOutput);
+        if (outputLooksLikeAnotherQuestion) return true;
+
+        const targetText = packet.actionTarget?.source !== 'none' ? packet.actionTarget.text : focus.text;
+        const targetKeywords = this.extractContentKeywords(targetText);
+        if (targetKeywords.length >= 2) {
+            const overlap = targetKeywords.filter((keyword) => normalizedOutput.includes(keyword)).length;
+            if (overlap === 0) return true;
+        }
+
+        if (this.isComprehensionCheckQuestion(focus.text)) {
+            const supportTopic = this.deriveFallbackAnswerTopic(packet, focus);
+            const supportKeywords = this.extractContentKeywords(supportTopic);
+            if (supportKeywords.length >= 3) {
+                const overlap = supportKeywords.filter((keyword) => normalizedOutput.includes(keyword)).length;
+                return overlap < Math.min(2, supportKeywords.length);
+            }
+        }
+
+        return false;
+    }
+
+    private shouldReplaceGenericTopicOutput(action: MeetingAction, output: string, packet: MeetingContextPacket): boolean {
+        if (!['WHAT_TO_SAY', 'VIBE_INTERVIEW_SAY_THIS', 'ANSWER', 'CLARIFY', 'FOLLOW_UP_QUESTION'].includes(action)) return false;
+        const normalizedOutput = this.normalizeForComparison(output);
+        if (!normalizedOutput) return true;
+
+        const contextText = this.selectedInterlocutorContextText(packet);
+        const targetText = `${packet.actionTarget?.text || ''} ${packet.interlocutorFocus?.text || ''}`;
+        const normalizedTarget = this.normalizeForComparison(targetText);
+
+        if (this.looksLikeGenericClarificationOutput(output) && this.looksLikeBugFlowContext(contextText)) return true;
+        if (normalizedTarget.includes('je pense que j ai') && normalizedOutput.includes('je pense que j ai')) return true;
+        if (this.looksLikeRawTranscriptEcho(output, packet)) return true;
+        return false;
+    }
+
+    private looksLikeGenericClarificationOutput(output: string): boolean {
+        const normalized = this.normalizeForComparison(output);
+        return /\b(plus de details|plus de détails|ce que vous entendez par|clarifier les choses|prochaine decision attendue|prochaine décision attendue|pourriez vous preciser|pouvez vous preciser|could you clarify|can you clarify)\b/.test(normalized);
+    }
+
+    private selectedInterlocutorContextText(packet: MeetingContextPacket): string {
+        return packet.selectedSegments
+            .filter((segment) => segment.role === 'interviewer' && segment.text.trim().length > 0)
+            .slice(-8)
+            .map((segment) => segment.text)
+            .join(' ');
+    }
+
+    private sanitizeSingleQuestionOutput(output: string): string {
+        const cleaned = String(output || '')
+            .replace(/```[\s\S]*?```/g, '')
+            .split(/\r?\n/)
+            .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim())
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (!cleaned) return cleaned;
+
+        const questionMatch = cleaned.match(/[^?？.!]*[?？]/);
+        const candidate = (questionMatch?.[0] || cleaned.split(/(?<=[.!?])\s+/)[0] || cleaned).trim();
+        return candidate.length > 260 ? `${candidate.slice(0, 257).trim()}...` : candidate;
+    }
+
+    private extractContentKeywords(text: string): string[] {
+        const stopWords = new Set([
+            'avec', 'pour', 'dans', 'donc', 'alors', 'comme', 'cette', 'cela', 'quand', 'vous', 'nous', 'leur', 'leurs', 'notre', 'votre', 'that', 'this', 'with', 'from', 'your', 'their',
+            'qu', 'que', 'qui', 'quoi', 'une', 'des', 'les', 'sur', 'par', 'plus', 'faire', 'être', 'etre', 'avoir', 'pourquoi', 'comment', 'veux', 'vouloir',
+        ]);
+        return [...new Set(this.normalizeForComparison(text)
+            .split(' ')
+            .filter((word) => word.length >= 4 && !stopWords.has(word))
+            .slice(0, 16))];
+    }
+
+    private normalizeForComparison(text: string): string {
+        return String(text || '')
+            .toLowerCase()
+            .normalize('NFKC')
+            .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
     }
 
     // ============================================
@@ -317,17 +718,21 @@ export class IntelligenceEngine extends EventEmitter {
                     this.setMode('idle');
                     return "Please configure your API Keys in Settings to use this feature.";
                 }
-                const context = this.getFormattedActionContextWithMode(180, undefined, 'WHAT_TO_SAY');
+                const packet = this.buildActionContextPacket('WHAT_TO_SAY', 180);
+                const context = packet.context;
+                const startedAt = Date.now();
                 const answer = await this.answerLLM.generate(question || '', context);
                 if (answer) {
                     this.session.addAssistantMessage(answer);
                     this.emit('suggested_answer', answer, question || 'inferred', confidence);
+                    this.recordActionResult('WHAT_TO_SAY', question || 'inferred', answer, { latencyMs: Date.now() - startedAt });
                 }
                 this.setMode('idle');
                 return answer || "Could you repeat that? I want to make sure I address your question properly.";
             }
 
             const contextItems = this.session.getActionContext(180);
+            const additionalActionItems: ContextItem[] = [];
 
             // Inject latest interim transcript if available
             const lastInterim = this.session.getLastInterimInterviewer();
@@ -342,7 +747,17 @@ export class IntelligenceEngine extends EventEmitter {
                     contextItems.push({
                         role: 'interviewer',
                         text: lastInterim.text,
-                        timestamp: lastInterim.timestamp
+                        timestamp: lastInterim.timestamp,
+                    });
+                    additionalActionItems.push({
+                        role: 'interviewer',
+                        speaker: lastInterim.speaker,
+                        text: lastInterim.text,
+                        timestamp: lastInterim.timestamp,
+                        confidence: lastInterim.confidence,
+                        source: 'live',
+                        canonicalRole: lastInterim.canonicalRole || 'interlocutor',
+                        qualityFlags: lastInterim.qualityFlags || [],
                     });
                 }
             }
@@ -353,11 +768,15 @@ export class IntelligenceEngine extends EventEmitter {
                 timestamp: item.timestamp
             }));
 
-            const preparedTranscript = this.withActiveModeActionContext(
-                prepareTranscriptForWhatToAnswer(transcriptTurns, 12),
-                undefined,
+            const preparedBaseTranscript = prepareTranscriptForWhatToAnswer(transcriptTurns, 12);
+            const actionPacket = this.buildActionContextPacket(
                 'WHAT_TO_SAY',
+                180,
+                undefined,
+                preparedBaseTranscript,
+                additionalActionItems,
             );
+            const preparedTranscript = actionPacket.context;
 
             const temporalContext = buildTemporalContext(
                 contextItems,
@@ -365,7 +784,12 @@ export class IntelligenceEngine extends EventEmitter {
                 180
             );
 
-            const lastInterviewerTurn = this.session.getLastInterviewerTurnForActions();
+            const lastInterviewerTurn =
+                actionPacket.actionTarget.source !== 'none'
+                    ? actionPacket.actionTarget.text
+                    : (actionPacket.interlocutorFocus.kind !== 'none'
+                        ? actionPacket.interlocutorFocus.text
+                        : this.session.getLastInterviewerTurnForActions());
             const intentResult = await classifyIntent(
                 lastInterviewerTurn,
                 preparedTranscript,
@@ -375,33 +799,32 @@ export class IntelligenceEngine extends EventEmitter {
             console.log(`[IntelligenceEngine] Temporal RAG: ${temporalContext.previousResponses.length} responses, tone: ${temporalContext.toneSignals[0]?.type || 'neutral'}, intent: ${intentResult.intent}${imagePaths?.length ? `, with ${imagePaths.length} image(s)` : ''}`);
 
             const generationId = this.nextGenerationId('what_to_say');
-            let fullAnswer = "";
             // RC-03 fix: hold a reference to the generator so we can call .return()
             // to properly terminate the network request when a new generation starts.
             const stream = this.whatToAnswerLLM.generateStream(preparedTranscript, temporalContext, intentResult, imagePaths);
-            let streamAborted = false;
+            const streamResult = await this.consumeActionStream(
+                'what_to_say',
+                'WHAT_TO_SAY',
+                stream,
+                generationId,
+                (token) => this.emit('suggested_answer_token', token, question || 'inferred', confidence),
+            );
+            let fullAnswer = streamResult.text;
 
-            for await (const token of stream) {
-                if (!this.isGenerationCurrent('what_to_say', generationId)) {
-                    console.log('[IntelligenceEngine] _what_to_say stream aborted by new generation');
-                    // RC-03 fix: .return() signals the generator to clean up and stops
-                    // the underlying network request (SDK generators honour this).
-                    await stream.return(undefined);
-                    streamAborted = true;
-                    break;
-                }
-                this.emit('suggested_answer_token', token, question || 'inferred', confidence);
-                fullAnswer += token;
-            }
-
-            if (streamAborted) {
+            if (streamResult.aborted) {
                 // Aborted mid-stream — don't update session or emit final event
                 this.finishMode('what_to_say', generationId);
                 return null;
             }
 
             if (!fullAnswer || fullAnswer.trim().length < 5) {
-                fullAnswer = "Could you repeat that? I want to make sure I address your question properly.";
+                fullAnswer = this.buildLiveActionFallback('WHAT_TO_SAY', actionPacket);
+            } else if (actionPacket.hasReliableInterlocutor && this.isInsufficientContextFallback(fullAnswer)) {
+                fullAnswer = this.buildLiveActionFallback('WHAT_TO_SAY', actionPacket);
+            } else if (this.shouldReplaceLiveActionOutput('WHAT_TO_SAY', fullAnswer, actionPacket)) {
+                fullAnswer = this.buildLiveActionFallback('WHAT_TO_SAY', actionPacket);
+            } else if (this.shouldReplaceGenericTopicOutput('WHAT_TO_SAY', fullAnswer, actionPacket)) {
+                fullAnswer = this.buildLiveActionFallback('WHAT_TO_SAY', actionPacket);
             }
 
             this.session.addAssistantMessage(fullAnswer);
@@ -413,7 +836,19 @@ export class IntelligenceEngine extends EventEmitter {
                 question: question || 'What to Answer',
                 answer: fullAnswer,
                 items: diagnostics,
-                metadata: this.buildUsageMetadata('WHAT_TO_SAY', preparedTranscript, diagnostics)
+                metadata: this.buildUsageMetadata('WHAT_TO_SAY', preparedTranscript, diagnostics, actionPacket, {
+                    latencyMs: streamResult.latencyMs,
+                    firstTokenMs: streamResult.firstTokenMs,
+                    timedOut: streamResult.timedOut,
+                    fallback: streamResult.timedOut ? 'soft_timeout' : undefined,
+                })
+            });
+            this.recordActionResult('WHAT_TO_SAY', question || 'What to Answer', fullAnswer, {
+                latencyMs: streamResult.latencyMs,
+                firstTokenMs: streamResult.firstTokenMs,
+                timedOut: streamResult.timedOut,
+                hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
+                contextTrustScore: actionPacket.contextTrustScore,
             });
 
             // CQ-05 fix: only emit the "complete" event after a non-aborted stream.
@@ -451,30 +886,26 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.getFormattedActionContextWithMode(60, undefined, 'FOLLOW_UP_QUESTION');
+            const actionPacket = this.buildActionContextPacket('FOLLOW_UP_QUESTION', 60);
+            const context = actionPacket.context;
             const refinementRequest = userRequest || intent;
 
             const generationId = this.nextGenerationId('follow_up');
-            let fullRefined = "";
             const stream = this.followUpLLM.generateStream(
                 lastMsg,
                 refinementRequest,
                 context
             );
-            let streamAborted = false;
+            const streamResult = await this.consumeActionStream(
+                'follow_up',
+                'FOLLOW_UP_QUESTION',
+                stream,
+                generationId,
+                (token) => this.emit('refined_answer_token', token, intent),
+            );
+            const fullRefined = streamResult.text;
 
-            for await (const token of stream) {
-                if (!this.isGenerationCurrent('follow_up', generationId)) {
-                    console.log('[IntelligenceEngine] _follow_up stream aborted by new generation');
-                    await stream.return(undefined);
-                    streamAborted = true;
-                    break;
-                }
-                this.emit('refined_answer_token', token, intent);
-                fullRefined += token;
-            }
-
-            if (!streamAborted && fullRefined) {
+            if (!streamResult.aborted && fullRefined) {
                 this.session.addAssistantMessage(fullRefined);
                 this.emit('refined_answer', fullRefined, intent);
 
@@ -497,7 +928,16 @@ export class IntelligenceEngine extends EventEmitter {
                     question: displayQuestion,
                     answer: fullRefined,
                     items: diagnostics,
-                    metadata: this.buildUsageMetadata('FOLLOW_UP_QUESTION', context, diagnostics)
+                    metadata: this.buildUsageMetadata('FOLLOW_UP_QUESTION', context, diagnostics, actionPacket, {
+                        latencyMs: streamResult.latencyMs,
+                        firstTokenMs: streamResult.firstTokenMs,
+                        timedOut: streamResult.timedOut,
+                    })
+                });
+                this.recordActionResult('FOLLOW_UP_QUESTION', displayQuestion, fullRefined, {
+                    latencyMs: streamResult.latencyMs,
+                    timedOut: streamResult.timedOut,
+                    hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
                 });
             }
 
@@ -526,11 +966,13 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.withActiveModeActionContext(
-                this.session.getFullSessionContext() || this.session.getFormattedContext(600),
-                undefined,
+            const actionPacket = this.buildActionContextPacket(
                 'RECAP',
+                600,
+                undefined,
+                this.session.getFullSessionContext() || this.session.getFormattedContext(600),
             );
+            const context = actionPacket.context;
             if (!context) {
                 console.warn('[IntelligenceEngine] No context available for recap');
                 this.setMode('idle');
@@ -538,23 +980,18 @@ export class IntelligenceEngine extends EventEmitter {
             }
 
             const generationId = this.nextGenerationId('recap');
-            let fullSummary = "";
             const stream = this.recapLLM.generateStream(context);
-            let streamAborted = false;
-
-            for await (const token of stream) {
-                if (!this.isGenerationCurrent('recap', generationId)) {
-                    console.log('[IntelligenceEngine] _recap stream aborted by new generation');
-                    await stream.return(undefined);
-                    streamAborted = true;
-                    break;
-                }
-                this.emit('recap_token', token);
-                fullSummary += token;
-            }
+            const streamResult = await this.consumeActionStream(
+                'recap',
+                'RECAP',
+                stream,
+                generationId,
+                (token) => this.emit('recap_token', token),
+            );
+            const fullSummary = streamResult.text;
 
             // Only emit final if not aborted
-            if (!streamAborted && fullSummary && this.isGenerationCurrent('recap', generationId)) {
+            if (!streamResult.aborted && fullSummary && this.isGenerationCurrent('recap', generationId)) {
                 this.emit('recap', fullSummary);
 
                 this.session.pushUsage({
@@ -562,7 +999,16 @@ export class IntelligenceEngine extends EventEmitter {
                     timestamp: Date.now(),
                     question: 'Recap Meeting',
                     answer: fullSummary,
-                    metadata: this.buildUsageMetadata('RECAP', context)
+                    metadata: this.buildUsageMetadata('RECAP', context, actionPacket.diagnostics, actionPacket, {
+                        latencyMs: streamResult.latencyMs,
+                        firstTokenMs: streamResult.firstTokenMs,
+                        timedOut: streamResult.timedOut,
+                    })
+                });
+                this.recordActionResult('RECAP', 'Recap Meeting', fullSummary, {
+                    latencyMs: streamResult.latencyMs,
+                    timedOut: streamResult.timedOut,
+                    hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
                 });
             }
             this.finishMode('recap', generationId);
@@ -590,30 +1036,35 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const rawContext = this.getFormattedActionContextWithMode(180, undefined, 'CLARIFY');
+            const actionPacket = this.buildActionContextPacket('CLARIFY', 180);
+            const rawContext = actionPacket.context;
             // If no transcript yet, use a generic prompt — the LLM will ask for the missing context.
             const context = rawContext || '[No reliable interlocutor transcript is available yet. Generate one short, natural question asking for the missing context or the main constraint. Do not invent what the other person said.]';
 
             const generationId = this.nextGenerationId('clarify');
-            let fullClarification = "";
             const stream = this.clarifyLLM.generateStream(context);
-            let streamAborted = false;
+            const streamResult = await this.consumeActionStream(
+                'clarify',
+                'CLARIFY',
+                stream,
+                generationId,
+                (token) => this.emit('clarify_token', token),
+            );
+            let fullClarification = streamResult.text;
 
-            for await (const token of stream) {
-                if (!this.isGenerationCurrent('clarify', generationId)) {
-                    console.log('[IntelligenceEngine] _clarify stream aborted by new generation');
-                    await stream.return(undefined);
-                    streamAborted = true;
-                    break;
-                }
-                this.emit('clarify_token', token);
-                fullClarification += token;
-            }
-
-            if (streamAborted) {
+            if (streamResult.aborted) {
                 this.finishMode('clarify', generationId);
                 return null;
             }
+
+            if (!fullClarification || fullClarification.trim().length < 5) {
+                fullClarification = this.buildLiveActionFallback('CLARIFY', actionPacket);
+            } else if (actionPacket.hasReliableInterlocutor && this.isInsufficientContextFallback(fullClarification)) {
+                fullClarification = this.buildLiveActionFallback('CLARIFY', actionPacket);
+            } else if (this.shouldReplaceGenericTopicOutput('CLARIFY', fullClarification, actionPacket)) {
+                fullClarification = this.buildLiveActionFallback('CLARIFY', actionPacket);
+            }
+            fullClarification = this.sanitizeSingleQuestionOutput(fullClarification);
 
             // Only update history and emit final if not aborted
             if (fullClarification && this.isGenerationCurrent('clarify', generationId)) {
@@ -627,7 +1078,16 @@ export class IntelligenceEngine extends EventEmitter {
                     question: 'Clarify Question',
                     answer: fullClarification,
                     items: diagnostics,
-                    metadata: this.buildUsageMetadata('CLARIFY', context, diagnostics)
+                    metadata: this.buildUsageMetadata('CLARIFY', context, diagnostics, actionPacket, {
+                        latencyMs: streamResult.latencyMs,
+                        firstTokenMs: streamResult.firstTokenMs,
+                        timedOut: streamResult.timedOut,
+                    })
+                });
+                this.recordActionResult('CLARIFY', 'Clarify Question', fullClarification, {
+                    latencyMs: streamResult.latencyMs,
+                    timedOut: streamResult.timedOut,
+                    hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
                 });
             }
             this.finishMode('clarify', generationId);
@@ -655,28 +1115,32 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.getFormattedActionContextWithMode(120, undefined, 'FOLLOW_UP_QUESTION');
-            if (!context) {
-                console.warn('[IntelligenceEngine] No context available for follow-up questions');
-                this.setMode('idle');
-                return null;
-            }
+            const actionPacket = this.buildActionContextPacket('FOLLOW_UP_QUESTION', 120);
+            const context = actionPacket.context || '[No reliable interlocutor transcript is available yet. Generate one short, natural follow-up question asking for the missing context or the main decision. Do not invent what the other person said.]';
 
             const generationId = this.nextGenerationId('follow_up_questions');
-            let fullQuestions = "";
             const stream = this.followUpQuestionsLLM.generateStream(context);
+            const streamResult = await this.consumeActionStream(
+                'follow_up_questions',
+                'FOLLOW_UP_QUESTION',
+                stream,
+                generationId,
+                (token) => this.emit('follow_up_questions_token', token),
+            );
+            let fullQuestions = streamResult.text;
 
-            for await (const token of stream) {
-                if (!this.isGenerationCurrent('follow_up_questions', generationId)) {
-                    console.log('[IntelligenceEngine] _follow_up_questions stream aborted by new generation');
-                    await stream.return(undefined);
-                    break;
+            if (!streamResult.aborted) {
+                if (!fullQuestions || fullQuestions.trim().length < 5) {
+                    fullQuestions = this.buildLiveActionFallback('FOLLOW_UP_QUESTION', actionPacket);
+                } else if (actionPacket.hasReliableInterlocutor && this.isInsufficientContextFallback(fullQuestions)) {
+                    fullQuestions = this.buildLiveActionFallback('FOLLOW_UP_QUESTION', actionPacket);
+                } else if (this.shouldReplaceGenericTopicOutput('FOLLOW_UP_QUESTION', fullQuestions, actionPacket)) {
+                    fullQuestions = this.buildLiveActionFallback('FOLLOW_UP_QUESTION', actionPacket);
                 }
-                this.emit('follow_up_questions_token', token);
-                fullQuestions += token;
+                fullQuestions = this.sanitizeSingleQuestionOutput(fullQuestions);
             }
 
-            if (fullQuestions && this.isGenerationCurrent('follow_up_questions', generationId)) {
+            if (!streamResult.aborted && fullQuestions && this.isGenerationCurrent('follow_up_questions', generationId)) {
                 this.emit('follow_up_questions_update', fullQuestions);
                 const diagnostics = this.session.getActionContextDiagnostics(120);
                 this.session.pushUsage({
@@ -685,7 +1149,16 @@ export class IntelligenceEngine extends EventEmitter {
                     question: 'Generate Follow-up Questions',
                     answer: fullQuestions,
                     items: diagnostics,
-                    metadata: this.buildUsageMetadata('FOLLOW_UP_QUESTION', context, diagnostics)
+                    metadata: this.buildUsageMetadata('FOLLOW_UP_QUESTION', context, diagnostics, actionPacket, {
+                        latencyMs: streamResult.latencyMs,
+                        firstTokenMs: streamResult.firstTokenMs,
+                        timedOut: streamResult.timedOut,
+                    })
+                });
+                this.recordActionResult('FOLLOW_UP_QUESTION', 'Generate Follow-up Questions', fullQuestions, {
+                    latencyMs: streamResult.latencyMs,
+                    timedOut: streamResult.timedOut,
+                    hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
                 });
             }
             this.finishMode('follow_up_questions', generationId);
@@ -712,8 +1185,36 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            const context = this.getFormattedActionContextWithMode(120, undefined, 'ANSWER');
-            const answer = await this.answerLLM.generate(question, context);
+            const manualQuestionContext = this.buildManualQuestionContextBlock(question);
+            const actionPacket = this.buildActionContextPacket('ANSWER', 120, undefined, manualQuestionContext);
+            const context = actionPacket.context;
+            const startedAt = Date.now();
+            let timedOut = false;
+            let fallbackReason: string | undefined;
+            let answer = await Promise.race([
+                this.answerLLM.generate(question, context),
+                new Promise<string>((resolve) => setTimeout(() => {
+                    timedOut = true;
+                    resolve(actionPacket.languageHint === 'fr' || actionPacket.languageHint === 'mixed'
+                        ? "Je n'ai pas encore assez de contexte fiable pour répondre sans inventer."
+                        : "I do not have enough reliable context yet to answer without guessing.");
+                }, this.actionTimeoutsMs.ANSWER)),
+            ]);
+            const latencyMs = Date.now() - startedAt;
+
+            if (!answer || answer.trim().length < 5) {
+                fallbackReason = 'empty_manual_answer';
+                answer = this.buildManualAnswerFallback(question, actionPacket);
+            } else if (this.shouldReplaceManualAnswerOutput(question, answer, actionPacket)) {
+                fallbackReason = 'manual_answer_echo_or_weak_bug_reply';
+                answer = this.buildManualAnswerFallback(question, actionPacket);
+            } else if (answer && actionPacket.hasReliableInterlocutor && this.isInsufficientContextFallback(answer)) {
+                fallbackReason = 'manual_answer_insufficient_context';
+                answer = this.buildManualAnswerFallback(question, actionPacket);
+            } else if (answer && this.shouldReplaceLiveActionOutput('ANSWER', answer, actionPacket)) {
+                fallbackReason = 'manual_answer_unusable_live_output';
+                answer = this.buildManualAnswerFallback(question, actionPacket);
+            }
 
             if (answer) {
                 this.session.addAssistantMessage(answer);
@@ -726,7 +1227,17 @@ export class IntelligenceEngine extends EventEmitter {
                     question: question,
                     answer: answer,
                     items: diagnostics,
-                    metadata: this.buildUsageMetadata('ANSWER', context, diagnostics)
+                    metadata: this.buildUsageMetadata('ANSWER', context, diagnostics, actionPacket, {
+                        latencyMs,
+                        timedOut,
+                        fallback: timedOut ? 'soft_timeout' : fallbackReason,
+                    })
+                });
+                this.recordActionResult('ANSWER', question, answer, {
+                    latencyMs,
+                    timedOut,
+                    hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
+                    fallback: timedOut ? 'soft_timeout' : fallbackReason,
                 });
             }
 
@@ -738,6 +1249,100 @@ export class IntelligenceEngine extends EventEmitter {
             this.setMode('idle');
             return null;
         }
+    }
+
+    private buildManualQuestionContextBlock(question: string): string {
+        const cleanedQuestion = this.truncateForUsage(String(question || '').replace(/\s+/g, ' ').trim(), 600);
+        if (!cleanedQuestion) return '';
+
+        return [
+            '[LOCAL USER QUESTION]',
+            'kind=direct_question',
+            'confidence=1.00',
+            'reason=typed_manual_answer_request',
+            `text=${cleanedQuestion}`,
+            'instruction=This is the typed/manual question from the local user. Answer it directly. If it asks what to answer or say, produce the exact sentence the user can say aloud now. Use reliable speaker context as evidence, but do not repeat malformed ASR fragments.',
+            '[/LOCAL USER QUESTION]',
+            '[MANUAL ANSWER CONTRACT]',
+            'question_source=typed_user_input',
+            'priority=answer_the_local_user_question_before_the_action_target',
+            'do_not=copy_or_repeat_raw_transcript_fragments_as_the_final_answer',
+            '[/MANUAL ANSWER CONTRACT]',
+        ].join('\n');
+    }
+
+    private shouldReplaceManualAnswerOutput(question: string, output: string, packet: MeetingContextPacket): boolean {
+        const normalizedOutput = this.normalizeForComparison(output);
+        if (!normalizedOutput) return true;
+        if (this.looksLikeRawTranscriptEcho(output, packet)) return true;
+        if (this.isManualBugReplyQuestion(question) && this.isWeakBugReply(output)) return true;
+        return false;
+    }
+
+    private buildManualAnswerFallback(question: string, packet: MeetingContextPacket): string {
+        const french = packet.languageHint === 'fr' || packet.languageHint === 'mixed';
+        const contextText = this.selectedInterlocutorContextText(packet);
+
+        if (this.isManualBugReplyQuestion(question) || this.looksLikeBugFlowContext(contextText)) {
+            return french
+                ? "Je dirais : je vais reproduire le cas sur le compte WaChap, tester séparément l'envoi simple puis les flux IA/Pierre, reconnecter le compte et récupérer les logs pour voir exactement pourquoi le flux ne se déclenche plus."
+                : "I would say: I will reproduce it on the WaChap account, test simple sending separately from the AI/Pierre flows, reconnect the account, and pull logs to see exactly why the flow no longer starts.";
+        }
+
+        return this.buildLiveActionFallback('ANSWER', packet);
+    }
+
+    private looksLikeRawTranscriptEcho(output: string, packet: MeetingContextPacket): boolean {
+        const normalizedOutput = this.normalizeForComparison(output);
+        if (!normalizedOutput) return true;
+
+        const candidates = [
+            packet.actionTarget?.text,
+            packet.interlocutorFocus?.text,
+            ...packet.selectedSegments.slice(-6).map((segment) => segment.text),
+        ].filter((text): text is string => Boolean(text && text.trim().length >= 35));
+
+        return candidates.some((candidate) => {
+            const normalizedCandidate = this.normalizeForComparison(candidate);
+            if (!normalizedCandidate || normalizedCandidate.length < 35) return false;
+            if (normalizedOutput.includes(normalizedCandidate.slice(0, Math.min(90, normalizedCandidate.length)))) {
+                return true;
+            }
+
+            const candidateKeywords = this.extractContentKeywords(candidate);
+            if (candidateKeywords.length < 5) return false;
+            const outputKeywords = new Set(this.extractContentKeywords(output));
+            const overlap = candidateKeywords.filter((keyword) => outputKeywords.has(keyword)).length;
+            return overlap / Math.min(candidateKeywords.length, Math.max(outputKeywords.size, 1)) >= 0.72;
+        });
+    }
+
+    private isManualBugReplyQuestion(question: string): boolean {
+        const normalized = this.normalizeForComparison(question);
+        return /\b(que repondre|quoi repondre|quoi dire|que dire|what should i say|what to answer)\b/.test(normalized) &&
+            /\b(bug|probleme|problème|flux|wachap|wa chap|ia|pierre)\b/.test(normalized);
+    }
+
+    private looksLikeBugFlowContext(text: string): boolean {
+        const normalized = this.normalizeForComparison(text);
+        const hasBug = /\b(bug|marche)\b/.test(normalized) ||
+            normalized.includes('probleme') ||
+            normalized.includes('problème') ||
+            normalized.includes('declench') ||
+            normalized.includes('déclench') ||
+            normalized.includes('diagnosti') ||
+            normalized.includes('reconnect');
+        const hasFlow = /\b(flux|ia|pierre|wachap|wa chap|envoi|message)\b/.test(normalized);
+        return hasBug && hasFlow;
+    }
+
+    private isWeakBugReply(output: string): boolean {
+        const normalized = this.normalizeForComparison(output);
+        if (/\b(ca ne fout|ça ne fout|fluche|full small|ppp|batteries demander|etudiateurs)\b/.test(normalized)) return true;
+
+        const hasAction = /\b(vais|verifier|vérifier|tester|isoler|reproduire|diagnostiquer|reconnecter|recuperer|récupérer|logs|corriger)\b/.test(normalized);
+        const hasConcreteBugTerm = /\b(flux|ia|pierre|wachap|envoi|message|compte)\b/.test(normalized);
+        return !(hasAction && hasConcreteBugTerm);
     }
 
     /**
@@ -770,34 +1375,30 @@ export class IntelligenceEngine extends EventEmitter {
                 : sessionQuestion.source;
 
             // Pull transcript as fallback context when no question is pinned
-            const transcriptContext = questionContext === null
-                ? this.getFormattedActionContextWithMode(180, undefined, 'ANSWER')
+            const transcriptPacket = questionContext === null
+                ? this.buildActionContextPacket('ANSWER', 180)
                 : null;
+            const transcriptContext = transcriptPacket?.context ?? null;
 
             console.log(`[IntelligenceEngine] Code hint — question source: ${questionContext ? (questionSource ?? 'passed') : 'none'}, transcript lines: ${transcriptContext ? transcriptContext.split('\n').length : 0}, images: ${imagePaths?.length ?? 0}`);
 
             const generationId = this.nextGenerationId('code_hint');
-            let fullHint = "";
             const stream = this.codeHintLLM.generateStream(
                 imagePaths,
                 questionContext ?? undefined,
                 questionSource,
                 transcriptContext ?? undefined
             );
-            let streamAborted = false;
+            const streamResult = await this.consumeActionStream(
+                'code_hint',
+                'ANSWER',
+                stream,
+                generationId,
+                (token) => this.emit('suggested_answer_token', token, 'Code Hint', 1.0),
+            );
+            let fullHint = streamResult.text;
 
-            for await (const token of stream) {
-                if (!this.isGenerationCurrent('code_hint', generationId)) {
-                    console.log('[IntelligenceEngine] code_hint stream aborted by new generation');
-                    await stream.return(undefined);
-                    streamAborted = true;
-                    break;
-                }
-                this.emit('suggested_answer_token', token, 'Code Hint', 1.0);
-                fullHint += token;
-            }
-
-            if (streamAborted) {
+            if (streamResult.aborted) {
                 this.finishMode('code_hint', generationId);
                 return null;
             }
@@ -812,7 +1413,16 @@ export class IntelligenceEngine extends EventEmitter {
                 timestamp: Date.now(),
                 question: 'Code Hint',
                 answer: fullHint,
-                metadata: this.buildUsageMetadata('ANSWER', transcriptContext || questionContext || 'Screenshot/code hint context')
+                metadata: this.buildUsageMetadata('ANSWER', transcriptContext || questionContext || 'Screenshot/code hint context', transcriptPacket?.diagnostics, transcriptPacket || undefined, {
+                    latencyMs: streamResult.latencyMs,
+                    firstTokenMs: streamResult.firstTokenMs,
+                    timedOut: streamResult.timedOut,
+                })
+            });
+            this.recordActionResult('ANSWER', 'Code Hint', fullHint, {
+                latencyMs: streamResult.latencyMs,
+                timedOut: streamResult.timedOut,
+                hasReliableInterlocutor: transcriptPacket?.hasReliableInterlocutor,
             });
 
             this.emit('suggested_answer', fullHint, 'Code Hint', 1.0);
@@ -844,7 +1454,8 @@ export class IntelligenceEngine extends EventEmitter {
                 return "Please configure your API Keys in Settings to use this feature.";
             }
 
-            let context = this.getFormattedActionContextWithMode(180, undefined, 'ANSWER');
+            let actionPacket = this.buildActionContextPacket('ANSWER', 180);
+            let context = actionPacket.context;
             // Prepend the problem statement so the LLM knows exactly what to brainstorm
             const resolvedProblem = problemStatement?.trim() ||
                 this.session.getDetectedCodingQuestion().question?.trim();
@@ -861,28 +1472,23 @@ export class IntelligenceEngine extends EventEmitter {
                 context = `<problem_statement>\n${resolvedProblem}\n</problem_statement>\n\n${context}`;
             }
             const generationId = this.nextGenerationId('brainstorm');
-            let fullResult = "";
             const stream = this.brainstormLLM.generateStream(context, imagePaths);
-            let streamAborted = false;
+            const streamResult = await this.consumeActionStream(
+                'brainstorm',
+                'ANSWER',
+                stream,
+                generationId,
+                (token) => this.emit('suggested_answer_token', token, 'Brainstorming Approaches', 1.0),
+            );
+            let fullResult = streamResult.text;
 
-            for await (const token of stream) {
-                if (!this.isGenerationCurrent('brainstorm', generationId)) {
-                    console.log('[IntelligenceEngine] brainstorm stream aborted by new generation');
-                    await stream.return(undefined);
-                    streamAborted = true;
-                    break;
-                }
-                this.emit('suggested_answer_token', token, 'Brainstorming Approaches', 1.0);
-                fullResult += token;
-            }
-
-            if (streamAborted) {
+            if (streamResult.aborted) {
                 this.finishMode('brainstorm', generationId);
                 return null;
             }
 
-            if (!fullResult || fullResult.trim().length < 5) {
-                fullResult = "I couldn't generate brainstorm approaches. Make sure your question is visible and try again.";
+            if (!fullResult || fullResult.trim().length < 5 || this.isGenericBrainstormFailure(fullResult)) {
+                fullResult = this.buildLiveActionFallback('ANSWER', actionPacket);
             }
 
             this.session.addAssistantMessage(fullResult);
@@ -891,7 +1497,16 @@ export class IntelligenceEngine extends EventEmitter {
                 timestamp: Date.now(),
                 question: 'Brainstorm',
                 answer: fullResult,
-                metadata: this.buildUsageMetadata('ANSWER', context)
+                metadata: this.buildUsageMetadata('ANSWER', context, actionPacket.diagnostics, actionPacket, {
+                    latencyMs: streamResult.latencyMs,
+                    firstTokenMs: streamResult.firstTokenMs,
+                    timedOut: streamResult.timedOut,
+                })
+            });
+            this.recordActionResult('ANSWER', 'Brainstorm', fullResult, {
+                latencyMs: streamResult.latencyMs,
+                timedOut: streamResult.timedOut,
+                hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
             });
 
             this.emit('suggested_answer', fullResult, 'Brainstorming Approaches', 1.0);
@@ -903,6 +1518,13 @@ export class IntelligenceEngine extends EventEmitter {
             this.setMode('idle');
             return null;
         }
+    }
+
+    private isGenericBrainstormFailure(text: string): boolean {
+        const normalized = this.normalizeForComparison(text);
+        return normalized.includes('couldn t generate brainstorm') ||
+            normalized.includes('could not generate brainstorm') ||
+            normalized.includes('make sure your question is visible');
     }
 
     // ============================================

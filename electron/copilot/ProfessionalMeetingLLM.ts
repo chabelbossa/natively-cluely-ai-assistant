@@ -1,4 +1,5 @@
 import { LLMHelper } from '../LLMHelper';
+import { MeetingBriefManager } from '../meeting/MeetingBriefManager';
 import type { CopilotQuestionCandidate, CopilotSuggestionType } from './types';
 
 const PROFESSIONAL_MEETING_SYSTEM_PROMPT = `You are a real-time meeting copilot. Return exactly one JSON object and nothing else.
@@ -6,7 +7,7 @@ const PROFESSIONAL_MEETING_SYSTEM_PROMPT = `You are a real-time meeting copilot.
 Task:
 - Observe the meeting transcript and decide whether a short, strategic suggestion or question would be helpful RIGHT NOW.
 - If the moment is not right or no clear intervention is needed, return {"action":"WAIT","confidence":0,"reason":"..."}.
-- If you have a grounded suggestion, return it as a ONE-LINE question the user can say aloud (under 25 words).
+- If you have a grounded suggestion, return it as a ONE-LINE question or phrase the user can say aloud (under 25 words).
 
 CRITICAL: One-line interjections only. The user needs a single short sentence they can verbalize immediately.
 Examples:
@@ -18,15 +19,18 @@ Examples:
 
 Rules:
 - The suggestion MUST be grounded in what was actually said — do not invent.
+- Meeting brief is only background memory. Never present brief content as something said by the interlocutor unless the transcript supports it.
+- Align with the user's meeting objective when it helps, but the transcript is always the source of truth.
 - Keep it under 25 words. One sentence. No explanations.
 - Do not give generic advice. Be specific to the conversation.
 - Do not repeat recent suggestions.
 - Prefer: clarifying scope/priority/deadline, assigning owners, surfacing risks, checking acceptance criteria.
 - If the transcript shows a risk was detected (missing deadline, missing owner, missing criteria), your question should address it.
+- In Vibe Interview style, prefer a direct "say this" phrase only when the transcript clearly supports it.
 - If a follow-up question from an earlier topic is relevant now, use it.
 - JSON keys: action, question, confidence, topic, suggestionType, reason.
 
-Allowed suggestionType: scope, priority, deadline, technical_risk, security, api_contract, data_model, roles_permissions, bug_reproduction, acceptance_criteria, client_need, business_goal, follow_up_question`;
+Allowed suggestionType: scope, priority, deadline, technical_risk, security, api_contract, data_model, roles_permissions, bug_reproduction, acceptance_criteria, client_need, business_goal, vibe_interview_say_this, follow_up_question`;
 
 interface ProfessionalMeetingInput {
   mode: string;
@@ -56,9 +60,12 @@ export class ProfessionalMeetingLLM {
       ? `<follow_up_questions>\n${input.followUpQuestions.map((q) => `- ${q}`).join('\n')}\n</follow_up_questions>`
       : '';
 
+    const briefBlock = MeetingBriefManager.getInstance().buildContextBlock();
+
     const context = [
       `<mode>${input.mode}</mode>`,
       `<summary>${JSON.stringify(input.structuredSummary)}</summary>`,
+      briefBlock,
       `<recent_suggestions>\n${recentSuggestions}\n</recent_suggestions>`,
       `<allowed_suggestion_types>${allowedTypesStr}</allowed_suggestion_types>`,
       risksBlock,

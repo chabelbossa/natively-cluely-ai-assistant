@@ -1,0 +1,100 @@
+{
+  "name": "WaChap Late Mic Flush",
+  "description": "Regression from the live WaChap session: a giant delayed mic final must not duplicate the whole meeting or overwrite speaker context.",
+  "thresholds": {
+    "maxFalseMeRate": 0,
+    "maxDuplicateRate": 0,
+    "minInterlocutorFinals": 3,
+    "maxSuppressedExpectedMe": 0,
+    "maxUnsuppressedExpectedSuppressed": 0,
+    "maxRoleMismatches": 0
+  },
+  "events": [
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "Je ne comprends pas pourquoi cette erreur, malgré tout ce que j'ai tenté.",
+      "timestamp": 1000,
+      "final": true,
+      "confidence": 0.9,
+      "systemAudioActive": false,
+      "expectedRole": "me"
+    },
+    {
+      "channel": "system",
+      "provider": "local",
+      "speaker": "locuteur_0",
+      "speakerId": 0,
+      "diarized": true,
+      "text": "Actually, when you vote, you know, that's plusieurs. Don't you have possibility to supplement the info.",
+      "timestamp": 66000,
+      "final": true,
+      "confidence": 0.74,
+      "expectedRole": "speaker_1"
+    },
+    {
+      "channel": "system",
+      "provider": "local",
+      "speaker": "locuteur_1",
+      "speakerId": 1,
+      "diarized": true,
+      "text": "Normalement, quand tu vas dans les infos de l'application, c'est possible de supprimer les informations de WaChap lui-même. Donc il y a possibilité de supprimer les infos de WaChap.",
+      "timestamp": 78000,
+      "final": true,
+      "confidence": 0.82,
+      "expectedRole": "speaker_1"
+    },
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "Tu veux copier Android même là, ça moi je sais pas. Mais si tu veux supprimer WaChap, pourquoi tu veux conserver Android, c'est quoi répondre ?",
+      "timestamp": 85000,
+      "final": true,
+      "confidence": 0.91,
+      "systemAudioActive": true,
+      "expectedRole": "me"
+    },
+    {
+      "channel": "system",
+      "provider": "local",
+      "speaker": "locuteur_0",
+      "speakerId": 0,
+      "diarized": true,
+      "text": "WaChap. Pourquoi tu veux conserver Android ?",
+      "timestamp": 86000,
+      "final": true,
+      "confidence": 0.93,
+      "expectedRole": "speaker_1"
+    },
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "construit les parties qui sont perdues, les parties qui se dupliquent, je ne comprends pas. Tu pourrais peut-être faire mieux, non ?",
+      "timestamp": 172000,
+      "final": true,
+      "confidence": 0.9,
+      "systemAudioActive": false,
+      "expectedRole": "me"
+    },
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "Bonjour Martial, je voudrais que tu m'aides avec mon problème sur WaChap. Je ne comprends pas pourquoi cette erreur, malgré tout ce que j'ai tenté, j'obtiens toujours be a little bit Yeah, I'm sorry. Ah bon ? Et à quel niveau ? Explique. Et comment ? Quelle route ? Explique un peu. Normalement, quand tu vas dans les infos de l'application, c'est possible de supprimer les informations de WaChap lui-même. Donc, il y a possibilité de supprimer les infos de WaChap. Maintenant tu veux copier Android même là, ça moi je sais pas. Mais si tu veux supprimer WaChap, pourquoi tu veux conserver Android, c'est quoi répondre ? Maintenant, regarde, c'est n'importe quoi. Même l'audio n'est pas bien construit, les parties sont perdues, les parties se dupliquent, je ne comprends pas. Tu pourrais peut-être faire mieux, non ? C'est vraiment décourageant.",
+      "timestamp": 190000,
+      "final": true,
+      "confidence": 0.9,
+      "systemAudioActive": false,
+      "expectedRole": "me",
+      "expectedTextIncludes": "décourageant",
+      "expectedTextExcludes": [
+        "Bonjour Martial",
+        "Normalement, quand tu vas",
+        "copier Android"
+      ]
+    }
+  ]
+}

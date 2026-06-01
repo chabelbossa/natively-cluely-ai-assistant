@@ -27,7 +27,7 @@ const formatSpeakerLabel = (speaker: string) => {
     const diarizedMatch = /^locuteur[_-](\d+)$/i.exec(speaker || '');
     if (diarizedMatch) return `Locuteur ${Number(diarizedMatch[1]) + 1}`;
     const speakerMatch = /^speaker[_-](\d+)$/i.exec(speaker || '');
-    if (speakerMatch) return `Speaker ${Number(speakerMatch[1]) + 1}`;
+    if (speakerMatch) return `Speaker ${Number(speakerMatch[1])}`;
     return speaker || 'Speaker';
 };
 

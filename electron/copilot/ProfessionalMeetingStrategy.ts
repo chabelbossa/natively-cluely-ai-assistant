@@ -25,6 +25,12 @@ const CONTINUATION_PATTERNS = [
   /[,;:]$/,
 ];
 
+const DIRECT_PROMPT_PATTERNS = [
+  /\b(what do you think|can you confirm|could you|would you|do you agree|any concern|any blocker|does that make sense)\b/i,
+  /\b(est-ce que|qu'en penses-tu|qu'est-ce que tu en penses|tu peux|peux-tu|peux tu|confirme|tu confirmes|ça te va|des questions|un avis|ton avis|tu vois)\b/i,
+  /\?$/,
+];
+
 export class ProfessionalMeetingStrategy {
   constructor(
     private readonly llm: ProfessionalMeetingLLM,
@@ -62,6 +68,26 @@ export class ProfessionalMeetingStrategy {
         action: 'WAIT',
         confidence: 0.25,
         reason: `Need at least ${Math.round(profile.minContextMs / 1000)}s of context.`,
+      };
+    }
+
+    const reliableInterlocutorSegments = snapshot.segments.filter((segment) => this.isReliableInterlocutor(segment));
+    if (reliableInterlocutorSegments.length < Math.max(1, Math.min(2, profile.minSegments))) {
+      return {
+        ...base,
+        action: 'WAIT',
+        confidence: 0.25,
+        reason: 'Need reliable interlocutor/system-audio context before suggesting anything.',
+      };
+    }
+
+    const lastReliableInterlocutor = reliableInterlocutorSegments[reliableInterlocutorSegments.length - 1];
+    if (lastReliableInterlocutor && this.now() - lastReliableInterlocutor.timestamp > 45_000) {
+      return {
+        ...base,
+        action: 'WAIT',
+        confidence: 0.3,
+        reason: 'Reliable interlocutor context is stale.',
       };
     }
 
@@ -161,6 +187,14 @@ export class ProfessionalMeetingStrategy {
       .join(' ');
     const lastText = last.text.trim();
 
+    if (this.isReliableInterlocutor(last) && DIRECT_PROMPT_PATTERNS.some((p) => p.test(lastText))) {
+      return {
+        ended: true,
+        confidence: 0.78,
+        reason: 'The interlocutor appears to be asking for a response.',
+      };
+    }
+
     // Short segments → probably still talking (STT often emits short chunks)
     if (lastText.length < 10) {
       return {
@@ -239,6 +273,16 @@ export class ProfessionalMeetingStrategy {
     }
     // For meeting modes, scope is the safest default
     return set.has('scope') ? 'scope' : allowed[0];
+  }
+
+  private isReliableInterlocutor(segment: { canonicalRole?: string; source?: string; speaker: string; qualityFlags?: string[] }): boolean {
+    if (segment.qualityFlags?.includes('low_confidence')) return false;
+    if (segment.canonicalRole === 'interlocutor' || /^speaker_\d+$/i.test(segment.canonicalRole || '')) {
+      return true;
+    }
+    if (segment.source === 'system') return true;
+    const speaker = String(segment.speaker || '').toLowerCase();
+    return speaker === 'interlocutor' || /^speaker[_-]?\d+$/i.test(speaker) || /^locuteur[_-]?\d+$/i.test(speaker);
   }
 }
 

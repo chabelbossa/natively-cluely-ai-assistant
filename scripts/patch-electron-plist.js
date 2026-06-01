@@ -3,12 +3,13 @@
  * patch-electron-plist.js
  *
  * Patches the development Electron.app Info.plist to add the required
- * NSScreenCaptureUsageDescription and NSMicrophoneUsageDescription keys.
+ * NSScreenCaptureUsageDescription, NSAudioCaptureUsageDescription, and
+ * NSMicrophoneUsageDescription keys.
  *
- * Without NSScreenCaptureUsageDescription in the Info.plist, macOS silently
- * refuses to show the TCC screen recording permission prompt — or grants it
- * under the generic "com.github.Electron" bundle ID, which means the entry
- * is lost the next time electron is reinstalled / node_modules is cleared.
+ * Without the capture usage descriptions in the Info.plist, macOS silently
+ * refuses to show the TCC permission prompts — or grants them under the generic
+ * "com.github.Electron" bundle ID, which means the entry is lost the next time
+ * electron is reinstalled / node_modules is cleared.
  *
  * Run this script after every `npm install` via `postinstall` in package.json.
  * It is idempotent — safe to run multiple times.
@@ -47,6 +48,18 @@ if (!content.includes('NSScreenCaptureUsageDescription')) {
   console.log('[patch-electron-plist] Added NSScreenCaptureUsageDescription.');
 } else {
   console.log('[patch-electron-plist] NSScreenCaptureUsageDescription already present — skipping.');
+}
+
+// Patch NSAudioCaptureUsageDescription (macOS 14.2+ system audio capture)
+if (!content.includes('NSAudioCaptureUsageDescription')) {
+  content = content.replace(
+    '<key>NSMicrophoneUsageDescription</key>',
+    '<key>NSAudioCaptureUsageDescription</key>\n\t<string>Natively needs system audio capture access to transcribe other speakers during meetings.</string>\n\t<key>NSMicrophoneUsageDescription</key>'
+  );
+  modified = true;
+  console.log('[patch-electron-plist] Added NSAudioCaptureUsageDescription.');
+} else {
+  console.log('[patch-electron-plist] NSAudioCaptureUsageDescription already present — skipping.');
 }
 
 // Patch NSMicrophoneUsageDescription if it has the generic stock text

@@ -1,0 +1,121 @@
+{
+  "name": "Projet Afrio Discussion",
+  "description": "Regression fixture from the manager meeting: system audio must remain canonical, microphone echo must not become ME, and late diarized local flushes must be suppressed.",
+  "thresholds": {
+    "maxFalseMeRate": 0,
+    "maxDuplicateRate": 0.08,
+    "minInterlocutorFinals": 4,
+    "maxSuppressedExpectedMe": 0,
+    "maxUnsuppressedExpectedSuppressed": 0
+  },
+  "events": [
+    {
+      "channel": "system",
+      "provider": "local",
+      "speaker": "locuteur_0",
+      "text": "D'accord. Bon, le projet de publicite, ce n'est pas un projet distinct. Ca fait partie des differents services que nous allons proposer a Afrio.",
+      "timestamp": 1000,
+      "final": true,
+      "confidence": 0.93,
+      "diarized": true,
+      "speakerId": 0,
+      "expectedRole": "speaker_1"
+    },
+    {
+      "channel": "system",
+      "provider": "local",
+      "speaker": "locuteur_0",
+      "text": "Donc ce n'est pas un projet separe, cela veut dire que le meme backend sera utilise plus tard pour les differentes fonctionnalites.",
+      "timestamp": 4300,
+      "final": true,
+      "confidence": 0.91,
+      "diarized": true,
+      "speakerId": 0,
+      "expectedRole": "speaker_1"
+    },
+    {
+      "channel": "system",
+      "provider": "local",
+      "speaker": "locuteur_0",
+      "text": "Quand les partenaires voudront faire des publicites, on leur permettra de choisir des contenus deja crees sur Afrio et de les partager.",
+      "timestamp": 7900,
+      "final": true,
+      "confidence": 0.9,
+      "diarized": true,
+      "speakerId": 0,
+      "expectedRole": "speaker_1"
+    },
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "D'accord. Bon le projet de publicite ce n'est pas un projet distinct. Ca fait partie des differents services qu'on propose a Afrio. Donc ce n'est pas un projet separe, cela veut dire que le meme backend sera utilise plus tard pour les differentes fonctionnalites. Quand les partenaires voudront faire des publicites on leur permettra de choisir des contenus deja crees sur Afrio et de les partager.",
+      "timestamp": 8250,
+      "final": true,
+      "confidence": 0.78,
+      "systemAudioActive": true,
+      "micGateActive": true,
+      "expectedRole": "suppressed"
+    },
+    {
+      "channel": "system",
+      "provider": "local",
+      "speaker": "locuteur_0",
+      "text": "Il peut avoir un compte annonceur et creer des publicites. Les partenaires pourront acceder aux publicites et les partager.",
+      "timestamp": 11600,
+      "final": true,
+      "confidence": 0.92,
+      "diarized": true,
+      "speakerId": 0,
+      "expectedRole": "speaker_1"
+    },
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "Il peut avoir un compte annonceur et creer des publicites. Les partenaires pourront acceder aux publicites et les partager. Voila, il est annonceur, il a un compte annonceur.",
+      "timestamp": 11920,
+      "final": true,
+      "confidence": 0.8,
+      "systemAudioActive": true,
+      "micGateActive": true,
+      "expectedRole": "suppressed"
+    },
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "Oui, ce que je demandais, est-ce que cette premiere version se concentre uniquement sur les publicites ?",
+      "timestamp": 18200,
+      "final": true,
+      "confidence": 0.95,
+      "systemAudioActive": false,
+      "micGateActive": false,
+      "expectedRole": "me"
+    },
+    {
+      "channel": "system",
+      "provider": "local",
+      "speaker": "locuteur_0",
+      "text": "Non, il n'y a pas de maquette pour la partie publicite. Le document permettra d'avoir les grandes lignes et de confirmer les priorites.",
+      "timestamp": 22200,
+      "final": true,
+      "confidence": 0.93,
+      "diarized": true,
+      "speakerId": 0,
+      "expectedRole": "speaker_1"
+    },
+    {
+      "channel": "system",
+      "provider": "local",
+      "speaker": "locuteur_1",
+      "text": "D'accord. Bon, le projet de publicite, ce n'est pas un projet distinct. Ca fait partie des differents services que nous allons proposer a Afrio. Donc ce n'est pas un projet separe, cela veut dire que le meme backend sera utilise plus tard pour les differentes fonctionnalites. Quand les partenaires voudront faire des publicites, on leur permettra de choisir des contenus deja crees sur Afrio et de les partager. Il peut avoir un compte annonceur et creer des publicites. Les partenaires pourront acceder aux publicites et les partager. Non, il n'y a pas de maquette pour la partie publicite. Le document permettra d'avoir les grandes lignes et de confirmer les priorites. D'accord. Bon, le projet de publicite, ce n'est pas un projet distinct. Ca fait partie des differents services que nous allons proposer a Afrio. Donc ce n'est pas un projet separe, cela veut dire que le meme backend sera utilise plus tard pour les differentes fonctionnalites. Quand les partenaires voudront faire des publicites, on leur permettra de choisir des contenus deja crees sur Afrio et de les partager. Il peut avoir un compte annonceur et creer des publicites. Les partenaires pourront acceder aux publicites et les partager. Non, il n'y a pas de maquette pour la partie publicite. Le document permettra d'avoir les grandes lignes et de confirmer les priorites.",
+      "timestamp": 25300,
+      "final": true,
+      "confidence": 0.72,
+      "diarized": true,
+      "speakerId": 1,
+      "expectedRole": "suppressed"
+    }
+  ]
+}

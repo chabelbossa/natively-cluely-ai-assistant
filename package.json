@@ -18,6 +18,17 @@
     "app:build": "npm run build && npm run build:electron && cross-env NATIVELY_BUILD_ALL_MAC_ARCHES=1 npm run build:native && npm run build:parakeet-helper && electron-builder",
     "app:build:mac-arm64": "npm run build && npm run build:electron && npm run build:native && npm run build:parakeet-helper && electron-builder --mac zip --arm64 --publish never -c.mac.target=zip",
     "app:install:local": "npm run build && npm run build:electron && npm run build:native && npm run build:parakeet-helper && electron-builder --mac dir --arm64 && rm -rf /Applications/Natively.app && cp -R release/mac-arm64/Natively.app /Applications/",
+    "meeting:replay": "node scripts/replay-meeting.js",
+    "meeting:replay:audio": "node scripts/replay-audio.js",
+    "meeting:focus:debug": "node scripts/replay-action-focus.js",
+    "meeting:layout:guard": "node scripts/check-overlay-layout.js",
+    "meeting:layout:stress": "node scripts/check-overlay-stress-budget.js",
+    "meeting:layout:dom": "node scripts/check-overlay-dom-stress.js",
+    "meeting:model-selector:guard": "node scripts/check-model-selector-visibility.js",
+    "meeting:action:guard": "node scripts/check-meeting-action-reliability.js",
+    "meeting:repair:db": "node scripts/check-meeting-repair-against-db.js",
+    "meeting:repair:live": "node scripts/check-meeting-repair-against-db.js --require-post-install",
+    "meeting:parakeet:diarization:guard": "node scripts/check-parakeet-live-diarization.js",
     "watch": "tsc -p electron/tsconfig.json --watch",
     "start": "npm run app:dev",
     "dist": "npm run app:build",
@@ -88,6 +99,7 @@
       "hardenedRuntime": true,
       "extendInfo": {
         "NSScreenCaptureUsageDescription": "Natively needs Screen Recording permission to capture system audio for meeting transcription.",
+        "NSAudioCaptureUsageDescription": "Natively needs system audio capture access to transcribe other speakers during meetings.",
         "NSMicrophoneUsageDescription": "Natively needs microphone access to transcribe your voice during meetings."
       }
     },

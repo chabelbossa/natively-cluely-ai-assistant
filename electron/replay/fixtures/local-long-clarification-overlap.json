@@ -1,0 +1,50 @@
+{
+  "name": "Local Long Clarification During Overlap",
+  "description": "Regression fixture proving long first-person clarification from the local mic is preserved while ordinary speaker leakage remains suppressed.",
+  "thresholds": {
+    "maxFalseMeRate": 0,
+    "maxDuplicateRate": 0,
+    "minInterlocutorFinals": 1,
+    "maxSuppressedExpectedMe": 0,
+    "maxUnsuppressedExpectedSuppressed": 0,
+    "maxRoleMismatches": 0
+  },
+  "events": [
+    {
+      "channel": "system",
+      "provider": "local",
+      "speaker": "locuteur_1",
+      "text": "On peut permettre de faire un switch vers le dashboard client et ensuite vers le dashboard marchand.",
+      "timestamp": 1000,
+      "final": true,
+      "confidence": 0.92,
+      "diarized": true,
+      "speakerId": 1,
+      "expectedRole": "speaker_1"
+    },
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "Bon, la manière dont moi j'avais compris structurer, c'est qu'on avait chaque action avec chaque accès et que ça faisait qu'un utilisateur pouvait avoir plusieurs rôles, donc je veux vérifier si on simplifie bien vers deux profils seulement.",
+      "timestamp": 2200,
+      "final": true,
+      "confidence": 0.94,
+      "systemAudioActive": true,
+      "micGateActive": true,
+      "expectedRole": "me"
+    },
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "Par exemple je peux être annonceur et à la fois partenaire et je ne suis pas obligé de créer deux comptes avec des adresses différentes donc on peut leur permettre de faire un switch vers le dashboard client.",
+      "timestamp": 3600,
+      "final": true,
+      "confidence": 0.93,
+      "systemAudioActive": true,
+      "micGateActive": true,
+      "expectedRole": "suppressed"
+    }
+  ]
+}

@@ -49,9 +49,9 @@ export const STANDARD_CLOUD_MODELS: Record<string, {
     },
     codex: {
         hasKeyCheck: (creds) => !!creds?.hasCodexAccounts,
-        ids: ['codex:gpt-5.4', 'codex:gpt-5.4-mini', 'codex:gpt-5.3', 'codex:gpt-5.2', 'codex:gpt-5.1', 'codex:gpt-5'],
-        names: ['GPT 5.4 Codex', 'GPT 5.4 Mini Codex', 'GPT 5.3 Codex', 'GPT 5.2 Codex', 'GPT 5.1 Codex', 'GPT 5 Codex'],
-        descs: ['ChatGPT Plus/Pro • Best', 'ChatGPT Plus/Pro • Fast', 'ChatGPT Plus/Pro • Balanced', 'ChatGPT Plus/Pro • Stable', 'ChatGPT Plus/Pro • Legacy', 'ChatGPT Plus/Pro • Base'],
+        ids: ['codex:gpt-5.5', 'codex:gpt-5.4', 'codex:gpt-5.4-mini', 'codex:gpt-5.3', 'codex:gpt-5.2', 'codex:gpt-5.1', 'codex:gpt-5'],
+        names: ['GPT 5.5 Codex', 'GPT 5.4 Codex', 'GPT 5.4 Mini Codex', 'GPT 5.3 Codex', 'GPT 5.2 Codex', 'GPT 5.1 Codex', 'GPT 5 Codex'],
+        descs: ['ChatGPT Plus/Pro • Fast mode', 'ChatGPT Plus/Pro • Fast mode', 'ChatGPT Plus/Pro • Fast fallback', 'ChatGPT Plus/Pro • Balanced', 'ChatGPT Plus/Pro • Stable', 'ChatGPT Plus/Pro • Legacy', 'ChatGPT Plus/Pro • Base'],
         pmKey: 'codexPreferredModel'
     },
 };

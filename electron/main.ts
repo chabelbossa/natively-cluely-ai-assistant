@@ -175,7 +175,10 @@ import { RAGManager } from "./rag/RAGManager"
 import { DatabaseManager } from "./db/DatabaseManager"
 import { warmupIntentClassifier } from "./llm"
 import { TranscriptRouter } from "./transcript/TranscriptRouter"
+import type { RawTranscriptSegment } from "./transcript/types"
 import { MeetingBriefManager } from "./meeting/MeetingBriefManager"
+import { MeetingDebugRecorder } from "./diagnostics/MeetingDebugRecorder"
+import { AudioDebugRecorder, type AudioDebugTrackName } from "./diagnostics/AudioDebugRecorder"
 
 /** Unified type for all STT providers with optional extended capabilities */
 type STTProvider = (GoogleSTT | RestSTT | LocalSTT | ParakeetStreamingSTT | DeepgramStreamingSTT | SonioxStreamingSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT | NativelyProSTT) & {
@@ -259,6 +262,11 @@ export class AppState {
 
   private hasDebugged: boolean = false
   private isMeetingActive: boolean = false; // Guard for session state leaks
+  private isMeetingStopping: boolean = false;
+  private meetingFinalizationPromise: Promise<void> | null = null;
+  private lastAcceptedSttTranscriptAt: number = 0;
+  private readonly POST_STOP_STT_WAIT_MS = 45_000;
+  private readonly POST_STOP_STT_MIN_WAIT_MS = 5_000;
   private _isQuitting: boolean = false;
   private _verboseLogging: boolean = false;
   private _disguiseTimers: NodeJS.Timeout[] = []; // Track forceUpdate timeouts
@@ -500,6 +508,10 @@ export class AppState {
 
   public getIsMeetingActive(): boolean {
     return this.isMeetingActive;
+  }
+
+  public getIsMeetingFinalizing(): boolean {
+    return this.isMeetingStopping;
   }
 
   public isQuitting(): boolean {
@@ -834,6 +846,7 @@ export class AppState {
   private systemAudioCapture: SystemAudioCapture | null = null;
   private microphoneCapture: MicrophoneCapture | null = null;
   private audioTestCapture: MicrophoneCapture | null = null; // For audio settings test
+  private audioDebugRecorder: AudioDebugRecorder | null = null;
   private _audioTestStarting = false;               // P2-12: in-flight guard against concurrent calls
   private googleSTT: STTProvider | null = null; // Interviewer
   private googleSTT_User: STTProvider | null = null; // User
@@ -842,6 +855,7 @@ export class AppState {
     user: 0,
   };
   private _lastSystemAudioLevel: { rms: number; peak: number } | null = null;
+  private _systemAudioSilentWarningActive = false;
   private sttTranscriptLogCounters: Record<string, number> = {};
   private sttTranscriptLastLogAt: Record<string, number> = {};
 
@@ -987,7 +1001,7 @@ export class AppState {
     const hasQuestionSignal = /\?$/.test(text.trim()) ||
       /\b(est ce que|est ce qu|pourquoi|comment|quand|qui|quel|quelle|quels|quelles|combien|où|what|why|how|when|where|who|which|can you|could you|do you|does it)\b/i.test(normalized);
 
-    const hasLearnerSignal = /\b(si je comprends|je comprends|si j ai bien compris|j ai bien compris|je ne comprends|je n ai pas compris|je veux comprendre|ca veut dire|ça veut dire|donc si|pour mieux comprendre|que dire)\b/i.test(normalized);
+    const hasLearnerSignal = /\b(si je comprends|je comprends|si j ai bien compris|j ai bien compris|je ne comprends|je n ai pas compris|je veux comprendre|je voulais demander|je voulais savoir|je veux savoir|j aimerais savoir|ma question|j ai une question|ca veut dire|ça veut dire|donc si|pour mieux comprendre|que dire)\b/i.test(normalized);
 
     const hasPromptingSignal = /\b(explique|expliquez|precise|précise|clarifie|clarifiez|reprends|reprenez|dis nous|dites nous|dis moi|dites moi|peux tu|pouvez vous|tu peux|vous pouvez|tell me|explain|clarify)\b/i.test(normalized);
 
@@ -1056,11 +1070,13 @@ export class AppState {
       return true;
     }
 
-    // Live previews are noisy by nature: when system audio is active, mic
-    // partials are almost always room echo and make the overlay look like the
-    // user is speaking. Drop partials immediately; keep finals delayed below so
-    // genuine user speech can still be released if no matching system transcript arrives.
-    if (!meta.isFinal) {
+    const looksLikeUserIntervention = this.looksLikeLocalUserIntervention(text);
+
+    // Live previews are noisy by nature: when system audio is active, most mic
+    // partials are room echo. Keep only partials that already look like the
+    // user is interrupting, asking, or clarifying, then delay them long enough
+    // for a matching system transcript to cancel the echo.
+    if (!meta.isFinal && !looksLikeUserIntervention) {
       this._pendingMicDroppedPartialCount++;
       if (this._pendingMicDroppedPartialCount <= 12 || this._pendingMicDroppedPartialCount % 25 === 0) {
         console.log(`[STT][echo-delay] drop-mic-partial #${this._pendingMicDroppedPartialCount} provider=${meta.provider} text="${text.substring(0, 90)}"`);
@@ -1068,7 +1084,6 @@ export class AppState {
       return true;
     }
 
-    const looksLikeUserIntervention = this.looksLikeLocalUserIntervention(text);
     if (!looksLikeUserIntervention) {
       this._pendingMicDroppedAmbiguousCount++;
       if (this._pendingMicDroppedAmbiguousCount <= 12 || this._pendingMicDroppedAmbiguousCount % 25 === 0) {
@@ -1223,14 +1238,57 @@ export class AppState {
     const level = this.getPcm16Level(chunk);
     const label = channel === 'interviewer' ? 'system' : 'mic';
     console.log(`[Main][audio-level] ${label} rms=${level.rms.toFixed(1)} peak=${level.peak}${channel === 'interviewer' ? ` micGated=${this._micGated}` : ''}`);
+    MeetingDebugRecorder.getInstance().recordAudioHealth({
+      channel: label,
+      rms: Number(level.rms.toFixed(1)),
+      peak: level.peak,
+      micGated: this._micGated,
+    });
 
     // Persist last system audio level for the health check
     if (channel === 'interviewer') {
       this._lastSystemAudioLevel = level;
       if (level.rms > 25 || level.peak > 80) {
         this._lastSystemAudioNonSilentAt = now;
+        if (this._systemAudioSilentWarningActive) {
+          this._systemAudioSilentWarningActive = false;
+          MeetingDebugRecorder.getInstance().recordAudioHealth({
+            channel: 'system',
+            status: 'recovered_after_silence',
+            rms: Number(level.rms.toFixed(1)),
+            peak: level.peak,
+          });
+          this.broadcast('system-audio-active', {
+            message: 'System audio is now audible. Speaker separation is active.',
+            rms: Number(level.rms.toFixed(1)),
+            peak: level.peak,
+          });
+        }
       }
     }
+  }
+
+  private startAudioDebugRecording(metadata?: any): void {
+    try {
+      this.audioDebugRecorder?.abort();
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const sttProvider = CredentialsManager.getInstance().getSttProvider?.();
+      this.audioDebugRecorder = new AudioDebugRecorder();
+      this.audioDebugRecorder.start({
+        debugTracePath: MeetingDebugRecorder.getInstance().getCurrentFilePath(),
+        metadata: {
+          ...(metadata || {}),
+          sttProvider,
+        },
+      });
+    } catch (error: any) {
+      this.audioDebugRecorder = null;
+      console.warn('[AudioDebugRecorder] Failed to start audio debug recording:', error?.message || error);
+    }
+  }
+
+  private writeAudioDebugTrack(track: AudioDebugTrackName, chunk: Buffer, sampleRate: number): void {
+    this.audioDebugRecorder?.writeTrack(track, chunk, sampleRate || 48000);
   }
 
   /**
@@ -1396,9 +1454,19 @@ export class AppState {
     const providerInstanceName = stt.constructor?.name || 'UnknownSTTProvider';
     console.log(`[STT][provider] channel=${speaker} configured=${sttProvider} instance=${providerInstanceName} language=${sttLanguage} diarization=${stt.supportsDiarization ? 'yes' : 'no'}`);
 
+    const broadcastSttStatus = (payload: SttStatusPayload) => {
+      MeetingDebugRecorder.getInstance().recordSttStatus({
+        ...payload,
+        providerInstance: providerInstanceName,
+        configuredProvider: sttProvider,
+        at: new Date().toISOString(),
+      });
+      this.broadcast('stt-status', payload);
+    };
+
     // Wire Transcript Events
     stt.on('transcript', (segment: { text: string, isFinal: boolean, confidence: number, speakerId?: number }) => {
-      if (!this.isMeetingActive) {
+      if (!this.isMeetingActive && !this.isMeetingStopping) {
         return;
       }
 
@@ -1460,9 +1528,9 @@ export class AppState {
       }
 
       const deliverTranscript = () => {
-        if (!this.isMeetingActive) return;
+        if (!this.isMeetingActive && !this.isMeetingStopping) return;
 
-        const route = this.transcriptRouter.route({
+        const rawTranscriptSegment: RawTranscriptSegment = {
           channel: speaker === 'user' ? 'mic' : 'system',
           provider: sttProvider,
           speaker: effectiveSpeaker,
@@ -1473,6 +1541,20 @@ export class AppState {
           speakerId: segment.speakerId,
           diarized: isDiarized,
           systemAudioActive: this.isSystemAudioRecentlyActive(timestamp),
+          systemAudioSilent: this._systemAudioSilentWarningActive,
+          systemAudioLevel: this._lastSystemAudioLevel,
+          micGateActive: this._micGated,
+        };
+
+        MeetingDebugRecorder.getInstance().recordRawTranscript({ ...rawTranscriptSegment });
+        const route = this.transcriptRouter.route(rawTranscriptSegment);
+        MeetingDebugRecorder.getInstance().recordRouteResult({
+          raw: rawTranscriptSegment,
+          suppressed: route.suppressed,
+          reason: route.reason,
+          matchedSpeaker: route.matchedSpeaker,
+          similarity: route.similarity,
+          canonical: route.segment,
         });
 
         if (route.suppressed || !route.segment) {
@@ -1483,6 +1565,19 @@ export class AppState {
         }
 
         const canonical = route.segment;
+        MeetingDebugRecorder.getInstance().recordCanonicalTranscript({
+          speaker: canonical.speaker,
+          role: canonical.role,
+          source: canonical.source,
+          text: canonical.text,
+          final: canonical.final,
+          confidence: canonical.confidence,
+          qualityFlags: canonical.qualityFlags,
+          rawSpeaker: canonical.rawSpeaker,
+          provider: canonical.provider,
+          speakerId: canonical.speakerId,
+        });
+        this.lastAcceptedSttTranscriptAt = Date.now();
         const helper = this.getWindowHelper();
         const payload = {
           speaker: canonical.speaker,
@@ -1496,8 +1591,10 @@ export class AppState {
           rawSpeaker: canonical.rawSpeaker,
           speakerId: canonical.speakerId,
         };
-        helper.getLauncherWindow()?.webContents.send('native-audio-transcript', payload);
-        helper.getOverlayWindow()?.webContents.send('native-audio-transcript', payload);
+        if (this.isMeetingActive) {
+          helper.getLauncherWindow()?.webContents.send('native-audio-transcript', payload);
+          helper.getOverlayWindow()?.webContents.send('native-audio-transcript', payload);
+        }
 
         const transcriptSegment = {
           speaker: canonical.speaker,
@@ -1525,7 +1622,6 @@ export class AppState {
         }
         if (!shouldFeedPassiveContext) {
           this.intelligenceManager.recordTranscriptOnly(transcriptSegment);
-          this.intelligenceManager.feedCopilotContext(transcriptSegment);
           return;
         }
 
@@ -1587,13 +1683,28 @@ export class AppState {
       const isQuotaError = err.message.toLowerCase().includes('transcription_quota_exceeded')
         || err.message.toLowerCase().includes('quota');
 
-      if (isAuthError) {
+      const loweredError = errorMessage.toLowerCase();
+      const isLocalProvider = sttProvider === 'local' || providerInstanceName.toLowerCase().includes('local') || providerInstanceName.toLowerCase().includes('parakeet');
+      const isLocalStartupError = isLocalProvider && (
+        loweredError.includes('parakeet')
+        || loweredError.includes('helper')
+        || loweredError.includes('model cache')
+        || loweredError.includes('model missing')
+        || loweredError.includes('not executable')
+        || loweredError.includes('warmup')
+        || loweredError.includes('timed out')
+        || loweredError.includes('fluid')
+      );
+
+      if (isAuthError || isLocalStartupError) {
         _consecutiveErrors = 0;
         _lastState = 'failed';
-        this.broadcast('stt-status', {
+        broadcastSttStatus({
           state: 'failed',
           provider: sttProvider,
-          error: errorMessage,
+          error: isLocalStartupError
+            ? `Local STT startup failed: ${errorMessage}`
+            : errorMessage,
           channel: speaker,
         } as SttStatusPayload);
         return;
@@ -1605,7 +1716,7 @@ export class AppState {
 
       if (_consecutiveErrors >= maxErrors || isQuotaError) {
         _lastState = 'failed';
-        this.broadcast('stt-status', {
+        broadcastSttStatus({
           state: 'failed',
           provider: sttProvider,
           error: isQuotaError
@@ -1616,7 +1727,7 @@ export class AppState {
         } as SttStatusPayload);
       } else {
         _lastState = 'reconnecting';
-        this.broadcast('stt-status', {
+        broadcastSttStatus({
           state: 'reconnecting',
           provider: sttProvider,
           error: errorMessage,
@@ -1633,7 +1744,7 @@ export class AppState {
         _consecutiveErrors = 0; // Success — reset counter
         if (_lastState !== 'connected') {
           _lastState = 'connected';
-          this.broadcast('stt-status', {
+          broadcastSttStatus({
             state: 'connected',
             provider: sttProvider,
             channel: speaker,
@@ -1672,6 +1783,7 @@ export class AppState {
           if (_sysChunkCount <= 3 || _sysChunkCount % 500 === 0) {
             console.log(`[Main] SystemAudio->STT: chunk #${_sysChunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
           }
+          this.writeAudioDebugTrack('system', chunk, this.systemAudioCapture?.getSampleRate() || 48000);
           this.updateMicGate(chunk);
           this.maybeLogAudioLevel('interviewer', chunk);
           this.googleSTT?.write(chunk);
@@ -1693,6 +1805,7 @@ export class AppState {
       if (!this.microphoneCapture) {
         this.microphoneCapture = new MicrophoneCapture();
         this.microphoneCapture.on('data', (chunk: Buffer) => {
+          this.writeAudioDebugTrack('mic', chunk, this.microphoneCapture?.getSampleRate() || 48000);
           if (this.shouldDropMicChunkForEcho(chunk)) return;
           this.maybeLogAudioLevel('user', chunk);
           this.googleSTT_User?.write(chunk);
@@ -1772,6 +1885,7 @@ export class AppState {
         if (_rcfgSysChunkCount <= 3 || _rcfgSysChunkCount % 500 === 0) {
           console.log(`[Main] (Reconfigured) SystemAudio->STT: chunk #${_rcfgSysChunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
         }
+        this.writeAudioDebugTrack('system', chunk, this.systemAudioCapture?.getSampleRate() || 48000);
         this.updateMicGate(chunk);
         this.maybeLogAudioLevel('interviewer', chunk);
         this.googleSTT?.write(chunk);
@@ -1801,6 +1915,7 @@ export class AppState {
           if (_dfltSysChunkCount <= 3 || _dfltSysChunkCount % 500 === 0) {
             console.log(`[Main] (Default) SystemAudio->STT: chunk #${_dfltSysChunkCount}, ${chunk.length}B, googleSTT=${this.googleSTT ? 'active' : 'NULL'}`);
           }
+          this.writeAudioDebugTrack('system', chunk, this.systemAudioCapture?.getSampleRate() || 48000);
           this.updateMicGate(chunk);
           this.maybeLogAudioLevel('interviewer', chunk);
           this.googleSTT?.write(chunk);
@@ -1834,6 +1949,7 @@ export class AppState {
       this.googleSTT_User?.setSampleRate(rate);
 
       this.microphoneCapture.on('data', (chunk: Buffer) => {
+        this.writeAudioDebugTrack('mic', chunk, this.microphoneCapture?.getSampleRate() || 48000);
         if (this.shouldDropMicChunkForEcho(chunk)) return;
         this.maybeLogAudioLevel('user', chunk);
         this.googleSTT_User?.write(chunk);
@@ -1858,6 +1974,7 @@ export class AppState {
         this.googleSTT_User?.setSampleRate(rate);
 
         this.microphoneCapture.on('data', (chunk: Buffer) => {
+          this.writeAudioDebugTrack('mic', chunk, this.microphoneCapture?.getSampleRate() || 48000);
           if (this.shouldDropMicChunkForEcho(chunk)) return;
           this.maybeLogAudioLevel('user', chunk);
           this.googleSTT_User?.write(chunk);
@@ -2115,15 +2232,36 @@ export class AppState {
 
   public async startMeeting(metadata?: any): Promise<void> {
     console.log('[Main] Starting Meeting...', metadata);
+    if (this.meetingFinalizationPromise) {
+      console.log('[Main] Waiting for previous meeting finalization before starting a new session...');
+      await this.meetingFinalizationPromise.catch(error => {
+        console.warn('[Main] Previous meeting finalization failed before new start:', error);
+      });
+    }
     this.clearPendingMicEchoTranscripts('new_meeting', false);
     this.transcriptRouter.reset();
     this._recentTranscripts = [];
     this._lastSystemAudioLevel = null;
+    this._systemAudioSilentWarningActive = false;
     this._lastSystemAudioNonSilentAt = 0;
     const activeBrief = this.meetingBriefManager.activateForMeeting(metadata?.meetingBrief, { title: metadata?.title });
     if (activeBrief) {
       metadata = { ...(metadata || {}), meetingBrief: activeBrief };
     }
+    const credentialsManager = CredentialsManager.getInstance();
+    const debugSttProvider = credentialsManager.getSttProvider();
+    const debugLocalSttConfig = debugSttProvider === 'local'
+      ? credentialsManager.getLocalSttConfig()
+      : null;
+    MeetingDebugRecorder.getInstance().startSession({
+      ...(metadata || {}),
+      stt: {
+        provider: debugSttProvider,
+        language: credentialsManager.getSttLanguage(),
+        localMode: debugLocalSttConfig?.mode,
+      },
+      startedAt: new Date().toISOString(),
+    });
 
     // PR #173: Reset audio recovery state for fresh session
     this._systemAudioRecoveryInProgress = false;
@@ -2170,6 +2308,13 @@ export class AppState {
       }
       // 'not-determined': Handled at startup. SCK/CoreAudio will trigger the TCC
       // dialog itself when it first attempts to access screen content.
+    }
+
+    if (metadata?.debugAudioRecording === true) {
+      this.startAudioDebugRecording(metadata);
+    } else {
+      this.audioDebugRecorder?.abort();
+      this.audioDebugRecorder = null;
     }
 
     this.isMeetingActive = true;
@@ -2241,6 +2386,13 @@ export class AppState {
           const level = this._lastSystemAudioLevel;
           if (level && level.rms === 0 && level.peak === 0) {
             console.warn('[Main] ⚠️  System audio health check: SILENT after 7s. Speaker channel will not work.');
+            MeetingDebugRecorder.getInstance().recordAudioHealth({
+              channel: 'system',
+              status: 'silent_after_7s',
+              rms: level.rms,
+              peak: level.peak,
+            });
+            this._systemAudioSilentWarningActive = true;
             this.broadcast('system-audio-silent', {
               message: 'System audio is silent — Speaker separation will not work. Check Screen Recording permission in System Settings.',
               rms: level.rms,
@@ -2258,8 +2410,18 @@ export class AppState {
 
   public async endMeeting(): Promise<void> {
     console.log('[Main] Ending Meeting...');
+    if (!this.isMeetingActive && this.isMeetingStopping) {
+      console.log('[Main] Meeting is already finalizing.');
+      return;
+    }
+    if (!this.isMeetingActive) {
+      console.log('[Main] No active meeting to end.');
+      return;
+    }
+
+    this.isMeetingStopping = true;
     await this.flushPendingSttTranscripts('meeting_end');
-    this.isMeetingActive = false; // Block new data immediately
+    this.isMeetingActive = false;
     this.broadcastMeetingState();
 
     // Reset Mouse Passthrough so the next meeting overlay starts fresh and focusable
@@ -2273,14 +2435,91 @@ export class AppState {
     this.microphoneCapture?.stop();
     this.googleSTT_User?.stop();
 
-    // Save session state and reset context — MeetingPersistence.stopMeeting() is
-    // already fire-and-forget internally (processAndSaveMeeting runs in background).
-    // Capture the meetingId NOW so the background IIFE uses a deterministic ID
-    // rather than getRecentMeetings(1) which could return a different meeting if the
-    // user starts a new session before background processing finishes.
-    const meetingId = await this.intelligenceManager.stopMeeting();
+    const audioDebugManifestPath = this.audioDebugRecorder?.getManifestPath() || null;
+    const audioDebugDirectory = this.audioDebugRecorder?.getSessionDir() || null;
+    const recorder = this.audioDebugRecorder;
+    this.audioDebugRecorder = null;
 
-    // Revert to Default Model — synchronous, no blocking I/O
+    this.meetingFinalizationPromise = this.finalizeStoppedMeeting({
+      recorder,
+      audioDebugManifestPath,
+      audioDebugDirectory,
+    }).finally(() => {
+      this.isMeetingStopping = false;
+      this.meetingFinalizationPromise = null;
+    });
+  }
+
+  private async finalizeStoppedMeeting(options: {
+    recorder: AudioDebugRecorder | null;
+    audioDebugManifestPath: string | null;
+    audioDebugDirectory: string | null;
+  }): Promise<void> {
+    let meetingId: string | null = null;
+
+    try {
+      await this.waitForPostStopSttTranscripts();
+
+      // Save session state after late local STT finals have had a chance to land.
+      // MeetingPersistence.stopMeeting() then resets the session and queues summary generation.
+      meetingId = await this.intelligenceManager.stopMeeting();
+
+      try {
+        await options.recorder?.stop({ meetingId });
+      } catch (error: any) {
+        console.warn('[AudioDebugRecorder] Failed to finalize audio debug recording:', error?.message || error);
+      }
+
+      MeetingDebugRecorder.getInstance().finishSession({
+        meetingId,
+        endedAt: new Date().toISOString(),
+        audioDebugManifestPath: options.audioDebugManifestPath,
+        audioDebugDirectory: options.audioDebugDirectory,
+      });
+
+      this.revertToDefaultModel();
+      await this.runPostMeetingRagProcessing(meetingId);
+    } catch (error) {
+      console.error('[Main] Meeting finalization failed:', error);
+      try {
+        await options.recorder?.stop({ meetingId });
+      } catch {
+        // Best effort only.
+      }
+      MeetingDebugRecorder.getInstance().finishSession({
+        meetingId,
+        endedAt: new Date().toISOString(),
+        audioDebugManifestPath: options.audioDebugManifestPath,
+        audioDebugDirectory: options.audioDebugDirectory,
+        finalizationError: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async waitForPostStopSttTranscripts(): Promise<void> {
+    const usesSlowLocalFinals =
+      this.googleSTT instanceof ParakeetStreamingSTT ||
+      this.googleSTT_User instanceof ParakeetStreamingSTT;
+    const maxWaitMs = usesSlowLocalFinals ? this.POST_STOP_STT_WAIT_MS : this.POST_STOP_STT_MIN_WAIT_MS;
+    const startedAt = Date.now();
+    const waitUntilAt = startedAt + maxWaitMs;
+    let lastObserved = this.lastAcceptedSttTranscriptAt || startedAt;
+
+    console.log(`[Main] Waiting for post-stop STT finals (${maxWaitMs}ms budget, parakeet=${usesSlowLocalFinals})...`);
+    while (Date.now() < waitUntilAt) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const now = Date.now();
+      if (this.lastAcceptedSttTranscriptAt > lastObserved) {
+        lastObserved = this.lastAcceptedSttTranscriptAt;
+        continue;
+      }
+      const waited = now - startedAt;
+      if (!usesSlowLocalFinals && waited >= this.POST_STOP_STT_MIN_WAIT_MS) break;
+    }
+    console.log(`[Main] Post-stop STT finalization wait complete after ${Date.now() - startedAt}ms.`);
+  }
+
+  private revertToDefaultModel(): void {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const cm = CredentialsManager.getInstance();
@@ -2294,45 +2533,33 @@ export class AppState {
     } catch (e) {
       console.error('[Main] Failed to revert model:', e);
     }
+  }
 
-    // ─── Background post-processing ──────────────────────────────────────────
-    // These are the previously blocking operations that caused the stop-button
-    // delay. They are pure background tasks with no UI dependency:
-    //   • stopLiveIndexing flushes the JIT RAG live stream
-    //   • processCompletedMeetingForRAG embeds the full meeting into the vector store
-    //   • deleteMeetingData cleans up provisional JIT chunks
-    // Chain them sequentially in the background so ordering is preserved,
-    // but the IPC call returns immediately and the UI transitions without delay.
+  private async runPostMeetingRagProcessing(meetingId: string | null): Promise<void> {
     const ragManager = this.ragManager;
     if (meetingId) {
-      (async () => {
-        try {
-          if (ragManager) {
-            await ragManager.stopLiveIndexing();
-            console.log('[Main] Live RAG indexing stopped.');
-          }
-          await this.processCompletedMeetingForRAG(meetingId);
-          // Guard: only delete live-meeting-current provisional chunks if no new
-          // meeting has started while we were processing. If a new meeting IS active,
-          // 'live-meeting-current' now belongs to that session — leave it alone.
-          if (ragManager && !this.isMeetingActive) {
-            ragManager.deleteMeetingData('live-meeting-current');
-            console.log('[Main] JIT RAG provisional chunks cleaned up.');
-          } else if (this.isMeetingActive) {
-            console.log('[Main] New meeting started during cleanup — skipping live-meeting-current deletion.');
-          }
-        } catch (err) {
-          console.error('[Main] Background post-meeting RAG processing failed:', err);
+      try {
+        if (ragManager) {
+          await ragManager.stopLiveIndexing();
+          console.log('[Main] Live RAG indexing stopped.');
         }
-      })();
-    } else {
-      // Meeting was too short — still flush the live indexer and clean up
-      if (ragManager) {
-        ragManager.stopLiveIndexing().catch(() => {});
-        if (!this.isMeetingActive) ragManager.deleteMeetingData('live-meeting-current');
+        await this.processCompletedMeetingForRAG(meetingId);
+        if (ragManager && !this.isMeetingActive) {
+          ragManager.deleteMeetingData('live-meeting-current');
+          console.log('[Main] JIT RAG provisional chunks cleaned up.');
+        } else if (this.isMeetingActive) {
+          console.log('[Main] New meeting started during cleanup — skipping live-meeting-current deletion.');
+        }
+      } catch (err) {
+        console.error('[Main] Background post-meeting RAG processing failed:', err);
       }
+      return;
     }
-    // ─────────────────────────────────────────────────────────────────────────
+
+    if (ragManager) {
+      await ragManager.stopLiveIndexing().catch(() => {});
+      if (!this.isMeetingActive) ragManager.deleteMeetingData('live-meeting-current');
+    }
   }
 
   private async processCompletedMeetingForRAG(meetingId: string): Promise<void> {
@@ -2369,122 +2596,86 @@ export class AppState {
   }
 
   private setupIntelligenceEvents(): void {
-    const mainWindow = this.getMainWindow.bind(this)
+    const sendToRenderers = (channel: string, payload?: any) => {
+      const helper = this.getWindowHelper();
+      const sent = new Set<number>();
+      for (const win of [helper.getLauncherWindow(), helper.getOverlayWindow()]) {
+        if (!win || win.isDestroyed() || sent.has(win.id)) continue;
+        win.webContents.send(channel, payload);
+        sent.add(win.id);
+      }
+    };
 
     // Forward intelligence events to renderer
     this.intelligenceManager.on('assist_update', (insight: string) => {
-      // Send to both if both exist, though mostly overlay needs it
-      const helper = this.getWindowHelper();
-      helper.getLauncherWindow()?.webContents.send('intelligence-assist-update', { insight });
-      helper.getOverlayWindow()?.webContents.send('intelligence-assist-update', { insight });
+      sendToRenderers('intelligence-assist-update', { insight });
     })
 
     this.intelligenceManager.on('suggested_answer', (answer: string, question: string, confidence: number) => {
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-suggested-answer', { answer, question, confidence })
-      }
-
+      sendToRenderers('intelligence-suggested-answer', { answer, question, confidence });
     })
 
     this.intelligenceManager.on('suggested_answer_token', (token: string, question: string, confidence: number) => {
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-suggested-answer-token', { token, question, confidence })
-      }
+      sendToRenderers('intelligence-suggested-answer-token', { token, question, confidence });
     })
 
     this.intelligenceManager.on('refined_answer_token', (token: string, intent: string) => {
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-refined-answer-token', { token, intent })
-      }
+      sendToRenderers('intelligence-refined-answer-token', { token, intent });
     })
 
     this.intelligenceManager.on('refined_answer', (answer: string, intent: string) => {
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-refined-answer', { answer, intent })
-      }
-
+      sendToRenderers('intelligence-refined-answer', { answer, intent });
     })
 
     this.intelligenceManager.on('recap', (summary: string) => {
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-recap', { summary })
-      }
+      sendToRenderers('intelligence-recap', { summary });
     })
 
     this.intelligenceManager.on('recap_token', (token: string) => {
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-recap-token', { token })
-      }
+      sendToRenderers('intelligence-recap-token', { token });
     })
 
     this.intelligenceManager.on('clarify', (clarification: string) => {
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-clarify', { clarification })
-      }
+      sendToRenderers('intelligence-clarify', { clarification });
     })
 
     this.intelligenceManager.on('clarify_token', (token: string) => {
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-clarify-token', { token })
-      }
+      sendToRenderers('intelligence-clarify-token', { token });
     })
 
     this.intelligenceManager.on('follow_up_questions_update', (questions: string) => {
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-follow-up-questions-update', { questions })
-      }
+      sendToRenderers('intelligence-follow-up-questions-update', { questions });
     })
 
     this.intelligenceManager.on('follow_up_questions_token', (token: string) => {
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-follow-up-questions-token', { token })
-      }
+      sendToRenderers('intelligence-follow-up-questions-token', { token });
     })
 
     this.intelligenceManager.on('manual_answer_started', () => {
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-manual-started')
-      }
+      sendToRenderers('intelligence-manual-started');
     })
 
     this.intelligenceManager.on('manual_answer_result', (answer: string, question: string) => {
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-manual-result', { answer, question })
-      }
-
+      sendToRenderers('intelligence-manual-result', { answer, question });
     })
 
     this.intelligenceManager.on('mode_changed', (mode: string) => {
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-mode-changed', { mode })
-      }
+      sendToRenderers('intelligence-mode-changed', { mode });
     })
 
     this.intelligenceManager.on('error', (error: Error, mode: string) => {
       console.error(`[IntelligenceManager] Error in ${mode}:`, error)
-      const win = mainWindow()
-      if (win) {
-        win.webContents.send('intelligence-error', { error: error.message, mode })
-      }
+      sendToRenderers('intelligence-error', { error: error.message, mode });
     })
 
     this.intelligenceManager.on('copilot_suggestion', (decision: any) => {
       const helper = this.getWindowHelper();
       helper.getLauncherWindow()?.webContents.send('copilot-suggestion', decision);
       helper.getOverlayWindow()?.webContents.send('copilot-suggestion', decision);
+    })
+
+    this.intelligenceManager.on('copilot_decision', (decision: any) => {
+      sendToRenderers('copilot-decision', decision);
     })
 
     this.intelligenceManager.on('copilot_error', (error: Error) => {

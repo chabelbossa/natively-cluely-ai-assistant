@@ -1,8 +1,9 @@
+export type CanonicalSpeakerRole = `speaker_${number}`;
+
 export type CanonicalTranscriptRole =
   | 'me'
   | 'interlocutor'
-  | 'speaker_1'
-  | 'speaker_2'
+  | CanonicalSpeakerRole
   | 'uncertain'
   | 'assistant';
 
@@ -14,7 +15,22 @@ export type TranscriptQualityFlag =
   | 'low_confidence'
   | 'speaker_uncertain'
   | 'mic_intervention'
+  | 'mic_gate_held'
+  | 'mic_rejected'
+  | 'speaker_stable'
   | 'system_audio'
+  | 'trusted_interlocutor'
+  | 'trusted_me'
+  | 'echo_suspect'
+  | 'late_flush_duplicate'
+  | 'late_flush_trimmed'
+  | 'repaired_context'
+  | 'stitched_fragment'
+  | 'role_repaired'
+  | 'unstable_fragment'
+  | 'system_audio_unavailable'
+  | 'mic_speaker_fallback'
+  | 'stt_low_quality'
   | 'raw_debug';
 
 export interface RawTranscriptSegment {
@@ -28,6 +44,9 @@ export interface RawTranscriptSegment {
   speakerId?: number;
   diarized?: boolean;
   systemAudioActive?: boolean;
+  systemAudioSilent?: boolean;
+  systemAudioLevel?: { rms: number; peak: number } | null;
+  micGateActive?: boolean;
 }
 
 export interface CanonicalTranscriptSegment {

@@ -24,6 +24,7 @@ export const CodexProviderCard: React.FC<CodexProviderCardProps> = ({
 }) => {
     const [isDropdownOpen, setIsDropdownOpen] = useState(false);
     const models = [
+        { id: 'codex:gpt-5.5', label: 'GPT 5.5 Codex' },
         { id: 'codex:gpt-5.4', label: 'GPT 5.4 Codex' },
         { id: 'codex:gpt-5.4-mini', label: 'GPT 5.4 Mini Codex' },
         { id: 'codex:gpt-5.3', label: 'GPT 5.3 Codex' },

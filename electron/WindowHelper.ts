@@ -33,8 +33,11 @@ export class WindowHelper {
   private opacityTimeout: NodeJS.Timeout | null = null
 
   // Constants
-  private static readonly OVERLAY_DEFAULT_WIDTH = 600;
-  private static readonly OVERLAY_MIN_HEIGHT = 216;
+  private static readonly OVERLAY_DEFAULT_WIDTH = 760;
+  private static readonly OVERLAY_COMPACT_MIN_HEIGHT = 216;
+  private static readonly OVERLAY_TARGET_MAX_HEIGHT = 760;
+  private static readonly OVERLAY_MIN_USEFUL_HEIGHT = 560;
+  private static readonly OVERLAY_VERTICAL_MARGIN = 32;
 
   // Movement variables (apply to active window)
   private step: number = 20
@@ -54,6 +57,20 @@ export class WindowHelper {
       return screen.getDisplayMatching(this.overlayWindow.getBounds()).workArea
     }
     return screen.getPrimaryDisplay().workArea
+  }
+
+  private getOverlayVisibleHeight(workArea: Electron.Rectangle): number {
+    const maxAllowedHeight = Math.floor(workArea.height * 0.9)
+    const availableHeight = Math.max(
+      WindowHelper.OVERLAY_MIN_USEFUL_HEIGHT,
+      workArea.height - WindowHelper.OVERLAY_VERTICAL_MARGIN
+    )
+    const preferredHeight = Math.min(
+      WindowHelper.OVERLAY_TARGET_MAX_HEIGHT,
+      availableHeight
+    )
+
+    return Math.max(1, Math.min(maxAllowedHeight, preferredHeight))
   }
 
   public setContentProtection(enable: boolean): void {
@@ -108,8 +125,9 @@ export class WindowHelper {
     const workArea = this.getDisplayWorkArea(currentBounds)
     const maxAllowedWidth = Math.floor(workArea.width * 0.9)
     const maxAllowedHeight = Math.floor(workArea.height * 0.9)
+    const minVisibleHeight = this.getOverlayVisibleHeight(workArea)
     const newWidth = Math.min(Math.max(width, 300), maxAllowedWidth) // min 300, max 90%
-    const newHeight = Math.min(Math.max(height, 1), maxAllowedHeight) // min 1, max 90%
+    const newHeight = Math.min(Math.max(height, minVisibleHeight), maxAllowedHeight)
     const maxX = workArea.x + workArea.width - newWidth
     const maxY = workArea.y + workArea.height - newHeight
     const newX = Math.min(Math.max(currentX, workArea.x), maxX)
@@ -542,24 +560,25 @@ export class WindowHelper {
       const savedBounds = this.overlayBounds
         ? {
             ...this.overlayBounds,
-            height: Math.max(this.overlayBounds.height, WindowHelper.OVERLAY_MIN_HEIGHT)
+            height: Math.max(this.overlayBounds.height, WindowHelper.OVERLAY_COMPACT_MIN_HEIGHT)
           }
         : null;
       const workArea = this.getDisplayWorkArea(savedBounds ?? currentBounds);
       const maxAllowedWidth = Math.floor(workArea.width * 0.9);
       const maxAllowedHeight = Math.floor(workArea.height * 0.9);
+      const minVisibleHeight = this.getOverlayVisibleHeight(workArea);
       const targetBounds = savedBounds
         ? {
             x: Math.min(Math.max(savedBounds.x, workArea.x), workArea.x + workArea.width - Math.min(savedBounds.width, maxAllowedWidth)),
-            y: Math.min(Math.max(savedBounds.y, workArea.y), workArea.y + workArea.height - Math.min(savedBounds.height, maxAllowedHeight)),
+            y: Math.min(Math.max(savedBounds.y, workArea.y), workArea.y + workArea.height - Math.min(Math.max(savedBounds.height, minVisibleHeight), maxAllowedHeight)),
             width: Math.min(savedBounds.width, maxAllowedWidth),
-            height: Math.min(savedBounds.height, maxAllowedHeight)
+            height: Math.min(Math.max(savedBounds.height, minVisibleHeight), maxAllowedHeight)
           }
         : {
             x: Math.floor(workArea.x + (workArea.width - WindowHelper.OVERLAY_DEFAULT_WIDTH) / 2),
             y: Math.floor(workArea.y + (workArea.height - WindowHelper.OVERLAY_DEFAULT_WIDTH) / 2),
             width: WindowHelper.OVERLAY_DEFAULT_WIDTH,
-            height: Math.max(Math.min(currentBounds.height, maxAllowedHeight), WindowHelper.OVERLAY_MIN_HEIGHT)
+            height: Math.max(Math.min(currentBounds.height, maxAllowedHeight), minVisibleHeight)
           };
 
       this.overlayWindow.setBounds(targetBounds);

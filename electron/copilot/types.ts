@@ -41,6 +41,7 @@ export type CopilotSuggestionType =
     | 'course_comparison'
     | 'coding_hint'
     | 'interview_answer'
+    | 'vibe_interview_say_this'
     | 'follow_up_question';
 
 export type CopilotFeedbackRating =
@@ -48,6 +49,30 @@ export type CopilotFeedbackRating =
     | 'too_early'
     | 'not_relevant'
     | 'already_discussed';
+
+export type CopilotContextStatus =
+    | 'ready'
+    | 'listening'
+    | 'weak'
+    | 'cooldown'
+    | 'generating';
+
+export type CopilotNextBestAction =
+    | 'say_this'
+    | 'ask_this'
+    | 'listen'
+    | 'wait';
+
+export interface CopilotContextQuality {
+    score: number;
+    status: CopilotContextStatus;
+    label: string;
+    reason: string;
+    reliableInterlocutorSegments: number;
+    meSegments: number;
+    totalSegments: number;
+    latestInterlocutorAgeMs?: number;
+}
 
 export interface CopilotDecision {
     id: string;
@@ -60,6 +85,8 @@ export interface CopilotDecision {
     suggestion?: string;
     createdAt: number;
     sourceSegmentIds: string[];
+    contextQuality?: CopilotContextQuality;
+    nextBestAction?: CopilotNextBestAction;
 }
 
 export interface CopilotFeedback {

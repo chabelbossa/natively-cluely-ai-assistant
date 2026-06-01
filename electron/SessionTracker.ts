@@ -262,7 +262,10 @@ export class SessionTracker {
             return;
         }
 
-        if (cleanText.includes("I'm not sure") || cleanText.includes("I can't answer")) {
+        if (cleanText.includes("I'm not sure") ||
+            cleanText.includes("I can't answer") ||
+            cleanText.includes("Je n'ai pas encore assez de contexte fiable") ||
+            cleanText.includes("Je n'ai pas assez de contexte de l'interlocuteur")) {
             console.warn(`[SessionTracker] Ignored fallback message`);
             return;
         }
@@ -404,9 +407,7 @@ export class SessionTracker {
     getFormattedContext(lastSeconds: number = 120): string {
         const items = this.getContext(lastSeconds);
         return items.map(item => {
-            const label = item.role === 'interviewer' ? 'INTERVIEWER' :
-                item.role === 'user' ? 'ME' :
-                    'ASSISTANT (PREVIOUS SUGGESTION)';
+            const label = this.formatRoleLabel(item);
             return `[${label}]: ${item.text}`;
         }).join('\n');
     }
@@ -486,9 +487,11 @@ export class SessionTracker {
     getFullSessionContext(): string {
         const recentTranscript = this.fullTranscript.map(segment => {
             const role = this.mapSpeakerToRole(segment.speaker, segment.canonicalRole);
-            const label = role === 'interviewer' ? 'INTERVIEWER' :
-                role === 'user' ? 'ME' :
-                    'ASSISTANT';
+            const label = this.formatRoleLabel({
+                role,
+                speaker: segment.speaker,
+                canonicalRole: segment.canonicalRole
+            });
             return `[${label}]: ${segment.text}`;
         }).join('\n');
 
@@ -670,17 +673,21 @@ export class SessionTracker {
         const uncertainInterlocutor = meaningful.filter(item =>
             item.role === 'interviewer' && this.isUncertainSpeakerLabel(item)
         );
-        const localUser = meaningful.filter(item => item.role === 'user' && item.text.length <= 1000);
+        const interlocutorForEchoCheck = [...reliableInterlocutor, ...uncertainInterlocutor];
+        const localUser = meaningful.filter(item =>
+            item.role === 'user' &&
+            this.isTrustedLocalUserContextItem(item, interlocutorForEchoCheck)
+        );
         const assistant = meaningful.filter(item => item.role === 'assistant');
 
         const hasInterlocutor = reliableInterlocutor.length > 0 || uncertainInterlocutor.length > 0;
         const selected: ContextItem[] = [];
 
         if (hasInterlocutor) {
-            selected.push(...this.takeRecent(reliableInterlocutor, 12));
-            selected.push(...this.takeRecent(uncertainInterlocutor, reliableInterlocutor.length > 0 ? 3 : 7));
+            selected.push(...this.takeRecent(reliableInterlocutor, 14));
+            selected.push(...this.takeRecent(uncertainInterlocutor, reliableInterlocutor.length > 0 ? 2 : 6));
             selected.push(...this.takeRecent(localUser, 2));
-            selected.push(...this.takeRecent(assistant, 2));
+            selected.push(...this.takeRecent(assistant, 1));
         } else {
             selected.push(...this.takeRecent(localUser, 6));
             selected.push(...this.takeRecent(assistant, 2));
@@ -707,6 +714,13 @@ export class SessionTracker {
             return false;
         }
 
+        const flags = new Set(item.qualityFlags || []);
+        if (flags.has('late_flush_duplicate') || flags.has('mic_rejected')) return false;
+        if (flags.has('stt_low_quality') && item.role !== 'interviewer') return false;
+        if (item.role === 'user' && (flags.has('echo_suspect') || flags.has('mic_gate_held'))) {
+            return this.looksLikeDirectLocalQuestion(text) && text.length <= 240;
+        }
+
         return true;
     }
 
@@ -717,12 +731,64 @@ export class SessionTracker {
 
     private isUncertainSpeakerLabel(item: ContextItem): boolean {
         if (item.canonicalRole === 'uncertain') return true;
-        if (item.canonicalRole === 'interlocutor' || item.canonicalRole === 'speaker_1' || item.canonicalRole === 'speaker_2') return false;
+        if (this.isReliableInterlocutorCanonicalRole(item.canonicalRole)) return false;
         const speaker = String(item.speaker || '').toLowerCase();
-        return /^locuteur[_-]?\d+$/.test(speaker)
-            || /^speaker[_-]?\d+$/.test(speaker)
-            || speaker === 'unknown'
-            || speaker === 'speaker';
+        if (/^locuteur[_-]?\d+$/.test(speaker) || /^speaker[_-]?\d+$/.test(speaker)) return false;
+        return speaker === 'unknown' || speaker === 'speaker';
+    }
+
+    private isTrustedLocalUserContextItem(item: ContextItem, interlocutorItems: ContextItem[]): boolean {
+        const text = item.text.trim();
+        if (!text) return false;
+        if (text.length > 650) return false;
+
+        const flags = new Set(item.qualityFlags || []);
+        if (flags.has('mic_rejected') || flags.has('echo_suspect')) return false;
+        if (flags.has('low_confidence') && text.length > 180) return false;
+
+        const localScore = this.scoreLocalUserIntent(text);
+        const directQuestion = this.looksLikeDirectLocalQuestion(text);
+        const hasOverlapFlag = flags.has('possible_overlap') || flags.has('mic_gate_held');
+
+        if (hasOverlapFlag && localScore < 0.62 && !directQuestion) return false;
+
+        const normalized = this.normalizeTranscriptForComparison(text);
+        const similarToInterlocutor = interlocutorItems.some(other => {
+            const otherText = this.normalizeTranscriptForComparison(other.text);
+            if (!otherText || otherText.length < 25) return false;
+            const elapsed = Math.abs(item.timestamp - other.timestamp);
+            if (elapsed > 120_000) return false;
+            return this.transcriptSimilarity(normalized, otherText) >= 0.42 ||
+                (normalized.length > 60 && otherText.includes(normalized.slice(0, Math.min(80, normalized.length))));
+        });
+
+        if (similarToInterlocutor && localScore < 0.75) return false;
+
+        return localScore >= 0.42 || directQuestion;
+    }
+
+    private scoreLocalUserIntent(text: string): number {
+        const normalized = this.normalizeTranscriptForComparison(text);
+        const words = normalized.split(' ').filter(Boolean);
+        if (words.length === 0) return 0;
+
+        let score = 0;
+        if (this.looksLikeDirectLocalQuestion(text)) score += 0.42;
+        if (/\b(si je comprends|j ai bien compris|je veux comprendre|je voulais demander|je voudrais savoir|j aimerais savoir|ce que je demandais|pour mieux comprendre|je veux etre certain|je veux être certain)\b/i.test(normalized)) score += 0.38;
+        if (/\b(pouvez vous|peux tu|tu peux|est ce que|confirmer|préciser|preciser|clarifier|explique|expliquer|dis moi|dites moi)\b/i.test(normalized)) score += 0.24;
+        if (/\b(je|j ai|j aimerais|je veux|je voudrais|moi|mon|ma|mes|nous|on peut|i|me|my|we)\b/i.test(normalized)) score += 0.14;
+        if (words.length > 80) score -= 0.3;
+        if (words.length > 120) score -= 0.5;
+
+        return Math.max(0, Math.min(1, score));
+    }
+
+    private looksLikeDirectLocalQuestion(text: string): boolean {
+        const normalized = this.normalizeTranscriptForComparison(text);
+        const words = normalized.split(' ').filter(Boolean);
+        if (words.length === 0 || words.length > 90) return false;
+        if (/\?$/.test(text.trim())) return true;
+        return /(^|\b)(est ce que|pourquoi|comment|quand|quel|quelle|quels|quelles|combien|où|ou est|pouvez vous|peux tu|tu peux|vous pouvez|can you|could you|what|why|how|when|where|which)\b/i.test(normalized);
     }
 
     private takeRecent<T>(items: T[], count: number): T[] {
@@ -737,17 +803,43 @@ export class SessionTracker {
     }
 
     private formatActionContextItem(item: ContextItem): string {
-        const label = item.role === 'interviewer'
-            ? item.canonicalRole === 'interlocutor' || item.canonicalRole === 'speaker_1' || item.canonicalRole === 'speaker_2'
-                ? 'INTERLOCUTOR'
-                : this.isUncertainSpeakerLabel(item)
-                ? 'INTERLOCUTOR (DIARIZATION_UNCERTAIN)'
-                : 'INTERLOCUTOR'
-            : item.role === 'user'
-                ? 'ME (LOCAL MIC)'
-                : 'ASSISTANT (PREVIOUS SUGGESTION)';
-
+        const label = this.formatRoleLabel(item);
         return `[${label}]: ${item.text}`;
+    }
+
+    private formatRoleLabel(item: Pick<ContextItem, 'role' | 'speaker' | 'canonicalRole'>): string {
+        if (item.role === 'user') return 'ME (LOCAL MIC)';
+        if (item.role === 'assistant') return 'ASSISTANT (PREVIOUS SUGGESTION)';
+        if (item.canonicalRole === 'uncertain') return 'INTERLOCUTOR (DIARIZATION_UNCERTAIN)';
+
+        const speakerLabel = this.resolveInterlocutorSpeakerLabel(item.canonicalRole, item.speaker);
+        return speakerLabel ? `INTERLOCUTOR_${speakerLabel}` : 'INTERLOCUTOR';
+    }
+
+    private resolveInterlocutorSpeakerLabel(canonicalRole?: CanonicalTranscriptRole, speaker?: string): string | null {
+        const canonical = this.extractOneBasedSpeakerNumber(canonicalRole);
+        if (canonical !== null) return `SPEAKER_${canonical}`;
+
+        const rawSpeaker = String(speaker || '').toLowerCase();
+        const speakerMatch = /^speaker[_-]?(\d+)$/i.exec(rawSpeaker);
+        if (speakerMatch) return `SPEAKER_${Number(speakerMatch[1])}`;
+
+        const locuteurMatch = /^locuteur[_-]?(\d+)$/i.exec(rawSpeaker);
+        if (locuteurMatch) return `SPEAKER_${Number(locuteurMatch[1]) + 1}`;
+
+        return null;
+    }
+
+    private extractOneBasedSpeakerNumber(role?: CanonicalTranscriptRole): number | null {
+        if (!role) return null;
+        const match = /^speaker_(\d+)$/i.exec(role);
+        if (!match) return null;
+        const value = Number(match[1]);
+        return Number.isFinite(value) && value > 0 ? value : null;
+    }
+
+    private isReliableInterlocutorCanonicalRole(role?: CanonicalTranscriptRole): boolean {
+        return role === 'interlocutor' || this.extractOneBasedSpeakerNumber(role) !== null;
     }
 
     private mergeContextItems(primary: ContextItem[], secondary: ContextItem[]): ContextItem[] {
@@ -818,8 +910,11 @@ export class SessionTracker {
             const oldEntries = this.fullTranscript.slice(0, summarizeCount);
             const summaryInput = oldEntries.map(seg => {
                 const role = this.mapSpeakerToRole(seg.speaker, seg.canonicalRole);
-                const label = role === 'interviewer' ? 'INTERVIEWER' :
-                    role === 'user' ? 'ME' : 'ASSISTANT';
+                const label = this.formatRoleLabel({
+                    role,
+                    speaker: seg.speaker,
+                    canonicalRole: seg.canonicalRole
+                });
                 return `[${label}]: ${seg.text}`;
             }).join('\n');
 

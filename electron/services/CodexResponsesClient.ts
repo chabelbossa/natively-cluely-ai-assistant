@@ -1,15 +1,16 @@
 /**
  * CodexResponsesClient.ts
  *
- * Client pour l'API OpenAI Responses (backend Codex).
- * Appelle directement https://api.openai.com/v1/responses avec rotation
- * automatique des comptes OAuth en cas de rate-limit / erreur.
+ * Client pour le backend Codex ChatGPT avec rotation automatique des comptes
+ * OAuth en cas de rate-limit / erreur.
  */
 
 import type { CodexAuthRouter, RouterErrorResult } from "./CodexAuthRouter";
 import type { CodexAccount } from "../types/codex-multi-auth";
 
-const RESPONSES_API_URL = "https://api.openai.com/v1/responses";
+const RESPONSES_API_URL = "https://chatgpt.com/backend-api/codex/responses";
+const OPENAI_BETA_HEADER = "responses=2026-02-06";
+const DEFAULT_SERVICE_TIER = "fast";
 const MAX_ROTATION_ATTEMPTS = 5;
 
 export interface CodexResponsesParams {
@@ -18,6 +19,16 @@ export interface CodexResponsesParams {
   stream?: boolean;
   store?: boolean;
   reasoning?: { effort?: "none" | "low" | "medium" | "high" | "xhigh" };
+}
+
+class CodexApiError extends Error {
+  public status: number;
+
+  constructor(status: number, message: string) {
+    super(`Codex API error ${status}: ${message}`);
+    this.name = "CodexApiError";
+    this.status = status;
+  }
 }
 
 export class CodexResponsesClient {
@@ -33,7 +44,7 @@ export class CodexResponsesClient {
 
   async generateResponse(params: CodexResponsesParams): Promise<string> {
     return this.executeWithRotation<string>(async (account) => {
-      const res = await this.callResponsesApi(account, params);
+      const res = await this.callResponsesApiWithFastDefault(account, params);
       const text = await this.parseResponseText(res);
       return text;
     });
@@ -45,7 +56,7 @@ export class CodexResponsesClient {
 
   async *streamResponse(params: CodexResponsesParams): AsyncGenerator<string> {
     const result = this.executeWithRotation<AsyncGenerator<string>>(async (account) => {
-      return this.streamResponsesApi(account, params);
+      return this.createStreamGenerator(account, params);
     });
 
     // Note: executeWithRotation returns a Promise<AsyncGenerator>.
@@ -60,16 +71,22 @@ export class CodexResponsesClient {
 
   private async callResponsesApi(
     account: CodexAccount,
-    params: CodexResponsesParams
+    params: CodexResponsesParams,
+    serviceTier?: string
   ): Promise<Response> {
+    const { instructions, input } = this.normalizeInput(params.input);
     const body: Record<string, unknown> = {
-      model: params.model,
-      input: params.input,
-      stream: params.stream ?? false,
+      model: this.resolveCodexModel(params.model),
+      instructions,
+      input,
+      stream: params.stream ?? true,
       store: params.store ?? false,
     };
     if (params.reasoning) {
       body.reasoning = params.reasoning;
+    }
+    if (serviceTier) {
+      body.service_tier = serviceTier;
     }
 
     return fetch(RESPONSES_API_URL, {
@@ -77,17 +94,58 @@ export class CodexResponsesClient {
       headers: {
         Authorization: `Bearer ${account.accessToken}`,
         "Content-Type": "application/json",
+        "OpenAI-Beta": OPENAI_BETA_HEADER,
       },
       body: JSON.stringify(body),
     });
   }
 
+  private async callResponsesApiWithFastDefault(
+    account: CodexAccount,
+    params: CodexResponsesParams
+  ): Promise<Response> {
+    const fastResponse = await this.callResponsesApi(account, params, DEFAULT_SERVICE_TIER);
+    if (fastResponse.ok) {
+      return fastResponse;
+    }
+
+    const message = await fastResponse.text().catch(() => "");
+    if (this.isFastModeRejected(fastResponse.status, message)) {
+      console.warn(
+        `[CodexResponsesClient] Fast mode rejected for ${params.model}; retrying without service_tier`
+      );
+      return this.callResponsesApi(account, params, undefined);
+    }
+
+    throw new CodexApiError(fastResponse.status, message);
+  }
+
   private async parseResponseText(res: Response): Promise<string> {
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`Codex API error ${res.status}: ${text}`);
+      throw new CodexApiError(res.status, text);
     }
-    const json = (await res.json()) as Record<string, unknown>;
+    const contentType = res.headers.get("content-type") || "";
+    if (contentType.includes("text/event-stream")) {
+      return this.parseSseText(await res.text());
+    }
+
+    const rawText = await res.text();
+    if (rawText.includes("event:") || rawText.includes("data:")) {
+      const parsed = this.parseSseText(rawText);
+      if (parsed) return parsed;
+    }
+
+    if (!rawText.trim()) {
+      return "";
+    }
+
+    let json: Record<string, unknown>;
+    try {
+      json = JSON.parse(rawText) as Record<string, unknown>;
+    } catch {
+      return rawText;
+    }
 
     // Responses API returns output items
     const output = json.output as Array<Record<string, unknown>> | undefined;
@@ -108,16 +166,8 @@ export class CodexResponsesClient {
   }
 
   private async *streamResponsesApi(
-    account: CodexAccount,
-    params: CodexResponsesParams
+    res: Response
   ): AsyncGenerator<string> {
-    const res = await this.callResponsesApi(account, { ...params, stream: true });
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`Codex API error ${res.status}: ${text}`);
-    }
-
     if (!res.body) {
       throw new Error("No response body for streaming");
     }
@@ -143,15 +193,8 @@ export class CodexResponsesClient {
 
           try {
             const event = JSON.parse(data) as Record<string, unknown>;
-            // Extract text delta from SSE events
-            const delta = event.delta as Record<string, unknown> | undefined;
-            if (delta && typeof delta.text === "string") {
-              yield delta.text;
-            }
-            // Alternative: output_text field
-            if (typeof event.output_text === "string") {
-              yield event.output_text;
-            }
+            const text = this.extractEventText(event);
+            if (text) yield text;
           } catch {
             // ignore malformed JSON
           }
@@ -160,6 +203,104 @@ export class CodexResponsesClient {
     } finally {
       reader.releaseLock();
     }
+  }
+
+  private async createStreamGenerator(
+    account: CodexAccount,
+    params: CodexResponsesParams
+  ): Promise<AsyncGenerator<string>> {
+    const res = await this.callResponsesApiWithFastDefault(account, { ...params, stream: true });
+    return this.streamResponsesApi(res);
+  }
+
+  private normalizeInput(
+    messages: CodexResponsesParams["input"]
+  ): { instructions: string; input: Array<{ role: "user" | "assistant"; content: string }> } {
+    const systemMessages = messages
+      .filter((message) => message.role === "system")
+      .map((message) => message.content)
+      .filter(Boolean);
+
+    const input = messages
+      .filter((message) => message.role !== "system")
+      .map((message) => ({
+        role: message.role as "user" | "assistant",
+        content: message.content,
+      }));
+
+    return {
+      instructions: systemMessages.join("\n\n") || "Follow the user's instructions.",
+      input: input.length > 0 ? input : [{ role: "user", content: "" }],
+    };
+  }
+
+  private resolveCodexModel(model: string): string {
+    return model.startsWith("codex:") ? model.slice("codex:".length) : model;
+  }
+
+  private isFastModeRejected(status: number, message: string): boolean {
+    if (status !== 400 && status !== 422) return false;
+    const lowered = message.toLowerCase();
+    const mentionsServiceTier = lowered.includes("service_tier") || lowered.includes("service tier");
+    const mentionsFastMode =
+      lowered.includes("fast mode") ||
+      (lowered.includes("fast") && (lowered.includes("tier") || lowered.includes("mode")));
+    return mentionsServiceTier || mentionsFastMode;
+  }
+
+  private parseSseText(text: string): string {
+    const chunks: string[] = [];
+    let completedText = "";
+
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line.startsWith("data: ")) continue;
+      const data = line.slice(6);
+      if (!data || data === "[DONE]") continue;
+
+      try {
+        const event = JSON.parse(data) as Record<string, unknown>;
+        const eventText = this.extractEventText(event);
+        if (eventText) {
+          chunks.push(eventText);
+        }
+        const finalText = this.extractFinalResponseText(event);
+        if (finalText) {
+          completedText = finalText;
+        }
+      } catch {
+        // ignore malformed JSON
+      }
+    }
+
+    return chunks.join("") || completedText;
+  }
+
+  private extractEventText(event: Record<string, unknown>): string {
+    if (typeof event.delta === "string") return event.delta;
+    if (typeof event.output_text === "string") return event.output_text;
+    if (typeof event.text === "string") return event.text;
+
+    const delta = event.delta as Record<string, unknown> | undefined;
+    if (delta && typeof delta.text === "string") return delta.text;
+
+    return "";
+  }
+
+  private extractFinalResponseText(event: Record<string, unknown>): string {
+    const response = event.response as Record<string, unknown> | undefined;
+    const output = response?.output as Array<Record<string, unknown>> | undefined;
+    if (!output) return "";
+
+    return output
+      .flatMap((item) => {
+        if (typeof item.content === "string") return [item.content];
+        if (!Array.isArray(item.content)) return [];
+        return item.content.map((contentItem: Record<string, unknown>) =>
+          typeof contentItem.text === "string" ? contentItem.text : ""
+        );
+      })
+      .join("");
   }
 
   // =========================================================================

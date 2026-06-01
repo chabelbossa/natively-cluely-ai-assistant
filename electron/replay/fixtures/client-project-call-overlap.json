@@ -1,0 +1,94 @@
+{
+  "name": "Client Project Call With Speaker Echo",
+  "description": "System speaker is canonical; microphone receives echo and one real local clarification.",
+  "thresholds": {
+    "maxFalseMeRate": 0,
+    "maxDuplicateRate": 0.12,
+    "minInterlocutorFinals": 3,
+    "minDistinctInterlocutorSpeakers": 2,
+    "maxSuppressedExpectedMe": 0
+  },
+  "events": [
+    {
+      "channel": "system",
+      "provider": "deepgram",
+      "speaker": "locuteur_0",
+      "text": "Nous devons clarifier la règle de gestion : le code interne est unique par produit, pas par lot.",
+      "timestamp": 1000,
+      "final": false,
+      "confidence": 0.96,
+      "diarized": true,
+      "speakerId": 0,
+      "expectedRole": "speaker_1"
+    },
+    {
+      "channel": "mic",
+      "provider": "deepgram",
+      "speaker": "user",
+      "text": "Nous devons clarifier la règle de gestion : le code interne est unique par produit",
+      "timestamp": 1320,
+      "final": false,
+      "confidence": 0.92,
+      "systemAudioActive": true,
+      "expectedRole": "suppressed"
+    },
+    {
+      "channel": "system",
+      "provider": "deepgram",
+      "speaker": "locuteur_0",
+      "text": "Nous devons clarifier la règle de gestion : le code interne est unique par produit, pas par lot.",
+      "timestamp": 2100,
+      "final": true,
+      "confidence": 0.98,
+      "diarized": true,
+      "speakerId": 0,
+      "expectedRole": "speaker_1"
+    },
+    {
+      "channel": "mic",
+      "provider": "deepgram",
+      "speaker": "user",
+      "text": "Je veux être certain d'avoir compris : le code interne est unique par produit, pas par lot, c'est bien ça ?",
+      "timestamp": 5200,
+      "final": true,
+      "confidence": 0.96,
+      "systemAudioActive": false,
+      "expectedRole": "me"
+    },
+    {
+      "channel": "system",
+      "provider": "deepgram",
+      "speaker": "locuteur_0",
+      "text": "Oui, exactement. Pour les lots, on conserve une référence séparée liée au stock et aux dates de péremption.",
+      "timestamp": 8200,
+      "final": true,
+      "confidence": 0.97,
+      "diarized": true,
+      "speakerId": 0,
+      "expectedRole": "speaker_1"
+    },
+    {
+      "channel": "system",
+      "provider": "deepgram",
+      "speaker": "locuteur_1",
+      "text": "Il faut aussi prévoir un message d'erreur clair quand un utilisateur tente de créer un doublon.",
+      "timestamp": 11600,
+      "final": true,
+      "confidence": 0.94,
+      "diarized": true,
+      "speakerId": 1,
+      "expectedRole": "speaker_2"
+    },
+    {
+      "channel": "mic",
+      "provider": "deepgram",
+      "speaker": "user",
+      "text": "Il faut aussi prévoir un message d'erreur clair quand un utilisateur tente de créer un doublon.",
+      "timestamp": 11900,
+      "final": true,
+      "confidence": 0.91,
+      "systemAudioActive": true,
+      "expectedRole": "suppressed"
+    }
+  ]
+}

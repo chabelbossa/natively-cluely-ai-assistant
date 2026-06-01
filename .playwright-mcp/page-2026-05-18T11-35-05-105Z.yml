@@ -1,0 +1,139 @@
+- generic [ref=e3]:
+  - generic [ref=e7]:
+    - generic [ref=e9]:
+      - banner [ref=e10]:
+        - generic [ref=e11]:
+          - button [disabled] [ref=e12]:
+            - img [ref=e13]
+          - button [disabled] [ref=e15]:
+            - img [ref=e16]
+        - generic [ref=e23]:
+          - generic:
+            - img
+          - textbox "Search or ask anything..." [ref=e24]
+        - generic [ref=e25]:
+          - generic [ref=e26]:
+            - button "Modes" [ref=e27]:
+              - img [ref=e28]
+            - generic [ref=e136]:
+              - img [ref=e138]
+              - generic [ref=e143]:
+                - heading "Modes Beta" [level=3] [ref=e144]:
+                  - generic [ref=e145]: Modes
+                  - generic [ref=e146]: Beta
+                - paragraph [ref=e147]: Custom instructions and formulas designed for different meeting contexts.
+                - generic [ref=e148]:
+                  - button "Dismiss" [ref=e149]
+                  - button "Try it out" [ref=e150]
+          - button "Settings" [ref=e33]:
+            - img [ref=e34]
+      - generic [ref=e38]:
+        - generic [ref=e40]:
+          - generic [ref=e41]:
+            - generic [ref=e42]:
+              - heading "My Natively" [level=1] [ref=e43]
+              - button "Refresh State" [ref=e44]:
+                - img [ref=e45]
+              - generic [ref=e50]:
+                - img [ref=e51]
+                - generic [ref=e53]: Detectable
+            - button "Logo Start Natively" [ref=e56]:
+              - generic [ref=e60]:
+                - img "Logo" [ref=e61]
+                - generic [ref=e62]: Start Natively
+          - button "Record debug audio locally Saves separate mic and speaker WAV files on this Mac only." [ref=e63]:
+            - generic [ref=e64]:
+              - img [ref=e65]
+              - generic [ref=e69]:
+                - generic [ref=e70]: Record debug audio locally
+                - paragraph [ref=e71]: Saves separate mic and speaker WAV files on this Mac only.
+            - img [ref=e72]
+          - button "Prepare meeting Objective, project context, must-ask questions, sensitive topics and success criteria." [ref=e76]:
+            - generic [ref=e77]:
+              - generic [ref=e78]:
+                - img [ref=e79]
+                - generic [ref=e81]: Prepare meeting
+              - paragraph [ref=e82]: Objective, project context, must-ask questions, sensitive topics and success criteria.
+            - img [ref=e83]
+          - generic [ref=e85]:
+            - generic [ref=e252]:
+              - heading "Support development" [level=2] [ref=e253]
+              - paragraph [ref=e254]: Built openly and sustained by users
+              - generic [ref=e255]:
+                - generic [ref=e257]: Development driven by real users
+                - generic [ref=e259]: Faster iteration on features that matter
+              - button "Fund development" [ref=e260]:
+                - generic [ref=e261]:
+                  - generic [ref=e263]:
+                    - img [ref=e264]
+                    - text: Fund development
+                  - img [ref=e270]
+            - generic [ref=e101]:
+              - heading "Link your calendar to see upcoming events" [level=3] [ref=e102]:
+                - generic [ref=e103]: Link your calendar to
+                - generic [ref=e104]: see upcoming events
+              - button "Connect calendar" [ref=e105]:
+                - generic [ref=e106]:
+                  - img [ref=e107]
+                  - text: Connect calendar
+                  - img [ref=e112]
+        - main [ref=e114]:
+          - generic [ref=e117]: No recent meetings.
+    - generic:
+      - generic:
+        - generic:
+          - generic:
+            - generic:
+              - generic:
+                - img "Natively"
+              - generic:
+                - img
+                - generic: Hide
+          - generic:
+            - generic:
+              - paragraph: InterviewerSo how would you optimize the current algorithm?
+            - generic:
+              - generic:
+                - generic:
+                  - generic: Suggestion
+                  - text: A good approach would be to use a hash map to cache the intermediate results, which brings the time complexity down from O(n²) to O(n).
+            - generic:
+              - generic:
+                - img
+                - text: What to answer?
+              - generic:
+                - img
+                - text: Clarify
+              - generic:
+                - img
+                - text: Recap
+              - generic:
+                - img
+                - text: Follow Up Question
+              - generic:
+                - img
+                - text: Answer
+            - generic:
+              - generic:
+                - generic:
+                  - generic: Ask anything on screen or conversation
+              - generic:
+                - generic:
+                  - generic:
+                    - generic: Gemini 3 Flash
+                    - img
+                  - generic:
+                    - img
+    - region "Notifications (F8)":
+      - list
+  - generic [ref=e118]:
+    - button [ref=e119]:
+      - img [ref=e120]
+    - generic [ref=e123]:
+      - img [ref=e125]
+      - generic [ref=e128]:
+        - heading "Connect Natively API" [level=4] [ref=e129]
+        - paragraph [ref=e130]: Get managed STT, AI processing, and cloud sync with the Natively API.
+        - button "Set Up API" [ref=e131]:
+          - text: Set Up API
+          - img [ref=e132]

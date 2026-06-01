@@ -12,6 +12,8 @@ import type {
     CopilotFeedback,
     CopilotMode,
     CopilotTranscriptSegment,
+    CopilotContextQuality,
+    CopilotContextStatus,
     MeetingHealthSnapshot,
     DetectedRisk,
 } from './types';
@@ -66,19 +68,19 @@ export class CopilotDecisionEngine {
 
         if (this.isGenerating) {
             console.log('[CopilotDecisionEngine] Already generating, WAIT');
-            return this.createWaitDecision(mode, 'A copilot suggestion is already being evaluated.', snapshot.segments);
+            return this.createWaitDecision(mode, 'A copilot suggestion is already being evaluated.', snapshot.segments, 'generating');
         }
 
         if (snapshot.lastSuggestionAt && Date.now() - snapshot.lastSuggestionAt < conservativeCooldown) {
             console.log('[CopilotDecisionEngine] Cooldown active, WAIT');
-            return this.createWaitDecision(mode, 'Suggestion cooldown is active.', snapshot.segments);
+            return this.createWaitDecision(mode, 'Suggestion cooldown is active.', snapshot.segments, 'cooldown');
         }
 
         // Timing score check — only generate if score is sufficient
         const timingScore = this.timingScorer.score(snapshot, mode);
         console.log('[CopilotDecisionEngine] Timing score:', timingScore.toFixed(2));
         if (timingScore < 0.3) {
-            return this.createWaitDecision(mode, `Timing score too low (${timingScore.toFixed(2)}).`, snapshot.segments);
+            return this.createWaitDecision(mode, `Timing score too low (${timingScore.toFixed(2)}).`, snapshot.segments, 'listening');
         }
 
         this.isGenerating = true;
@@ -87,20 +89,27 @@ export class CopilotDecisionEngine {
             const decision = LECTURE_LIKE_MODES.has(mode)
                 ? await this.lectureStrategy.decide(snapshot)
                 : await this.professionalStrategy.decide(snapshot);
+            const enrichedDecision = this.enrichDecision(decision, snapshot.segments);
 
-            console.log('[CopilotDecisionEngine] Strategy decision:', { action: decision.action, suggestion: decision.suggestion?.substring(0, 60), confidence: decision.confidence });
+            console.log('[CopilotDecisionEngine] Strategy decision:', {
+                action: enrichedDecision.action,
+                suggestion: enrichedDecision.suggestion?.substring(0, 60),
+                confidence: enrichedDecision.confidence,
+                contextScore: enrichedDecision.contextQuality?.score,
+                contextStatus: enrichedDecision.contextQuality?.status,
+            });
 
-            if (decision.suggestion && this.memory.isRepeatedSuggestion(decision.suggestion)) {
+            if (enrichedDecision.suggestion && this.memory.isRepeatedSuggestion(enrichedDecision.suggestion)) {
                 const repeated = this.createWaitDecision(mode, 'Generated suggestion is too similar to a recent one.', snapshot.segments);
-                repeated.confidence = Math.min(decision.confidence, 0.55);
+                repeated.confidence = Math.min(enrichedDecision.confidence, 0.55);
                 return repeated;
             }
 
-            if (decision.suggestion) {
-                this.memory.recordDecision(decision);
+            if (enrichedDecision.suggestion) {
+                this.memory.recordDecision(enrichedDecision);
             }
 
-            return decision;
+            return enrichedDecision;
         } finally {
             this.isGenerating = false;
         }
@@ -185,8 +194,13 @@ export class CopilotDecisionEngine {
         }
     }
 
-    private createWaitDecision(mode: CopilotMode, reason: string, segments: CopilotTranscriptSegment[]): CopilotDecision {
-        return {
+    private createWaitDecision(
+        mode: CopilotMode,
+        reason: string,
+        segments: CopilotTranscriptSegment[],
+        statusOverride?: CopilotContextStatus,
+    ): CopilotDecision {
+        const decision: CopilotDecision = {
             id: `copilot_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
             mode,
             action: 'WAIT',
@@ -195,5 +209,128 @@ export class CopilotDecisionEngine {
             createdAt: Date.now(),
             sourceSegmentIds: segments.slice(-6).map((segment) => segment.id),
         };
+        return this.enrichDecision(decision, segments, statusOverride);
+    }
+
+    private enrichDecision(
+        decision: CopilotDecision,
+        segments: CopilotTranscriptSegment[],
+        statusOverride?: CopilotContextStatus,
+    ): CopilotDecision {
+        const contextQuality = this.buildContextQuality(segments, decision.reason, statusOverride, decision.action === 'SUGGEST');
+        return {
+            ...decision,
+            contextQuality,
+            nextBestAction: this.resolveNextBestAction(decision, contextQuality),
+        };
+    }
+
+    private buildContextQuality(
+        segments: CopilotTranscriptSegment[],
+        reason: string,
+        statusOverride?: CopilotContextStatus,
+        hasSuggestion = false,
+    ): CopilotContextQuality {
+        const finalSegments = segments.filter((segment) => segment.final && segment.text.trim());
+        const reliableInterlocutorSegments = finalSegments.filter((segment) => this.isReliableInterlocutor(segment));
+        const meSegments = finalSegments.filter((segment) => this.isMeSegment(segment));
+        const lowConfidenceCount = finalSegments.filter((segment) => segment.qualityFlags?.includes('low_confidence')).length;
+        const uncertainCount = finalSegments.filter((segment) =>
+            segment.canonicalRole === 'uncertain' ||
+            segment.qualityFlags?.some((flag) => flag === 'speaker_uncertain' || flag === 'possible_overlap'),
+        ).length;
+        const latestInterlocutor = reliableInterlocutorSegments[reliableInterlocutorSegments.length - 1];
+        const latestInterlocutorAgeMs = latestInterlocutor ? Date.now() - latestInterlocutor.timestamp : undefined;
+
+        let score = 0.08;
+        if (reliableInterlocutorSegments.length > 0) {
+            score = 0.42 + Math.min(0.34, reliableInterlocutorSegments.length * 0.055);
+        }
+        if (meSegments.length > 0 && reliableInterlocutorSegments.length > 0) score += 0.06;
+        if (latestInterlocutorAgeMs !== undefined && latestInterlocutorAgeMs < 20_000) score += 0.12;
+        if (latestInterlocutorAgeMs !== undefined && latestInterlocutorAgeMs > 45_000) score -= 0.22;
+        score -= Math.min(0.18, lowConfidenceCount * 0.04);
+        score -= Math.min(0.18, uncertainCount * 0.035);
+        score = Math.max(0, Math.min(1, score));
+
+        const status = statusOverride ?? this.resolveContextStatus(score, reliableInterlocutorSegments.length, latestInterlocutorAgeMs, hasSuggestion);
+        const label = this.contextStatusLabel(status, score);
+
+        return {
+            score: Number(score.toFixed(2)),
+            status,
+            label,
+            reason: this.contextStatusReason(status, reason, reliableInterlocutorSegments.length, latestInterlocutorAgeMs),
+            reliableInterlocutorSegments: reliableInterlocutorSegments.length,
+            meSegments: meSegments.length,
+            totalSegments: finalSegments.length,
+            latestInterlocutorAgeMs,
+        };
+    }
+
+    private resolveContextStatus(
+        score: number,
+        reliableInterlocutorCount: number,
+        latestInterlocutorAgeMs: number | undefined,
+        hasSuggestion: boolean,
+    ): CopilotContextStatus {
+        if (reliableInterlocutorCount === 0) return 'weak';
+        if (latestInterlocutorAgeMs !== undefined && latestInterlocutorAgeMs > 45_000) return 'weak';
+        if (hasSuggestion || score >= 0.72) return 'ready';
+        if (score >= 0.45) return 'listening';
+        return 'weak';
+    }
+
+    private contextStatusLabel(status: CopilotContextStatus, score: number): string {
+        if (status === 'ready') return 'Ready to assist';
+        if (status === 'generating') return 'Thinking';
+        if (status === 'cooldown') return 'Cooling down';
+        if (status === 'weak') return score >= 0.35 ? 'Context fragile' : 'Need speaker context';
+        return 'Listening';
+    }
+
+    private contextStatusReason(
+        status: CopilotContextStatus,
+        reason: string,
+        reliableInterlocutorCount: number,
+        latestInterlocutorAgeMs: number | undefined,
+    ): string {
+        if (status === 'weak' && reliableInterlocutorCount === 0) {
+            return 'No reliable interlocutor segment is available yet.';
+        }
+        if (latestInterlocutorAgeMs !== undefined && latestInterlocutorAgeMs > 45_000) {
+            return 'The last reliable interlocutor segment is stale.';
+        }
+        return reason;
+    }
+
+    private resolveNextBestAction(
+        decision: CopilotDecision,
+        quality: CopilotContextQuality,
+    ): CopilotDecision['nextBestAction'] {
+        if (decision.action === 'SUGGEST' && decision.suggestion) {
+            if (decision.suggestionType === 'vibe_interview_say_this' || decision.suggestionType === 'interview_answer') {
+                return 'say_this';
+            }
+            return 'ask_this';
+        }
+        if (quality.status === 'ready' || quality.status === 'listening') return 'listen';
+        return 'wait';
+    }
+
+    private isReliableInterlocutor(segment: CopilotTranscriptSegment): boolean {
+        if (segment.qualityFlags?.includes('low_confidence')) return false;
+        if (segment.canonicalRole === 'interlocutor' || /^speaker_\d+$/i.test(segment.canonicalRole || '')) {
+            return true;
+        }
+        if (segment.source === 'system') return true;
+        const speaker = String(segment.speaker || '').toLowerCase();
+        return speaker === 'interlocutor' || /^speaker[_-]?\d+$/i.test(speaker) || /^locuteur[_-]?\d+$/i.test(speaker);
+    }
+
+    private isMeSegment(segment: CopilotTranscriptSegment): boolean {
+        if (segment.canonicalRole === 'me') return true;
+        const speaker = String(segment.speaker || '').toLowerCase();
+        return speaker === 'me' || speaker === 'mic' || speaker === 'user';
     }
 }

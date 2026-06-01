@@ -27,7 +27,10 @@ export class ParakeetStreamingSTT extends EventEmitter {
     private readonly speechEndDebounceMs: number;
     private readonly partialCommitIntervalMs: number;
     private finalizeTimer: NodeJS.Timeout | null = null;
+    private finalizeWatchdogTimer: NodeJS.Timeout | null = null;
     private finalizeGeneration = 0;
+    private finalizeInFlight = false;
+    private pendingFinalizeSamples = 0;
     private samplesSinceLastFinal = 0;
     private lastFinalText = '';
     private lastFinalAt = 0;
@@ -78,6 +81,9 @@ export class ParakeetStreamingSTT extends EventEmitter {
         this.ready = false;
         this.pendingChunks = [];
         this.clearFinalizeTimer();
+        this.clearFinalizeWatchdog();
+        this.finalizeInFlight = false;
+        this.pendingFinalizeSamples = 0;
         this.samplesSinceLastFinal = 0;
         this.lastFinalText = '';
         this.lastFinalAt = Date.now();
@@ -118,6 +124,9 @@ export class ParakeetStreamingSTT extends EventEmitter {
         this.ready = false;
         this.pendingChunks = [];
         this.clearFinalizeTimer();
+        this.clearFinalizeWatchdog();
+        this.finalizeInFlight = false;
+        this.pendingFinalizeSamples = 0;
         this.bridge.stopSession(this.sessionId);
     }
 
@@ -130,7 +139,11 @@ export class ParakeetStreamingSTT extends EventEmitter {
 
         const fallbackText = this.lastPartialText.trim();
         if (fallbackText) {
-            this.commitPartialAsFinal(fallbackText, this.lastPartialConfidence || 0.85);
+            if (this.shouldUseHelperFinalizationForDiarization()) {
+                this.finalizeNow();
+            } else {
+                this.commitPartialAsFinal(fallbackText, this.lastPartialConfidence || 0.85);
+            }
             this.lastPartialText = '';
             this.lastPartialAt = 0;
         }
@@ -179,13 +192,21 @@ export class ParakeetStreamingSTT extends EventEmitter {
             const rawText = String(event.text || '');
             const final = event.type === 'final';
             const confidence = typeof event.confidence === 'number' ? event.confidence : 0.9;
+            const speakerId = event.speaker_id ? this.parseSpeakerId(event.speaker_id) : undefined;
             const result = this.postProcessor.process(rawText, { final, confidence });
-            if (result.dropped) return;
+            if (result.dropped) {
+                if (final) this.completeHelperFinalization();
+                return;
+            }
             const emittedText = this.getIncrementalTranscriptText(result.text);
-            if (!emittedText) return;
+            if (!emittedText) {
+                if (final) this.completeHelperFinalization();
+                return;
+            }
             if (final && this.shouldDropRepeatedFinal(emittedText)) {
                 console.log(`[ParakeetStreaming][transcript] dropped repeated final session=${this.sessionId} text="${emittedText.substring(0, 100)}"`);
                 this.lastCommittedPartialSourceText = result.text.trim();
+                this.completeHelperFinalization();
                 return;
             }
 
@@ -194,9 +215,6 @@ export class ParakeetStreamingSTT extends EventEmitter {
                 this.lastPartialConfidence = confidence;
                 this.lastPartialAt = Date.now();
             }
-
-            // Extract speakerId from diarization (only present on final events)
-            const speakerId = final && event.speaker_id ? this.parseSpeakerId(event.speaker_id) : undefined;
 
             this.emit('transcript', {
                 text: emittedText,
@@ -211,12 +229,17 @@ export class ParakeetStreamingSTT extends EventEmitter {
             }
 
             if (!final && this.shouldAutoCommitPartial(result.text)) {
-                console.log(`[ParakeetStreaming][auto-final] session=${this.sessionId} partialChars=${result.text.length} emittedChars=${emittedText.length}`);
-                this.commitPartialAsFinal(result.text, confidence);
+                if (this.shouldUseHelperFinalizationForDiarization()) {
+                    console.log(`[ParakeetStreaming][auto-final] session=${this.sessionId} strategy=helper-diarization partialChars=${result.text.length} emittedChars=${emittedText.length}`);
+                    this.finalizeNow();
+                } else {
+                    console.log(`[ParakeetStreaming][auto-final] session=${this.sessionId} strategy=partial-commit partialChars=${result.text.length} emittedChars=${emittedText.length}`);
+                    this.commitPartialAsFinal(result.text, confidence);
+                }
             }
 
             if (final) {
-                this.samplesSinceLastFinal = 0;
+                this.completeHelperFinalization();
                 this.lastFinalText = this.normalizeForComparison(emittedText);
                 this.lastFinalAt = Date.now();
                 this.lastCommittedPartialSourceText = result.text.trim();
@@ -259,6 +282,10 @@ export class ParakeetStreamingSTT extends EventEmitter {
         this.finalizeGeneration++;
         this.flushPendingChunks();
         if (this.samplesSinceLastFinal <= 0) return;
+        if (this.finalizeInFlight) return;
+        this.finalizeInFlight = true;
+        this.pendingFinalizeSamples = this.samplesSinceLastFinal;
+        this.armFinalizeWatchdog();
         this.bridge.speechEnd(this.sessionId);
     }
 
@@ -266,6 +293,38 @@ export class ParakeetStreamingSTT extends EventEmitter {
         if (!this.finalizeTimer) return;
         clearTimeout(this.finalizeTimer);
         this.finalizeTimer = null;
+    }
+
+    private completeHelperFinalization(): void {
+        if (this.pendingFinalizeSamples > 0) {
+            this.samplesSinceLastFinal = Math.max(0, this.samplesSinceLastFinal - this.pendingFinalizeSamples);
+        } else {
+            this.samplesSinceLastFinal = 0;
+        }
+        this.pendingFinalizeSamples = 0;
+        this.finalizeInFlight = false;
+        this.clearFinalizeWatchdog();
+    }
+
+    private armFinalizeWatchdog(): void {
+        this.clearFinalizeWatchdog();
+        this.finalizeWatchdogTimer = setTimeout(() => {
+            console.warn(`[ParakeetStreaming][finalize] helper final timed out session=${this.sessionId} source=${this.channel}`);
+            const fallbackText = this.lastPartialText.trim();
+            this.finalizeInFlight = false;
+            this.pendingFinalizeSamples = 0;
+            if (fallbackText) {
+                this.commitPartialAsFinal(fallbackText, this.lastPartialConfidence || 0.85);
+                this.lastPartialText = '';
+                this.lastPartialAt = 0;
+            }
+        }, 30_000);
+    }
+
+    private clearFinalizeWatchdog(): void {
+        if (!this.finalizeWatchdogTimer) return;
+        clearTimeout(this.finalizeWatchdogTimer);
+        this.finalizeWatchdogTimer = null;
     }
 
     private shouldDropRepeatedFinal(text: string): boolean {
@@ -277,12 +336,41 @@ export class ParakeetStreamingSTT extends EventEmitter {
     }
 
     private shouldAutoCommitPartial(text: string): boolean {
-        const normalized = this.normalizeForComparison(this.getIncrementalTranscriptText(text));
+        const incrementalText = this.getIncrementalTranscriptText(text);
+        const normalized = this.normalizeForComparison(incrementalText);
         if (normalized.length < 24) return false;
         const now = Date.now();
-        if (now - this.lastFinalAt < this.partialCommitIntervalMs) return false;
+        const elapsedSinceFinal = now - this.lastFinalAt;
+        if (elapsedSinceFinal < this.partialCommitIntervalMs) return false;
         if (normalized === this.lastFinalText) return false;
-        return true;
+        return this.isStablePartialCommitBoundary(incrementalText, elapsedSinceFinal);
+    }
+
+    private isStablePartialCommitBoundary(text: string, elapsedSinceFinal: number): boolean {
+        const clean = text.trim();
+        if (!clean) return false;
+
+        const words = this.normalizeForComparison(clean).split(' ').filter(Boolean);
+        if (words.length === 0) return false;
+        if (/[.!?。！？]\s*$/.test(clean)) return true;
+        if (clean.length >= 260 || words.length >= 36) return true;
+
+        const isForcedLongWait = elapsedSinceFinal >= this.partialCommitIntervalMs * 2;
+        if (isForcedLongWait && words.length >= 18 && !this.endsWithDanglingConnector(clean)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private endsWithDanglingConnector(text: string): boolean {
+        const words = this.normalizeForComparison(text).split(' ').filter(Boolean);
+        const last = words[words.length - 1] || '';
+        return /^(le|la|les|un|une|des|du|de|d|mon|ma|mes|ton|ta|tes|son|sa|ses|notre|votre|leur|leurs|pour|avec|dans|sur|sans|a|à|au|aux|qui|que|dont|ou|et|mais|donc|parce|comme|si|to|of|for|with|in|on|and|or|but|because|so|the|a|an)$/.test(last);
+    }
+
+    private shouldUseHelperFinalizationForDiarization(): boolean {
+        return this.channel === 'system' && this.supportsDiarization;
     }
 
     private commitPartialAsFinal(text: string, confidence: number): void {
@@ -426,7 +514,7 @@ export class ParakeetStreamingSTT extends EventEmitter {
     private normalizePartialCommitIntervalMs(value?: number): number {
         const envValue = Number(process.env.NATIVELY_PARAKEET_PARTIAL_COMMIT_MS || '');
         const requested = Number.isFinite(value) ? value : envValue;
-        if (!Number.isFinite(requested) || requested <= 0) return 12000;
-        return Math.max(6000, Math.min(30000, Math.round(requested)));
+        if (!Number.isFinite(requested) || requested <= 0) return 18000;
+        return Math.max(8000, Math.min(45000, Math.round(requested)));
     }
 }

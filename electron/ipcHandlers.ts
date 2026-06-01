@@ -1929,6 +1929,7 @@ export function initializeIpcHandlers(appState: AppState): void {
           return {
             success: true,
             models: [
+              { id: "codex:gpt-5.5", label: "GPT 5.5 Codex" },
               { id: "codex:gpt-5.4", label: "GPT 5.4 Codex" },
               { id: "codex:gpt-5.4-mini", label: "GPT 5.4 Mini Codex" },
               { id: "codex:gpt-5.3", label: "GPT 5.3 Codex" },
@@ -3258,8 +3259,14 @@ export function initializeIpcHandlers(appState: AppState): void {
   safeHandle("reset-intelligence", async () => {
     try {
       const intelligenceManager = appState.getIntelligenceManager();
+      if (appState.getIsMeetingActive() || appState.getIsMeetingFinalizing?.()) {
+        // During a meeting this button/IPC must not wipe the transcript that
+        // will be saved and summarized later. Only cancel current generations.
+        intelligenceManager.resetEngine();
+        return { success: true, preservedTranscript: true };
+      }
       intelligenceManager.reset();
-      return { success: true };
+      return { success: true, preservedTranscript: false };
     } catch (error: any) {
       return { success: false, error: error.message };
     }

@@ -13,6 +13,17 @@ interface CopilotDecisionPayload {
   suggestion?: string
   createdAt: number
   sourceSegmentIds: string[]
+  contextQuality?: {
+    score: number
+    status: 'ready' | 'listening' | 'weak' | 'cooldown' | 'generating'
+    label: string
+    reason: string
+    reliableInterlocutorSegments: number
+    meSegments: number
+    totalSegments: number
+    latestInterlocutorAgeMs?: number
+  }
+  nextBestAction?: 'say_this' | 'ask_this' | 'listen' | 'wait'
 }
 
 interface MeetingHealthData {
@@ -51,6 +62,16 @@ interface MeetingBriefData {
   sensitiveTopics?: string
   successCriteria?: string
   updatedAt?: number
+}
+
+interface StartMeetingMetadata {
+  debugAudioRecording?: boolean
+  audio?: {
+    inputDeviceId?: string | null
+    outputDeviceId?: string | null
+    allowMicOnly?: boolean
+  }
+  [key: string]: any
 }
 
 // Types for the exposed Electron API
@@ -152,6 +173,8 @@ interface ElectronAPI {
   onNativeAudioSuggestion: (callback: (suggestion: { context: string; lastQuestion: string; confidence: number }) => void) => () => void
   onNativeAudioConnected: (callback: () => void) => () => void
   onNativeAudioDisconnected: (callback: () => void) => () => void
+  onSystemAudioSilent: (callback: (data: { message: string; rms?: number; peak?: number }) => void) => () => void
+  onSystemAudioActive: (callback: (data: { message: string; rms?: number; peak?: number }) => void) => () => void
   onSuggestionGenerated: (callback: (data: { question: string; suggestion: string; confidence: number }) => void) => () => void
   onSuggestionProcessingStart: (callback: () => void) => () => void
   onSuggestionError: (callback: (error: { error: string }) => void) => () => void
@@ -180,7 +203,7 @@ interface ElectronAPI {
   submitCopilotFeedback: (feedback: { decisionId: string; rating: CopilotFeedbackRating; mode?: string }) => Promise<{ success: boolean; error?: string }>
 
   // Meeting Lifecycle
-  startMeeting: (metadata?: any) => Promise<{ success: boolean; error?: string }>
+  startMeeting: (metadata?: StartMeetingMetadata) => Promise<{ success: boolean; error?: string }>
   getMeetingBrief: () => Promise<MeetingBriefData | null>
   saveMeetingBrief: (brief: MeetingBriefData) => Promise<{ success: boolean; brief?: MeetingBriefData | null; error?: string }>
   clearMeetingBrief: () => Promise<{ success: boolean; error?: string }>
@@ -203,6 +226,7 @@ interface ElectronAPI {
   onIntelligenceManualResult: (callback: (data: { answer: string; question: string }) => void) => () => void
   onIntelligenceModeChanged: (callback: (data: { mode: string }) => void) => () => void
   onIntelligenceError: (callback: (data: { error: string; mode: string }) => void) => () => void
+  onCopilotDecision: (callback: (data: CopilotDecisionPayload) => void) => () => void
   onCopilotSuggestion: (callback: (data: CopilotDecisionPayload) => void) => () => void
   onCopilotError: (callback: (data: { error: string }) => void) => () => void
   getMeetingHealth: () => Promise<{ health: MeetingHealthData | null; risks: DetectedRiskData[] }>
@@ -715,6 +739,20 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener("native-audio-disconnected", subscription)
     }
   },
+  onSystemAudioSilent: (callback: (data: { message: string; rms?: number; peak?: number }) => void) => {
+    const subscription = (_: any, data: any) => callback(data)
+    ipcRenderer.on("system-audio-silent", subscription)
+    return () => {
+      ipcRenderer.removeListener("system-audio-silent", subscription)
+    }
+  },
+  onSystemAudioActive: (callback: (data: { message: string; rms?: number; peak?: number }) => void) => {
+    const subscription = (_: any, data: any) => callback(data)
+    ipcRenderer.on("system-audio-active", subscription)
+    return () => {
+      ipcRenderer.removeListener("system-audio-active", subscription)
+    }
+  },
   onSuggestionGenerated: (callback: (data: { question: string; suggestion: string; confidence: number }) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("suggestion-generated", subscription)
@@ -796,7 +834,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   },
 
   // Meeting Lifecycle
-  startMeeting: (metadata?: any) => ipcRenderer.invoke("start-meeting", metadata),
+  startMeeting: (metadata?: StartMeetingMetadata) => ipcRenderer.invoke("start-meeting", metadata),
   getMeetingBrief: () => ipcRenderer.invoke("meeting-brief:get"),
   saveMeetingBrief: (brief: MeetingBriefData) => ipcRenderer.invoke("meeting-brief:save", brief),
   clearMeetingBrief: () => ipcRenderer.invoke("meeting-brief:clear"),
@@ -930,6 +968,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("copilot-suggestion", subscription)
     return () => {
       ipcRenderer.removeListener("copilot-suggestion", subscription)
+    }
+  },
+  onCopilotDecision: (callback: (data: CopilotDecisionPayload) => void) => {
+    const subscription = (_: any, data: any) => callback(data)
+    ipcRenderer.on("copilot-decision", subscription)
+    return () => {
+      ipcRenderer.removeListener("copilot-decision", subscription)
     }
   },
   onCopilotError: (callback: (data: { error: string }) => void) => {

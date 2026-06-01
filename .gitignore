@@ -217,4 +217,6 @@ templog*.txt
 dodollm.txt
 temp_code_expansion/
 cluelyprompts/
+.audio-debug/
+.audio-replay/
 .gitnexus

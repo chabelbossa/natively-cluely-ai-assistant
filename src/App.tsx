@@ -349,7 +349,7 @@ const App: React.FC = () => {
     }
   };
 
-  const handleStartMeeting = async (options?: { allowMicOnly?: boolean }) => {
+  const handleStartMeeting = async (options?: { allowMicOnly?: boolean; debugAudioRecording?: boolean }) => {
     setMeetingStartError(null);
     setIsStartingMeeting(true);
     try {
@@ -369,6 +369,7 @@ const App: React.FC = () => {
       }
 
       const result = await window.electronAPI.startMeeting({
+        debugAudioRecording: options?.debugAudioRecording === true,
         audio: { inputDeviceId, outputDeviceId, allowMicOnly: options?.allowMicOnly === true }
       });
       if (result.success) {
@@ -453,10 +454,11 @@ const App: React.FC = () => {
   if (isOverlayWindow) {
     return (
       <ErrorBoundary context="Overlay">
-        <div className="w-full relative bg-transparent">
+        <div className="h-full min-h-0 w-full overflow-hidden relative bg-transparent">
           <QueryClientProvider client={queryClient}>
             <ToastProvider>
               <div
+                className="h-full min-h-0 w-full overflow-hidden"
                 style={{
                   ['--overlay-opacity' as '--overlay-opacity']: String(overlayOpacity),
                   transition: 'background-color 75ms ease, border-color 75ms ease, box-shadow 75ms ease'

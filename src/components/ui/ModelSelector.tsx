@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronDown, Check, Cloud, Terminal, Monitor, Server, Plus } from 'lucide-react';
 import { STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
 
@@ -131,6 +132,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
         if (model === 'claude-sonnet-4-6') return 'Sonnet 4.6';
         if (model === 'gpt-5.2') return 'GPT 5.2 Codex';
         if (model === 'gpt-5.1') return 'GPT 5.1 Codex';
+        if (model === 'codex:gpt-5.5') return 'GPT 5.5 Codex';
         if (model === 'codex:gpt-5.4') return 'GPT 5.4 Codex';
         if (model === 'codex:gpt-5.4-mini') return 'GPT 5.4 Mini Codex';
         if (model === 'codex:gpt-5.3') return 'GPT 5.3 Codex';
@@ -162,29 +164,29 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
                 <ChevronDown size={14} className={`shrink-0 text-slate-600 dark:text-slate-300 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
             </button>
 
-            {isOpen && (
+            {isOpen && typeof document !== 'undefined' && createPortal(
                 <div
                     ref={menuRef}
-                    className="fixed w-72 bg-white text-slate-950 border border-black/10 rounded-xl shadow-2xl shadow-black/20 z-[10000] overflow-hidden animated fadeIn dark:bg-[#15171c] dark:text-white dark:border-white/15 dark:shadow-black/50"
+                    className="fixed w-72 bg-white text-slate-950 border border-slate-200 rounded-xl shadow-2xl shadow-black/20 z-[10000] overflow-hidden animated fadeIn dark:bg-[#15171c] dark:text-slate-50 dark:border-white/15 dark:shadow-black/50"
                     style={{ top: menuPosition.top, left: menuPosition.left }}
                 >
                     {/* Tabs */}
-                    <div className="flex border-b border-border-subtle bg-bg-input/50">
+                    <div className="flex border-b border-slate-200 bg-slate-50 dark:border-white/10 dark:bg-white/5">
                         <button
                             onClick={() => setActiveTab('cloud')}
-                            className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'cloud' ? 'text-accent-primary bg-bg-item-surface border-t-2 border-t-accent-primary' : 'text-text-secondary hover:text-text-primary'}`}
+                            className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'cloud' ? 'border-t-2 border-t-emerald-500 bg-white text-emerald-600 dark:bg-[#1d2027] dark:text-emerald-300' : 'text-slate-500 hover:text-slate-950 dark:text-slate-400 dark:hover:text-white'}`}
                         >
                             Cloud
                         </button>
                         <button
                             onClick={() => setActiveTab('custom')}
-                            className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'custom' ? 'text-accent-primary bg-bg-item-surface border-t-2 border-t-accent-primary' : 'text-text-secondary hover:text-text-primary'}`}
+                            className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'custom' ? 'border-t-2 border-t-emerald-500 bg-white text-emerald-600 dark:bg-[#1d2027] dark:text-emerald-300' : 'text-slate-500 hover:text-slate-950 dark:text-slate-400 dark:hover:text-white'}`}
                         >
                             Custom
                         </button>
                         <button
                             onClick={() => setActiveTab('local')}
-                            className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'local' ? 'text-accent-primary bg-bg-item-surface border-t-2 border-t-accent-primary' : 'text-text-secondary hover:text-text-primary'}`}
+                            className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'local' ? 'border-t-2 border-t-emerald-500 bg-white text-emerald-600 dark:bg-[#1d2027] dark:text-emerald-300' : 'text-slate-500 hover:text-slate-950 dark:text-slate-400 dark:hover:text-white'}`}
                         >
                             Local
                         </button>
@@ -197,7 +199,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
                         {activeTab === 'cloud' && (
                             <div className="space-y-1">
                                 {cloudModels.length === 0 ? (
-                                    <div className="text-center py-6 text-text-tertiary">
+                                    <div className="text-center py-6 text-slate-500 dark:text-slate-400">
                                         <p className="text-xs mb-2">No cloud providers configured.</p>
                                         <p className="text-[10px] opacity-70">Add API keys in Settings.</p>
                                     </div>
@@ -208,7 +210,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
                                         const icon = m.provider === 'gemini' ? <Monitor size={14} /> : <Cloud size={14} />;
                                         return (
                                             <React.Fragment key={m.id}>
-                                                {showDivider && <div className="h-px bg-border-subtle my-1" />}
+                                                {showDivider && <div className="h-px bg-slate-200 dark:bg-white/10 my-1" />}
                                                 <ModelOption
                                                     id={m.id}
                                                     name={m.name}
@@ -228,9 +230,9 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
                         {activeTab === 'custom' && (
                             <div className="space-y-1">
                                 {customProviders.length === 0 ? (
-                                    <div className="text-center py-6 text-text-tertiary">
+                                    <div className="text-center py-6 text-slate-500 dark:text-slate-400">
                                         <p className="text-xs mb-2">No custom providers.</p>
-                                        <button className="text-[10px] text-accent-primary hover:underline">Manage in Settings</button>
+                                        <button className="text-[10px] text-emerald-600 dark:text-emerald-300 hover:underline">Manage in Settings</button>
                                     </div>
                                 ) : (
                                     customProviders.map(provider => (
@@ -252,7 +254,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
                         {activeTab === 'local' && (
                             <div className="space-y-1">
                                 {ollamaModels.length === 0 ? (
-                                    <div className="text-center py-6 text-text-tertiary">
+                                    <div className="text-center py-6 text-slate-500 dark:text-slate-400">
                                         <p className="text-xs">No Ollama models found.</p>
                                         <p className="text-[10px] mt-1 opacity-70">Ensure Ollama is running.</p>
                                     </div>
@@ -272,7 +274,8 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
                             </div>
                         )}
                     </div>
-                </div>
+                </div>,
+                document.body,
             )}
         </div>
     );
@@ -290,17 +293,17 @@ interface ModelOptionProps {
 const ModelOption: React.FC<ModelOptionProps> = ({ name, desc, icon, selected, onSelect }) => (
     <button
         onClick={onSelect}
-        className={`w-full flex items-center justify-between p-2 rounded-lg transition-colors group ${selected ? 'bg-accent-primary/10' : 'hover:bg-bg-input'}`}
+        className={`w-full flex items-center justify-between p-2 rounded-lg transition-colors group ${selected ? 'bg-emerald-500/10' : 'hover:bg-slate-100 dark:hover:bg-white/10'}`}
     >
         <div className="flex items-center gap-3">
-            <div className={`p-1.5 rounded-md ${selected ? 'bg-accent-primary/20 text-accent-primary' : 'bg-bg-elevated text-text-secondary group-hover:text-text-primary'}`}>
+            <div className={`p-1.5 rounded-md ${selected ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300' : 'bg-slate-100 text-slate-500 group-hover:text-slate-950 dark:bg-white/10 dark:text-slate-400 dark:group-hover:text-white'}`}>
                 {icon}
             </div>
             <div className="text-left">
-                <div className={`text-xs font-medium truncate max-w-[140px] ${selected ? 'text-accent-primary' : 'text-text-primary'}`}>{name}</div>
-                <div className="text-[10px] text-text-tertiary">{desc}</div>
+                <div className={`text-xs font-medium truncate max-w-[140px] ${selected ? 'text-emerald-700 dark:text-emerald-300' : 'text-slate-950 dark:text-slate-50'}`}>{name}</div>
+                <div className="text-[10px] text-slate-500 dark:text-slate-400">{desc}</div>
             </div>
         </div>
-        {selected && <Check size={14} className="text-accent-primary" />}
+        {selected && <Check size={14} className="text-emerald-600 dark:text-emerald-300" />}
     </button>
 );

@@ -1,0 +1,46 @@
+{
+  "name": "Mic Leakage Without Local Intent",
+  "description": "When system audio is unavailable or delayed, passive speaker leakage in the microphone must not be labeled as ME.",
+  "thresholds": {
+    "maxFalseMeRate": 0,
+    "maxDuplicateRate": 0,
+    "minInterlocutorFinals": 0,
+    "maxSuppressedExpectedMe": 0,
+    "maxUnsuppressedExpectedSuppressed": 0
+  },
+  "events": [
+    {
+      "channel": "mic",
+      "provider": "local",
+      "speaker": "user",
+      "text": "Je vais vous donner un résumé détaillé de ce livre qui change la donne.",
+      "timestamp": 1000,
+      "final": true,
+      "confidence": 0.92,
+      "systemAudioActive": false,
+      "expectedRole": "suppressed"
+    },
+    {
+      "channel": "mic",
+      "provider": "deepgram",
+      "speaker": "user",
+      "text": "Claude j'adore Claude les amis Claude je pourrais avoir des relations sexuelles avec Claude parce que Claude est trop cool.",
+      "timestamp": 2200,
+      "final": true,
+      "confidence": 0.91,
+      "systemAudioActive": false,
+      "expectedRole": "suppressed"
+    },
+    {
+      "channel": "mic",
+      "provider": "deepgram",
+      "speaker": "user",
+      "text": "Je veux être certain d'avoir compris : la première version se concentre uniquement sur les publicités, c'est bien ça ?",
+      "timestamp": 5200,
+      "final": true,
+      "confidence": 0.96,
+      "systemAudioActive": false,
+      "expectedRole": "me"
+    }
+  ]
+}

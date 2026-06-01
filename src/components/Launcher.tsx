@@ -44,7 +44,7 @@ interface Meeting {
 }
 
 interface LauncherProps {
-    onStartMeeting: (options?: { allowMicOnly?: boolean }) => void | Promise<void>;
+    onStartMeeting: (options?: { allowMicOnly?: boolean; debugAudioRecording?: boolean }) => void | Promise<void>;
     onOpenSettings: (tab?: string) => void;
     onOpenModes?: () => void;
     onPageChange?: (isMain: boolean) => void;
@@ -138,6 +138,7 @@ const Launcher: React.FC<LauncherProps> = ({
     const [isBriefOpen, setIsBriefOpen] = useState(false);
     const [meetingBrief, setMeetingBrief] = useState<MeetingBriefData>(emptyMeetingBrief);
     const [briefSavedAt, setBriefSavedAt] = useState<number | null>(null);
+    const [debugAudioRecording, setDebugAudioRecording] = useState(false);
 
     const fetchMeetings = () => {
         if (window.electronAPI && window.electronAPI.getRecentMeetings) {
@@ -336,6 +337,7 @@ const Launcher: React.FC<LauncherProps> = ({
                 title: preparedEvent.title,
                 calendarEventId: preparedEvent.id,
                 source: 'calendar',
+                debugAudioRecording,
                 meetingBrief: brief,
                 audio: { inputDeviceId, outputDeviceId, allowMicOnly }
             });
@@ -791,7 +793,7 @@ const Launcher: React.FC<LauncherProps> = ({
                                                     analytics.trackCommandExecuted('resume_meeting_from_launcher');
                                                 } else {
                                                     await saveBriefNow();
-                                                    onStartMeeting();
+                                                    onStartMeeting({ debugAudioRecording });
                                                     analytics.trackCommandExecuted('start_natively_cta');
                                                 }
                                             }}
@@ -861,6 +863,38 @@ const Launcher: React.FC<LauncherProps> = ({
                                             </div>
                                         </motion.button>
                                     </div>
+
+                                    {!isMeetingActive && (
+                                        <button
+                                            type="button"
+                                            aria-pressed={debugAudioRecording}
+                                            onClick={() => setDebugAudioRecording((prev) => !prev)}
+                                            className={`w-full rounded-xl border px-4 py-3 flex items-center justify-between text-left transition-colors ${
+                                                debugAudioRecording
+                                                    ? isLight
+                                                        ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
+                                                        : 'bg-emerald-500/10 border-emerald-500/25 text-emerald-100'
+                                                    : isLight
+                                                        ? 'bg-bg-elevated border-border-subtle text-text-primary hover:bg-bg-item-surface'
+                                                        : 'bg-bg-secondary border-white/10 text-text-primary hover:bg-white/5'
+                                            }`}
+                                        >
+                                            <div className="min-w-0 flex items-center gap-3">
+                                                <DownloadCloud size={15} className={debugAudioRecording ? 'text-emerald-400' : 'text-text-tertiary'} />
+                                                <div className="min-w-0">
+                                                    <div className="text-sm font-semibold">Record debug audio locally</div>
+                                                    <p className="mt-0.5 text-xs text-text-tertiary truncate">
+                                                        Saves separate mic and speaker WAV files on this Mac only.
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            {debugAudioRecording ? (
+                                                <ToggleRight size={28} className="text-emerald-400 shrink-0" />
+                                            ) : (
+                                                <ToggleLeft size={28} className="text-text-tertiary shrink-0" />
+                                            )}
+                                        </button>
+                                    )}
 
                                     <div className={`rounded-xl border overflow-hidden ${isLight ? 'bg-bg-elevated border-border-subtle shadow-sm' : 'bg-bg-secondary border-white/10'}`}>
                                         <button
@@ -1027,7 +1061,7 @@ const Launcher: React.FC<LauncherProps> = ({
                                                                         handleStartPreparedMeeting(true);
                                                                     } else {
                                                                         await saveBriefNow();
-                                                                        onStartMeeting({ allowMicOnly: true });
+                                                                        onStartMeeting({ allowMicOnly: true, debugAudioRecording });
                                                                     }
                                                                 }}
                                                                 className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${isLight ? 'bg-black/5 text-amber-950 hover:bg-black/10' : 'bg-white/10 text-amber-100 hover:bg-white/15'}`}
@@ -1129,7 +1163,7 @@ const Launcher: React.FC<LauncherProps> = ({
                                                         <button
                                                             onClick={async () => {
                                                                 await saveBriefNow({ title: nextMeeting.title });
-                                                                onStartMeeting();
+                                                                onStartMeeting({ debugAudioRecording });
                                                             }}
                                                             className={`px-4 py-2 rounded-lg text-xs font-medium text-text-secondary hover:text-text-primary transition-all ${isLight ? 'hover:bg-bg-item-surface' : 'hover:bg-white/5'}`}
                                                         >

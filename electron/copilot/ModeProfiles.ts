@@ -13,7 +13,7 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
         cooldownMs: BASE_COOLDOWN_MS,
         minConfidence: 0.75,
         allowedActions: ['WAIT', 'SUGGEST', 'ANSWER'],
-        suggestionTypes: ['interview_answer', 'follow_up_question'],
+        suggestionTypes: ['interview_answer', 'vibe_interview_say_this', 'follow_up_question'],
         systemBehavior: 'Help answer interview questions when a natural pause occurs.'
     },
     technical_interview: {
@@ -25,7 +25,7 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
         cooldownMs: BASE_COOLDOWN_MS,
         minConfidence: 0.75,
         allowedActions: ['WAIT', 'SUGGEST', 'ANSWER'],
-        suggestionTypes: ['interview_answer', 'coding_hint', 'technical_risk'],
+        suggestionTypes: ['interview_answer', 'vibe_interview_say_this', 'coding_hint', 'technical_risk'],
         systemBehavior: 'Support technical explanations and problem solving without interrupting existing flows.'
     },
     coding_assessment: {
@@ -49,7 +49,7 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
         cooldownMs: BASE_COOLDOWN_MS,
         minConfidence: 0.65,
         allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
-        suggestionTypes: ['scope', 'priority', 'deadline', 'acceptance_criteria', 'technical_risk'],
+        suggestionTypes: ['scope', 'priority', 'deadline', 'acceptance_criteria', 'technical_risk', 'vibe_interview_say_this'],
         systemBehavior: 'Clarify scope, ownership, priorities, risks, dependencies, and acceptance criteria.'
     },
     client_meeting: {
@@ -61,7 +61,7 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
         cooldownMs: BASE_COOLDOWN_MS,
         minConfidence: 0.65,
         allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
-        suggestionTypes: ['client_need', 'business_goal', 'scope', 'priority', 'acceptance_criteria'],
+        suggestionTypes: ['client_need', 'business_goal', 'scope', 'priority', 'acceptance_criteria', 'vibe_interview_say_this'],
         systemBehavior: 'Clarify the business need, users, constraints, validation, and ambiguity.'
     },
     feature_planning: {

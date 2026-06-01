@@ -4,6 +4,7 @@ import React, {
   useRef,
   useLayoutEffect,
   useMemo,
+  useCallback,
 } from "react";
 import {
   Sparkles,
@@ -52,8 +53,8 @@ import {
 import { ModelSelector } from "./ui/ModelSelector";
 import TopPill from "./ui/TopPill";
 import RollingTranscript from "./ui/RollingTranscript";
-import { NegotiationCoachingCard, MeetingDashboard } from "../premium";
-import type { MeetingHealthData, DetectedRiskData } from "../types/electron";
+import { NegotiationCoachingCard } from "../premium";
+import type { CopilotDecisionPayload } from "../types/electron";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -75,6 +76,7 @@ interface Message {
   role: "user" | "system" | "interviewer";
   text: string;
   isStreaming?: boolean;
+  pendingAction?: boolean;
   hasScreenshot?: boolean;
   screenshotPreview?: string;
   isCode?: boolean;
@@ -108,6 +110,7 @@ const shortenModelName = (model: string): string => {
     "gemini-2.5-pro-preview": "Gemini 2.5 Pro",
     "gpt-5.2": "GPT 5.2 Codex",
     "gpt-5.1": "GPT 5.1 Codex",
+    "codex:gpt-5.5": "GPT 5.5 Codex",
     "codex:gpt-5.4": "GPT 5.4 Codex",
     "codex:gpt-5.4-mini": "GPT 5.4 Mini Codex",
     "codex:gpt-5.3": "GPT 5.3 Codex",
@@ -135,6 +138,89 @@ const getSuggestedAnswerIntent = (question?: string) => {
   return "what_to_answer";
 };
 
+const getMessageIntentForMode = (mode?: string) => {
+  const map: Record<string, string> = {
+    what_to_say: "what_to_answer",
+    what_to_answer: "what_to_answer",
+    assist: "what_to_answer",
+    clarify: "clarify",
+    recap: "recap",
+    follow_up_questions: "follow_up_questions",
+    follow_up: "follow_up",
+    code_hint: "code_hint",
+    brainstorm: "brainstorm",
+    manual: "manual",
+  };
+  return map[mode || ""] || mode || "what_to_answer";
+};
+
+const upsertPendingActionMessage = (
+  messages: Message[],
+  intent: string,
+  text: string,
+): Message[] => {
+  const existingIndex = [...messages]
+    .reverse()
+    .findIndex((msg) => msg.isStreaming && msg.intent === intent);
+  if (existingIndex !== -1) {
+    const index = messages.length - 1 - existingIndex;
+    const updated = [...messages];
+    updated[index] = {
+      ...updated[index],
+      text,
+      pendingAction: true,
+      isStreaming: true,
+    };
+    return updated;
+  }
+
+  return [
+    ...messages,
+    {
+      id: `${Date.now()}-${intent}-pending`,
+      role: "system",
+      text,
+      intent,
+      isStreaming: true,
+      pendingAction: true,
+    },
+  ];
+};
+
+const finalizePendingActionMessage = (
+  messages: Message[],
+  intent: string,
+  text: string,
+  meta?: { modelUsed?: string; tokensUsed?: number; durationMs?: number },
+): Message[] => {
+  const existingIndex = [...messages]
+    .reverse()
+    .findIndex((msg) => msg.isStreaming && msg.intent === intent);
+  if (existingIndex === -1) return messages;
+
+  const index = messages.length - 1 - existingIndex;
+  const updated = [...messages];
+  updated[index] = {
+    ...updated[index],
+    text,
+    isStreaming: false,
+    pendingAction: false,
+    ...(meta || {}),
+  };
+  return updated;
+};
+
+const settleActionMessage = (
+  messages: Message[],
+  intent: string,
+  text: string,
+  meta?: { modelUsed?: string; tokensUsed?: number; durationMs?: number },
+): Message[] => {
+  const updated = finalizePendingActionMessage(messages, intent, text, meta);
+  if (updated !== messages) return updated;
+  return finalizeStreamingMessage(messages, intent, text, meta);
+};
+
 const appendStreamingMessage = (
   messages: Message[],
   intent: string,
@@ -146,9 +232,11 @@ const appendStreamingMessage = (
   if (existingIndex !== -1) {
     const index = messages.length - 1 - existingIndex;
     const updated = [...messages];
+    const existing = updated[index];
     updated[index] = {
-      ...updated[index],
-      text: updated[index].text + token,
+      ...existing,
+      text: existing.pendingAction ? token : existing.text + token,
+      pendingAction: false,
     };
     return updated;
   }
@@ -161,6 +249,7 @@ const appendStreamingMessage = (
       text: token,
       intent,
       isStreaming: true,
+      pendingAction: false,
     },
   ];
 };
@@ -181,6 +270,7 @@ const finalizeStreamingMessage = (
       ...updated[index],
       text,
       isStreaming: false,
+      pendingAction: false,
       ...(meta || {}),
     };
     return updated;
@@ -213,6 +303,8 @@ interface CopilotSuggestion {
   suggestion?: string;
   createdAt: number;
   sourceSegmentIds: string[];
+  contextQuality?: CopilotDecisionPayload["contextQuality"];
+  nextBestAction?: CopilotDecisionPayload["nextBestAction"];
 }
 
 type CopilotFeedbackRating =
@@ -235,8 +327,31 @@ interface LiveTranscriptTurn {
 
 const MAX_LIVE_TRANSCRIPT_TURNS = 120;
 const MAX_COPY_TRANSCRIPT_TURNS = 1000;
-const LIVE_TRANSCRIPT_COLLAPSED_PAGE_SIZE = 4;
-const LIVE_TRANSCRIPT_EXPANDED_PAGE_SIZE = 12;
+const LIVE_TRANSCRIPT_COLLAPSED_PAGE_SIZE = 3;
+const LIVE_TRANSCRIPT_EXPANDED_PAGE_SIZE = 10;
+const OVERLAY_PANEL_WIDTH = 760;
+const OVERLAY_VERTICAL_MARGIN = 16;
+
+const getPreferredOverlayHeight = (expanded: boolean) => {
+  if (!expanded) return 216;
+
+  const screenHeight =
+    window.screen?.availHeight ||
+    document.documentElement.clientHeight ||
+    window.innerHeight ||
+    900;
+  const availableHeight = Math.max(
+    640,
+    screenHeight - OVERLAY_VERTICAL_MARGIN * 2,
+  );
+  const comfortableHeight = Math.floor(screenHeight * 0.9);
+  const minimumUsefulHeight = Math.min(760, availableHeight);
+
+  return Math.max(
+    minimumUsefulHeight,
+    Math.min(availableHeight, comfortableHeight),
+  );
+};
 
 const normalizeTranscriptText = (text: string) =>
   text
@@ -288,8 +403,7 @@ const transcriptTextSimilarity = (a: string, b: string) => {
 const normalizeLiveSpeaker = (speaker: string, canonicalRole?: string) => {
   if (canonicalRole === "me") return "me";
   if (canonicalRole === "interlocutor") return "interlocutor";
-  if (canonicalRole === "speaker_1") return "speaker_1";
-  if (canonicalRole === "speaker_2") return "speaker_2";
+  if (/^speaker_\d+$/i.test(canonicalRole || "")) return canonicalRole!;
   if (canonicalRole === "uncertain") return "uncertain";
   const value = String(speaker || "").trim();
   return value || "interviewer";
@@ -336,11 +450,17 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 }) => {
   const isLightTheme = useResolvedTheme() === "light";
   const [isExpanded, setIsExpanded] = useState(true);
+  const preferredOverlayHeight = useMemo(
+    () => getPreferredOverlayHeight(isExpanded),
+    [isExpanded],
+  );
   const [inputValue, setInputValue] = useState("");
   const { shortcuts, isShortcutPressed } = useShortcuts();
   const [messages, setMessages] = useState<Message[]>([]);
   const [copilotSuggestion, setCopilotSuggestion] =
     useState<CopilotSuggestion | null>(null);
+  const [copilotStatus, setCopilotStatus] =
+    useState<CopilotDecisionPayload | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [sttUserStatus, setSttUserStatus] = useState<
     "connected" | "reconnecting" | "failed"
@@ -360,8 +480,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>(
     {},
   );
-  const [meetingHealth, setMeetingHealth] = useState<MeetingHealthData | null>(null);
-  const [meetingRisks, setMeetingRisks] = useState<DetectedRiskData[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [conversationContext, setConversationContext] = useState<string>("");
   const [isManualRecording, setIsManualRecording] = useState(false);
@@ -400,6 +518,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     null,
   );
   const [isTranscriptExpanded, setIsTranscriptExpanded] = useState(false);
+  const [isCommandToolsOpen, setIsCommandToolsOpen] = useState(false);
   const [transcriptPage, setTranscriptPage] = useState(0);
   const [isInterviewerSpeaking, setIsInterviewerSpeaking] = useState(false); // Track if actively speaking
   const [voiceInput, setVoiceInput] = useState(""); // Accumulated user voice input
@@ -407,7 +526,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const textInputRef = useRef<HTMLInputElement>(null); // Ref for input focus
   const isStealthRef = useRef<boolean>(false); // Tracks if the next expansion should be stealthy
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const liveTranscriptEndRef = useRef<HTMLDivElement>(null);
+  const liveTranscriptScrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   // Captures data from onCaptureAndProcess before the React state flush so
@@ -416,6 +535,42 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const pendingCaptureRef = useRef<{ path: string; preview: string } | null>(
     null,
   );
+
+  const pushOverlayDimensions = useCallback(() => {
+    if (!contentRef.current) return;
+
+    const rect = contentRef.current.getBoundingClientRect();
+    const measuredWidth = Math.ceil(rect.width);
+
+    window.electronAPI?.updateContentDimensions({
+      width: Math.max(measuredWidth, OVERLAY_PANEL_WIDTH),
+      height: preferredOverlayHeight,
+    });
+  }, [preferredOverlayHeight]);
+
+  const scrollMessagesToBottom = (
+    behavior: ScrollBehavior = "smooth",
+    force = true,
+  ) => {
+    requestAnimationFrame(() => {
+      const container = scrollContainerRef.current;
+      if (!container) return;
+      if (!force) {
+        const distanceFromBottom =
+          container.scrollHeight - container.scrollTop - container.clientHeight;
+        if (distanceFromBottom > 180) return;
+      }
+      container.scrollTo({
+        top: container.scrollHeight,
+        behavior,
+      });
+    });
+  };
+
+  const queueActionMessage = (intent: string, text: string) => {
+    setMessages((prev) => upsertPendingActionMessage(prev, intent, text));
+    scrollMessagesToBottom("smooth");
+  };
 
   // Latent Context State (Screenshots attached but not sent)
   const [attachedContext, setAttachedContext] = useState<
@@ -534,6 +689,29 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const inputClass = `${isLightTheme ? "focus:ring-black/10" : "focus:ring-white/10"} overlay-input-surface overlay-input-text`;
   const controlSurfaceClass =
     "overlay-control-surface overlay-text-interactive";
+  const visibleCopilotDecision = copilotSuggestion ?? copilotStatus;
+  const copilotQuality = visibleCopilotDecision?.contextQuality ?? null;
+  const copilotQualityScore = copilotQuality
+    ? Math.round(copilotQuality.score * 100)
+    : 0;
+  const isConversationFocusMode =
+    messages.length > 0 ||
+    isManualRecording ||
+    isProcessing;
+  const hasActionConversation =
+    isConversationFocusMode ||
+    Boolean(copilotSuggestion);
+  const topSectionMaxHeight = isConversationFocusMode
+    ? "min(12vh, 96px)"
+    : copilotSuggestion
+      ? "min(15vh, 144px)"
+    : "min(30vh, 260px)";
+
+  useEffect(() => {
+    if (!isConversationFocusMode && isCommandToolsOpen) {
+      setIsCommandToolsOpen(false);
+    }
+  }, [isConversationFocusMode, isCommandToolsOpen]);
 
   useEffect(() => {
     // Load the persisted default model (not the runtime model)
@@ -628,14 +806,33 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const [systemAudioWarning, setSystemAudioWarning] = useState<string | null>(
     null,
   );
+  const [systemAudioWarningTitle, setSystemAudioWarningTitle] = useState(
+    "Speaker Capture Warning",
+  );
   useEffect(() => {
-    const unsub = window.electronAPI?.onSystemAudioPermissionDenied?.(
+    const unsubPermission = window.electronAPI?.onSystemAudioPermissionDenied?.(
       (message: string) => {
+        setSystemAudioWarningTitle("Screen Recording Permission Denied");
         setSystemAudioWarning(message);
         setIsExpanded(true); // Force overlay open so user sees the warning
       },
     );
-    return () => unsub?.();
+    const unsubSilent = window.electronAPI?.onSystemAudioSilent?.(() => {
+      setSystemAudioWarningTitle("Speaker Audio Is Silent");
+      setSystemAudioWarning(
+        "System audio is silent. Natively will use mic fallback for speaker-like speech, but true speaker separation needs macOS Screen/System Audio Recording permission and an audible output device.",
+      );
+      setIsExpanded(true);
+    });
+    const unsubActive = window.electronAPI?.onSystemAudioActive?.(() => {
+      setSystemAudioWarningTitle("Speaker Capture Warning");
+      setSystemAudioWarning(null);
+    });
+    return () => {
+      unsubPermission?.();
+      unsubSilent?.();
+      unsubActive?.();
+    };
   }, []);
 
   // PR #173: STT not configured warning — shown when provider is 'none' during a meeting
@@ -670,52 +867,47 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       for (const entry of entries) {
         // Use getBoundingClientRect to get the exact rendered size including padding
         const rect = entry.target.getBoundingClientRect();
+        const height = preferredOverlayHeight;
 
         // Send exact dimensions to Electron
-        // Removed buffer to ensure tight fit
         console.log(
           "[NativelyInterface] ResizeObserver:",
           Math.ceil(rect.width),
-          Math.ceil(rect.height),
+          height,
         );
         window.electronAPI?.updateContentDimensions({
-          width: Math.ceil(rect.width),
-          height: Math.ceil(rect.height),
+          width: Math.max(Math.ceil(rect.width), OVERLAY_PANEL_WIDTH),
+          height,
         });
       }
     });
 
     observer.observe(contentRef.current);
     return () => observer.disconnect();
-  }, []);
+  }, [preferredOverlayHeight]);
 
   // Force resize when attachedContext changes (screenshots added/removed)
   useEffect(() => {
-    if (!contentRef.current) return;
     // Let the DOM settle, then measure and push new dimensions
-    requestAnimationFrame(() => {
-      if (!contentRef.current) return;
-      const rect = contentRef.current.getBoundingClientRect();
-      window.electronAPI?.updateContentDimensions({
-        width: Math.ceil(rect.width),
-        height: Math.ceil(rect.height),
-      });
-    });
-  }, [attachedContext]);
+    requestAnimationFrame(pushOverlayDimensions);
+  }, [
+    attachedContext,
+    copilotSuggestion,
+    isTranscriptExpanded,
+    liveTranscriptTurns.length,
+    messages.length,
+    pendingLiveTranscript,
+    pushOverlayDimensions,
+    showTranscript,
+  ]);
 
   // Force initial sizing safety check
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (contentRef.current) {
-        const rect = contentRef.current.getBoundingClientRect();
-        window.electronAPI?.updateContentDimensions({
-          width: Math.ceil(rect.width),
-          height: Math.ceil(rect.height),
-        });
-      }
+      pushOverlayDimensions();
     }, 600);
     return () => clearTimeout(timer);
-  }, []);
+  }, [pushOverlayDimensions]);
 
   // Build conversation context from messages
   useEffect(() => {
@@ -793,6 +985,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setTranscriptPage(0);
       setRollingTranscript("");
       setVoiceInput("");
+      setSttUserStatus("connected");
+      setSttUserError("");
+      setSttInterviewerStatus("connected");
+      setSttInterviewerError("");
       decrementPending();
       // Optionally reset connection status if needed, but connection persists
 
@@ -886,8 +1082,26 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   };
 
   useEffect(() => {
-    liveTranscriptEndRef.current?.scrollIntoView({ block: "end" });
-  }, [liveTranscriptTurns, pendingLiveTranscript]);
+    if (transcriptPage !== 0) return;
+    requestAnimationFrame(() => {
+      const container = liveTranscriptScrollRef.current;
+      if (!container) return;
+      container.scrollTop = container.scrollHeight;
+    });
+  }, [liveTranscriptTurns, pendingLiveTranscript, transcriptPage]);
+
+  useLayoutEffect(() => {
+    if (messages.length === 0) return;
+    const lastMessage = messages[messages.length - 1];
+    const shouldKeepLatestVisible =
+      lastMessage?.role === "user" ||
+      lastMessage?.isStreaming ||
+      Boolean(lastMessage?.intent);
+    scrollMessagesToBottom(
+      shouldKeepLatestVisible ? "auto" : "smooth",
+      shouldKeepLatestVisible,
+    );
+  }, [messages]);
 
   // STT Status listener — must survive isExpanded changes.
   // If registered inside the [isExpanded] effect, events are dropped during cleanup.
@@ -905,32 +1119,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         if (data.state === "connected") setSttInterviewerError("");
       }
     });
-  }, []);
-
-  // ── Meeting Dashboard polling ────────────────────────────────────
-  useEffect(() => {
-    let cancelled = false;
-
-    const poll = async () => {
-      if (cancelled) return;
-      try {
-        const data = await window.electronAPI?.getMeetingHealth?.();
-        if (cancelled) return;
-        if (data) {
-          setMeetingHealth(data.health);
-          setMeetingRisks(data.risks || []);
-        }
-      } catch {
-        // Silently ignore — dashboard is best-effort
-      }
-    };
-
-    poll(); // immediate first call
-    const interval = setInterval(poll, 3000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
   }, []);
 
   // Connect to Native Audio Backend
@@ -1064,11 +1252,20 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     const cleanupCopilotSuggestion = window.electronAPI.onCopilotSuggestion?.(
       (data) => {
         if (!data?.suggestion) return;
+        setCopilotStatus(data);
         setCopilotSuggestion(data);
         setIsExpanded(true);
       },
     );
     if (cleanupCopilotSuggestion) cleanups.push(cleanupCopilotSuggestion);
+
+    const cleanupCopilotDecision = window.electronAPI.onCopilotDecision?.(
+      (data) => {
+        if (!data) return;
+        setCopilotStatus(data);
+      },
+    );
+    if (cleanupCopilotDecision) cleanups.push(cleanupCopilotDecision);
 
     const cleanupCopilotError = window.electronAPI.onCopilotError?.((data) => {
       console.warn("[Copilot] Error:", data.error);
@@ -1209,14 +1406,16 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     cleanups.push(
       window.electronAPI.onIntelligenceManualResult((data) => {
         decrementPending();
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now().toString(),
-            role: "system",
-            text: `🎯 **Answer:**\n\n${data.answer}`,
-          },
-        ]);
+        const durationMs =
+          Date.now() - (streamStartTimesRef.current["manual"] || Date.now());
+        delete streamStartTimesRef.current["manual"];
+        setMessages((prev) =>
+          settleActionMessage(prev, "manual", data.answer, {
+            modelUsed: shortenModelName(currentModelRef.current),
+            tokensUsed: estimateTokens(data.answer),
+            durationMs,
+          }),
+        );
       }),
     );
 
@@ -1238,18 +1437,18 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         if (key) {
           setActionLoading((prev) => ({ ...prev, [key]: false }));
         }
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now().toString(),
-            role: "system",
-            text: `❌ Error (${data.mode}): ${data.error}`,
-          },
-        ]);
+        const intent = getMessageIntentForMode(data.mode);
+        setMessages((prev) =>
+          settleActionMessage(prev, intent, `Error (${data.mode}): ${data.error}`),
+        );
       }),
     );
     return () => cleanups.forEach((fn) => fn());
-  }, [isExpanded]);
+    // These listeners must survive Hide/Show while an action is in flight.
+    // Re-registering them on isExpanded changes can orphan final events and
+    // leave buttons visually stuck even though the backend completed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Stable mount-only effect for screenshot listeners.
   // These MUST NOT be inside the [isExpanded] effect — when a screenshot is
@@ -1318,8 +1517,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   };
 
   const handleWhatToSay = async () => {
+    const intent = "what_to_answer";
     setIsExpanded(true);
     setActionLoading((prev) => ({ ...prev, whatToSay: true }));
+    queueActionMessage(intent, "Preparing what you can say...");
     incrementPending();
     analytics.trackCommandExecuted("what_to_say");
 
@@ -1345,29 +1546,38 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           screenshotPreview: currentAttachments[0].preview,
         },
       ]);
-      // Scroll to bottom when user sends message
-      setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-      }, 50);
+      setTimeout(() => scrollMessagesToBottom("smooth"), 50);
     }
 
     try {
       // Pass imagePath if attached
-      await window.electronAPI.generateWhatToSay(
+      const result = await window.electronAPI.generateWhatToSay(
         undefined,
         currentAttachments.length > 0
           ? currentAttachments.map((s) => s.path)
           : undefined,
       );
+      const answer = result?.answer || "";
+      if (answer) {
+        setMessages((prev) =>
+          finalizePendingActionMessage(prev, intent, answer, {
+            modelUsed: shortenModelName(currentModelRef.current),
+            tokensUsed: estimateTokens(answer),
+          }),
+        );
+      } else {
+        setMessages((prev) =>
+          settleActionMessage(
+            prev,
+            intent,
+            "I could not generate a reliable suggestion from the current meeting context.",
+          ),
+        );
+      }
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          role: "system",
-          text: `Error: ${err}`,
-        },
-      ]);
+      setMessages((prev) =>
+        settleActionMessage(prev, intent, `Error: ${err}`),
+      );
     } finally {
       setActionLoading((prev) => ({ ...prev, whatToSay: false }));
       decrementPending();
@@ -1396,22 +1606,36 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   };
 
   const handleRecap = async () => {
+    const intent = "recap";
     setIsExpanded(true);
     setActionLoading((prev) => ({ ...prev, recap: true }));
+    queueActionMessage(intent, "Preparing a short recap...");
     incrementPending();
     analytics.trackCommandExecuted("recap");
 
     try {
-      await window.electronAPI.generateRecap();
+      const result = await window.electronAPI.generateRecap();
+      const summary = result?.summary;
+      if (summary) {
+        setMessages((prev) =>
+          finalizePendingActionMessage(prev, intent, summary, {
+            modelUsed: shortenModelName(currentModelRef.current),
+            tokensUsed: estimateTokens(summary),
+          }),
+        );
+      } else {
+        setMessages((prev) =>
+          settleActionMessage(
+            prev,
+            intent,
+            "I could not produce a useful recap from the current context.",
+          ),
+        );
+      }
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          role: "system",
-          text: `Error: ${err}`,
-        },
-      ]);
+      setMessages((prev) =>
+        settleActionMessage(prev, intent, `Error: ${err}`),
+      );
     } finally {
       setActionLoading((prev) => ({ ...prev, recap: false }));
       decrementPending();
@@ -1419,22 +1643,41 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   };
 
   const handleFollowUpQuestions = async () => {
+    const intent = "follow_up_questions";
     setIsExpanded(true);
     setActionLoading((prev) => ({ ...prev, followUpQuestions: true }));
+    queueActionMessage(intent, "Finding a useful follow-up question...");
     incrementPending();
     analytics.trackCommandExecuted("suggest_questions");
 
     try {
-      await window.electronAPI.generateFollowUpQuestions();
+      const result = await window.electronAPI.generateFollowUpQuestions();
+      const questions =
+        typeof result?.questions === "string"
+          ? result.questions
+          : result?.questions
+            ? JSON.stringify(result.questions)
+            : "";
+      if (questions) {
+        setMessages((prev) =>
+          finalizePendingActionMessage(prev, intent, questions, {
+            modelUsed: shortenModelName(currentModelRef.current),
+            tokensUsed: estimateTokens(questions),
+          }),
+        );
+      } else {
+        setMessages((prev) =>
+          settleActionMessage(
+            prev,
+            intent,
+            "I could not find a reliable follow-up question from the current context.",
+          ),
+        );
+      }
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          role: "system",
-          text: `Error: ${err}`,
-        },
-      ]);
+      setMessages((prev) =>
+        settleActionMessage(prev, intent, `Error: ${err}`),
+      );
     } finally {
       setActionLoading((prev) => ({ ...prev, followUpQuestions: false }));
       decrementPending();
@@ -1442,22 +1685,36 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   };
 
   const handleClarify = async () => {
+    const intent = "clarify";
     setIsExpanded(true);
     setActionLoading((prev) => ({ ...prev, clarify: true }));
+    queueActionMessage(intent, "Preparing one clarifying question...");
     incrementPending();
     analytics.trackCommandExecuted("clarify");
 
     try {
-      await window.electronAPI.generateClarify();
+      const result = await window.electronAPI.generateClarify();
+      const clarification = result?.clarification || "";
+      if (clarification) {
+        setMessages((prev) =>
+          finalizePendingActionMessage(prev, intent, clarification, {
+            modelUsed: shortenModelName(currentModelRef.current),
+            tokensUsed: estimateTokens(clarification),
+          }),
+        );
+      } else {
+        setMessages((prev) =>
+          settleActionMessage(
+            prev,
+            intent,
+            "I could not generate a reliable clarifying question from the current context.",
+          ),
+        );
+      }
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          role: "system",
-          text: `Error: ${err}`,
-        },
-      ]);
+      setMessages((prev) =>
+        settleActionMessage(prev, intent, `Error: ${err}`),
+      );
     } finally {
       setActionLoading((prev) => ({ ...prev, clarify: false }));
       decrementPending();
@@ -1465,8 +1722,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   };
 
   const handleCodeHint = async () => {
+    const intent = "code_hint";
     setIsExpanded(true);
     setActionLoading((prev) => ({ ...prev, codeHint: true }));
+    queueActionMessage(intent, "Preparing a concise code hint...");
     incrementPending();
     analytics.trackCommandExecuted("code_hint");
 
@@ -1484,27 +1743,36 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           screenshotPreview: currentAttachments[0].preview,
         },
       ]);
-      // Scroll to bottom when user sends message
-      setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-      }, 50);
+      setTimeout(() => scrollMessagesToBottom("smooth"), 50);
     }
 
     try {
-      await window.electronAPI.generateCodeHint(
+      const result = await window.electronAPI.generateCodeHint(
         currentAttachments.length > 0
           ? currentAttachments.map((s) => s.path)
           : undefined,
       );
+      const hint = result?.hint || "";
+      if (hint) {
+        setMessages((prev) =>
+          finalizePendingActionMessage(prev, intent, hint, {
+            modelUsed: shortenModelName(currentModelRef.current),
+            tokensUsed: estimateTokens(hint),
+          }),
+        );
+      } else {
+        setMessages((prev) =>
+          settleActionMessage(
+            prev,
+            intent,
+            "I could not generate a reliable code hint from the current context.",
+          ),
+        );
+      }
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          role: "system",
-          text: `Error: ${err}`,
-        },
-      ]);
+      setMessages((prev) =>
+        settleActionMessage(prev, intent, `Error: ${err}`),
+      );
     } finally {
       setActionLoading((prev) => ({ ...prev, codeHint: false }));
       decrementPending();
@@ -1512,8 +1780,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   };
 
   const handleBrainstorm = async () => {
+    const intent = "brainstorm";
     setIsExpanded(true);
     setActionLoading((prev) => ({ ...prev, brainstorm: true }));
+    queueActionMessage(intent, "Preparing useful options...");
     incrementPending();
     analytics.trackCommandExecuted("brainstorm");
 
@@ -1531,27 +1801,36 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           screenshotPreview: currentAttachments[0].preview,
         },
       ]);
-      // Scroll to bottom when user sends message
-      setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-      }, 50);
+      setTimeout(() => scrollMessagesToBottom("smooth"), 50);
     }
 
     try {
-      await window.electronAPI.generateBrainstorm(
+      const result = await window.electronAPI.generateBrainstorm(
         currentAttachments.length > 0
           ? currentAttachments.map((s) => s.path)
           : undefined,
       );
+      const script = result?.script || "";
+      if (script) {
+        setMessages((prev) =>
+          finalizePendingActionMessage(prev, intent, script, {
+            modelUsed: shortenModelName(currentModelRef.current),
+            tokensUsed: estimateTokens(script),
+          }),
+        );
+      } else {
+        setMessages((prev) =>
+          settleActionMessage(
+            prev,
+            intent,
+            "I could not generate reliable options from the current context.",
+          ),
+        );
+      }
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          role: "system",
-          text: `Error: ${err}`,
-        },
-      ]);
+      setMessages((prev) =>
+        settleActionMessage(prev, intent, `Error: ${err}`),
+      );
     } finally {
       setActionLoading((prev) => ({ ...prev, brainstorm: false }));
       decrementPending();
@@ -1914,10 +2193,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         },
       ]);
 
-      // Scroll to bottom when user sends message
-      setTimeout(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-      }, 50);
+      setTimeout(() => scrollMessagesToBottom("smooth"), 50);
 
       // Add placeholder for streaming response
       setMessages((prev) => [
@@ -2038,12 +2314,13 @@ Provide only the answer, nothing else.`;
       },
     ]);
 
-    // Scroll to bottom when user sends message
-    setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }, 50);
+    setTimeout(() => scrollMessagesToBottom("smooth"), 50);
 
-    // Add placeholder for streaming response
+    const useMeetingContextAnswer = currentAttachments.length === 0;
+
+    // Add placeholder for the response. Text-only questions use the meeting
+    // action pipeline so free-form chat sees the same canonical transcript
+    // context as the live buttons.
     setMessages((prev) => [
       ...prev,
       {
@@ -2051,6 +2328,7 @@ Provide only the answer, nothing else.`;
         role: "system",
         text: "",
         isStreaming: true,
+        intent: useMeetingContextAnswer ? "manual" : undefined,
       },
     ]);
 
@@ -2058,18 +2336,28 @@ Provide only the answer, nothing else.`;
     incrementPending();
 
     try {
-      // JIT RAG pre-flight: try to use indexed meeting context first
-      if (currentAttachments.length === 0) {
-        const ragResult = await window.electronAPI.ragQueryLive?.(
+      if (useMeetingContextAnswer) {
+        streamStartTimesRef.current["manual"] = Date.now();
+        const result = await window.electronAPI.submitManualQuestion(
           userText || "",
         );
-        if (ragResult?.success) {
-          // JIT RAG handled it — response streamed via rag:stream-chunk events
-          return;
+        const answer = result?.answer || "";
+
+        if (!answer) {
+          delete streamStartTimesRef.current["manual"];
+          setMessages((prev) =>
+            finalizePendingActionMessage(
+              prev,
+              "manual",
+              "I could not answer reliably from the current meeting context.",
+            ),
+          );
+          decrementPending();
         }
+        return;
       }
 
-      // Pass imagePath if attached, AND conversation context
+      // Screenshot requests still need the vision chat path.
       requestStartTimeRef.current = Date.now();
       await window.electronAPI.streamGeminiChat(
         userText || "Analyze this screenshot",
@@ -2105,6 +2393,19 @@ Provide only the answer, nothing else.`;
   const clearChat = () => {
     setMessages([]);
     setCopilotSuggestion(null);
+  };
+
+  const actionCardScrollStyle: React.CSSProperties = {
+    ...appearance.subtleStyle,
+    width: "100%",
+    minWidth: 0,
+    ...(hasActionConversation
+      ? {
+          maxHeight: "min(20vh, 190px)",
+          overflowY: "auto",
+          scrollbarWidth: "thin",
+        }
+      : {}),
   };
 
   const renderMessageText = (msg: Message) => {
@@ -2143,7 +2444,7 @@ Provide only the answer, nothing else.`;
       return (
         <div
           className={`rounded-lg p-3 my-1 border ${subtleSurfaceClass}`}
-          style={appearance.subtleStyle}
+          style={actionCardScrollStyle}
         >
           <div
             className={`flex items-center gap-2 mb-2 font-semibold text-xs uppercase tracking-wide ${isLightTheme ? "text-violet-600" : "text-purple-300"}`}
@@ -2303,7 +2604,7 @@ Provide only the answer, nothing else.`;
       return (
         <div
           className={`rounded-lg p-3 my-1 border ${subtleSurfaceClass}`}
-          style={appearance.subtleStyle}
+          style={actionCardScrollStyle}
         >
           <div
             className={`flex items-center gap-2 mb-2 font-semibold text-xs uppercase tracking-wide ${isLightTheme ? "text-cyan-700" : "text-cyan-300"}`}
@@ -2346,7 +2647,7 @@ Provide only the answer, nothing else.`;
       return (
         <div
           className={`rounded-lg p-3 my-1 border ${subtleSurfaceClass}`}
-          style={appearance.subtleStyle}
+          style={actionCardScrollStyle}
         >
           <div
             className={`flex items-center gap-2 mb-2 font-semibold text-xs uppercase tracking-wide ${isLightTheme ? "text-indigo-700" : "text-indigo-300"}`}
@@ -2389,7 +2690,7 @@ Provide only the answer, nothing else.`;
       return (
         <div
           className={`rounded-lg p-3 my-1 border ${subtleSurfaceClass}`}
-          style={appearance.subtleStyle}
+          style={actionCardScrollStyle}
         >
           <div
             className={`flex items-center gap-2 mb-2 font-semibold text-xs uppercase tracking-wide ${isLightTheme ? "text-amber-700" : "text-[#FFD60A]"}`}
@@ -2435,7 +2736,7 @@ Provide only the answer, nothing else.`;
       return (
         <div
           className={`rounded-lg p-3 my-1 border ${subtleSurfaceClass}`}
-          style={appearance.subtleStyle}
+          style={actionCardScrollStyle}
         >
           <div className="flex items-center gap-2 mb-2 text-emerald-400 font-semibold text-xs uppercase tracking-wide">
             <span>Say this</span>
@@ -2904,11 +3205,48 @@ Provide only the answer, nothing else.`;
 
   // ── Derived STT status for the rolling transcript indicator (interviewer channel) ──
   const interviewerSttIndicatorStatus = sttInterviewerStatus;
+  const hasSttConnectionIssue =
+    interviewerSttIndicatorStatus !== "connected" ||
+    sttUserStatus !== "connected";
+  const shouldShowRollingTranscript =
+    !hasActionConversation &&
+    ((showTranscript && rollingTranscript) || hasSttConnectionIssue);
   // Strip consecutive error count from display — show only in expanded diagnostics
   const interviewerSttIndicatorError = sttInterviewerError?.replace(
     /\s*\(\d+ consecutive errors\):?/gi,
     "",
   );
+  const liveTranscriptEmptyMessage = useMemo(() => {
+    const formatIssue = (
+      label: string,
+      status: "connected" | "reconnecting" | "failed",
+      provider: string,
+      error: string,
+    ) => {
+      if (status === "connected") return null;
+      const providerLabel = provider || "STT";
+      const detail = error ? `: ${error}` : "";
+      return `${label} ${providerLabel} is ${status}${detail}`;
+    };
+
+    const issues = [
+      formatIssue("Speaker", sttInterviewerStatus, sttInterviewerProvider, sttInterviewerError),
+      formatIssue("Mic", sttUserStatus, sttUserProvider, sttUserError),
+    ].filter(Boolean);
+
+    if (issues.length > 0) {
+      return issues.join(" | ");
+    }
+
+    return "Waiting for live transcript...";
+  }, [
+    sttInterviewerError,
+    sttInterviewerProvider,
+    sttInterviewerStatus,
+    sttUserError,
+    sttUserProvider,
+    sttUserStatus,
+  ]);
   const visibleTranscriptTurns = [...liveTranscriptTurns].sort(
     (a, b) => a.timestamp - b.timestamp,
   );
@@ -2919,9 +3257,20 @@ Provide only the answer, nothing else.`;
   const hasLiveTranscript =
     showTranscript &&
     (visibleTranscriptTurns.length > 0 || hasPendingTranscript || isConnected);
-  const transcriptPageSize = isTranscriptExpanded
-    ? LIVE_TRANSCRIPT_EXPANDED_PAGE_SIZE
-    : LIVE_TRANSCRIPT_COLLAPSED_PAGE_SIZE;
+  const transcriptPageSize = hasActionConversation
+    ? isTranscriptExpanded
+      ? 2
+      : 1
+    : isTranscriptExpanded
+      ? LIVE_TRANSCRIPT_EXPANDED_PAGE_SIZE
+      : LIVE_TRANSCRIPT_COLLAPSED_PAGE_SIZE;
+  const transcriptViewportMaxHeight = hasActionConversation
+    ? isTranscriptExpanded
+      ? "min(8vh, 72px)"
+      : "34px"
+    : isTranscriptExpanded
+      ? "min(30vh, 280px)"
+      : "min(20vh, 180px)";
   const maxTranscriptPage = Math.max(
     0,
     Math.ceil(visibleTranscriptTurns.length / transcriptPageSize) - 1,
@@ -2939,6 +3288,17 @@ Provide only the answer, nothing else.`;
     transcriptWindowStart,
     transcriptWindowEnd,
   );
+  const transcriptQualityFlags = [
+    ...visibleTranscriptTurns.slice(-6),
+    ...Object.values(pendingLiveTranscript),
+  ].filter((turn): turn is LiveTranscriptTurn => Boolean(turn))
+    .flatMap((turn) => turn.qualityFlags || []);
+  const transcriptStatusBadges = [
+    transcriptQualityFlags.includes("speaker_stable") ? "Speaker stable" : "",
+    transcriptQualityFlags.includes("mic_gate_held") ? "Mic gated" : "",
+    transcriptQualityFlags.includes("possible_overlap") ? "Overlap" : "",
+    transcriptQualityFlags.includes("low_confidence") ? "Low confidence" : "",
+  ].filter(Boolean).slice(0, 3);
 
   useEffect(() => {
     setTranscriptPage((page) => Math.min(page, maxTranscriptPage));
@@ -2949,15 +3309,11 @@ Provide only the answer, nothing else.`;
   ) => {
     if (speaker === "me") return "Me";
     if (speaker === "interlocutor" || speaker === "interviewer") return "Speaker";
-    if (speaker === "speaker_1") return "Speaker 1";
-    if (speaker === "speaker_2") return "Speaker 2";
     if (speaker === "uncertain") return "Uncertain";
     const diarizedMatch = /^locuteur[_-](\d+)$/i.exec(speaker);
     if (diarizedMatch) return `Locuteur ${Number(diarizedMatch[1]) + 1}`;
-    if (/^speaker[_-](\d+)$/i.test(speaker)) {
-      const id = /^speaker[_-](\d+)$/i.exec(speaker)?.[1];
-      return `Speaker ${Number(id) + 1}`;
-    }
+    const speakerMatch = /^speaker[_-](\d+)$/i.exec(speaker);
+    if (speakerMatch) return `Speaker ${Number(speakerMatch[1])}`;
     if (speaker && speaker !== "user") return speaker;
     return "Mic";
   };
@@ -3054,7 +3410,8 @@ Provide only the answer, nothing else.`;
   return (
     <div
       ref={contentRef}
-      className="flex flex-col items-center w-fit mx-auto h-fit min-h-0 bg-transparent p-0 rounded-[24px] font-sans gap-2 overlay-text-primary"
+      className="flex flex-col items-center w-fit mx-auto h-full min-h-0 bg-transparent p-0 rounded-[24px] font-sans gap-2 overlay-text-primary"
+      style={{ height: preferredOverlayHeight }}
     >
       <AnimatePresence>
         {isExpanded && (
@@ -3063,7 +3420,7 @@ Provide only the answer, nothing else.`;
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 20, scale: 0.95 }}
             transition={{ duration: 0.3, ease: "easeInOut" }}
-            className="flex flex-col items-center gap-2 w-full"
+            className="flex flex-col items-center gap-2 w-full h-full min-h-0"
           >
             <TopPill
               expanded={isExpanded}
@@ -3077,7 +3434,8 @@ Provide only the answer, nothing else.`;
               }
             />
             <div
-              className={`relative w-[600px] max-w-full backdrop-blur-2xl border rounded-[24px] overflow-hidden flex flex-col draggable-area overlay-shell-surface ${overlayPanelClass}`}
+              data-testid="natively-overlay-panel"
+              className={`relative w-[760px] max-w-none flex-1 min-h-0 backdrop-blur-2xl border rounded-[24px] overflow-hidden flex flex-col draggable-area overlay-shell-surface ${overlayPanelClass}`}
               style={appearance.shellStyle}
             >
               {/* System Audio Permission Warning Banner */}
@@ -3100,7 +3458,7 @@ Provide only the answer, nothing else.`;
                           />
                         </svg>
                       </div>
-                      <span>Screen Recording Permission Denied</span>
+                      <span>{systemAudioWarningTitle}</span>
                     </div>
                     <p className="text-[11px] text-yellow-600/70 dark:text-yellow-400/60 leading-snug pl-[26px]">
                       {systemAudioWarning}
@@ -3176,9 +3534,7 @@ Provide only the answer, nothing else.`;
               )}
 
               {/* Rolling Transcript Bar — includes STT status indicator inline */}
-              {(showTranscript && rollingTranscript) ||
-              interviewerSttIndicatorStatus !== "connected" ||
-              sttUserStatus !== "connected" ? (
+              {shouldShowRollingTranscript ? (
                 <RollingTranscript
                   text={showTranscript ? rollingTranscript : ""}
                   isActive={isInterviewerSpeaking}
@@ -3199,9 +3555,24 @@ Provide only the answer, nothing else.`;
                 />
               ) : null}
 
+              <div
+                data-testid="natively-assist-layout"
+                className="flex-1 min-h-0 no-drag grid grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden"
+              >
+                <div
+                  data-testid="natively-context-section"
+                  className={`min-h-0 pt-1.5 overscroll-contain ${
+                    hasActionConversation ? "overflow-hidden" : "overflow-y-auto"
+                  }`}
+                  style={{
+                    maxHeight: topSectionMaxHeight,
+                    scrollbarWidth: "none",
+                  }}
+                >
               {hasLiveTranscript && (
                 <div
-                  className={`mx-4 mt-2 mb-1 rounded-[12px] border no-drag overflow-hidden ${subtleSurfaceClass}`}
+                  data-testid="natively-live-transcript-panel"
+                  className={`mx-4 ${isConversationFocusMode ? "mt-1" : "mt-2"} mb-1 rounded-[12px] border no-drag overflow-hidden ${subtleSurfaceClass}`}
                   style={appearance.subtleStyle}
                 >
                   <div className="flex items-center justify-between gap-3 px-3.5 pt-2.5 pb-1.5">
@@ -3213,6 +3584,14 @@ Provide only the answer, nothing else.`;
                           {currentTranscriptPage + 1}/{maxTranscriptPage + 1}
                         </span>
                       )}
+                      {transcriptStatusBadges.map((badge) => (
+                        <span
+                          key={badge}
+                          className="normal-case tracking-normal px-1.5 py-0.5 rounded-full border overlay-border-muted overlay-text-muted text-[9px] font-medium"
+                        >
+                          {badge}
+                        </span>
+                      ))}
                     </div>
                     <div className="flex items-center gap-1.5 text-[10px] overlay-text-muted">
                       {visibleTranscriptTurns.length > transcriptPageSize && (
@@ -3312,13 +3691,17 @@ Provide only the answer, nothing else.`;
                     </div>
                   </div>
                   <div
-                    className={`px-3.5 pb-3 space-y-2 overflow-y-auto ${isTranscriptExpanded ? "max-h-[320px]" : "max-h-[180px]"}`}
+                    ref={liveTranscriptScrollRef}
+                    className="px-3.5 pb-3 space-y-2 overflow-y-auto"
+                    style={{
+                      maxHeight: transcriptViewportMaxHeight,
+                    }}
                   >
                     {displayedTranscriptTurns.length > 0 ? (
                       displayedTranscriptTurns.map((turn) => (
                         <div
                           key={turn.id}
-                          className="group/transcript grid grid-cols-[72px_minmax(0,1fr)_24px] gap-2 text-[12px] leading-snug"
+                          className="group/transcript grid grid-cols-[88px_minmax(0,1fr)_24px] gap-2 text-[12px] leading-snug"
                         >
                           <div
                             className={`font-semibold ${turn.speaker === "user" || turn.speaker === "me" ? "text-emerald-400" : "overlay-text-muted"}`}
@@ -3349,19 +3732,112 @@ Provide only the answer, nothing else.`;
                       ))
                     ) : (
                       <div className="py-2 text-[12px] overlay-text-muted">
-                        Waiting for live transcript...
+                        {liveTranscriptEmptyMessage}
                       </div>
                     )}
-                    <div ref={liveTranscriptEndRef} />
                   </div>
                 </div>
               )}
 
-              {copilotSuggestion?.suggestion && (
+              {copilotQuality && !hasActionConversation && (
                 <div
-                  className={`mx-4 mt-3 mb-1 px-3.5 py-3 rounded-[12px] border no-drag ${subtleSurfaceClass}`}
+                  className={`mx-4 mt-2 mb-1 px-3 py-1.5 rounded-[12px] border no-drag ${subtleSurfaceClass}`}
                   style={appearance.subtleStyle}
                 >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div
+                      className="shrink-0 p-1 rounded-full overlay-icon-surface overlay-text-interactive"
+                      style={appearance.iconStyle}
+                    >
+                      <Sparkles className="w-3 h-3" />
+                    </div>
+                    <div className="min-w-0 flex-1 flex items-baseline gap-2">
+                      <div className="text-[9px] font-semibold uppercase tracking-wide overlay-text-muted shrink-0">
+                        Autopilot
+                      </div>
+                      <div className="text-[12px] leading-tight font-medium overlay-text-primary truncate">
+                        {copilotQuality.label}
+                      </div>
+                      {copilotQuality.reason && (
+                        <div className="hidden sm:block truncate text-[10px] overlay-text-muted">
+                          {copilotQuality.reason}
+                        </div>
+                      )}
+                    </div>
+                    <div className="shrink-0 text-[11px] font-semibold overlay-text-interactive">
+                      {copilotQualityScore}%
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {copilotSuggestion?.suggestion && !isConversationFocusMode && (
+                <div
+                  className={`mx-4 mt-2 mb-1 rounded-[12px] border no-drag ${subtleSurfaceClass} ${
+                    hasActionConversation ? "px-2.5 py-2" : "px-3.5 py-3"
+                  }`}
+                  style={appearance.subtleStyle}
+                >
+                  {hasActionConversation ? (
+                    <div className="flex items-center gap-2 min-w-0">
+                      <div
+                        className="shrink-0 p-1 rounded-full overlay-icon-surface overlay-text-interactive"
+                        style={appearance.iconStyle}
+                      >
+                        <Lightbulb className="w-3 h-3" />
+                      </div>
+                      <div className="min-w-0 flex-1 flex items-center gap-2">
+                        <div className="text-[9px] font-semibold uppercase tracking-wide overlay-text-muted shrink-0">
+                          {copilotSuggestion.suggestionType ===
+                            "vibe_interview_say_this" ||
+                          copilotSuggestion.suggestionType ===
+                            "interview_answer"
+                            ? "Say"
+                            : "Ask"}
+                        </div>
+                        <div
+                          className="min-w-0 flex-1 truncate text-[12px] leading-tight overlay-text-primary"
+                          title={copilotSuggestion.suggestion}
+                        >
+                          {copilotSuggestion.suggestion}
+                        </div>
+                      </div>
+                      <div className="shrink-0 flex items-center gap-1">
+                        <button
+                          onClick={() => handleCopilotFeedback("useful")}
+                          className={`p-1 rounded-md border transition-all active:scale-95 ${quickActionClass}`}
+                          title="Useful"
+                          style={appearance.chipStyle}
+                        >
+                          <ThumbsUp className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => handleCopilotFeedback("too_early")}
+                          className={`p-1 rounded-md border transition-all active:scale-95 ${quickActionClass}`}
+                          title="Too early"
+                          style={appearance.chipStyle}
+                        >
+                          <Clock3 className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => handleCopilotFeedback("not_relevant")}
+                          className={`p-1 rounded-md border transition-all active:scale-95 ${quickActionClass}`}
+                          title="Not relevant"
+                          style={appearance.chipStyle}
+                        >
+                          <CircleSlash className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => setCopilotSuggestion(null)}
+                          className="p-1 rounded-md overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive"
+                          title="Dismiss"
+                          style={appearance.iconStyle}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
                   <div className="flex items-start gap-2.5">
                     <div
                       className="mt-0.5 shrink-0 p-1.5 rounded-full overlay-icon-surface overlay-text-interactive"
@@ -3372,7 +3848,10 @@ Provide only the answer, nothing else.`;
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2 mb-1.5">
                         <div className="text-[10px] font-semibold uppercase tracking-wide overlay-text-muted">
-                          Suggested question
+                          {copilotSuggestion.suggestionType === "vibe_interview_say_this" ||
+                          copilotSuggestion.suggestionType === "interview_answer"
+                            ? "Say this"
+                            : "Suggested question"}
                         </div>
                         <button
                           onClick={() => setCopilotSuggestion(null)}
@@ -3424,27 +3903,26 @@ Provide only the answer, nothing else.`;
                       </div>
                     </div>
                   </div>
+                  )}
                 </div>
               )}
 
-              {/* Meeting Dashboard — live health panel */}
-              {meetingHealth && (
-                <div className="mx-4 mt-1 mb-2 no-drag">
-                  <MeetingDashboard
-                    health={meetingHealth}
-                    risks={meetingRisks}
-                    isLightTheme={isLightTheme}
-                  />
                 </div>
-              )}
+
+                <div
+                  ref={scrollContainerRef}
+                  data-testid="natively-chat-scroll"
+                  className="min-h-0 h-full max-h-full overflow-y-auto overscroll-contain no-drag px-4 py-2 scroll-pb-28"
+                  style={{
+                    scrollbarWidth: "thin",
+                    overscrollBehaviorY: "contain",
+                    WebkitOverflowScrolling: "touch",
+                  }}
+                >
 
               {/* Chat History - Only show if there are messages OR active states */}
               {(messages.length > 0 || isManualRecording || isProcessing) && (
-                <div
-                  ref={scrollContainerRef}
-                  className="flex-1 overflow-y-auto p-4 space-y-3 max-h-[clamp(300px,35vh,450px)] no-drag"
-                  style={{ scrollbarWidth: "none" }}
-                >
+                <div className="min-h-full flex flex-col justify-start gap-1.5 pb-3 no-drag">
                   {messages.map((msg) => (
                     <div
                       key={msg.id}
@@ -3452,7 +3930,7 @@ Provide only the answer, nothing else.`;
                     >
                       <div
                         className={`
-                      ${msg.role === "user" ? "max-w-[72.25%] px-[13.6px] py-[10.2px]" : "max-w-[85%] px-4 py-3"} text-[14px] leading-relaxed relative group whitespace-pre-wrap
+                      ${msg.role === "user" ? "max-w-[72.25%] px-[13.6px] py-[10.2px]" : "w-full max-w-full px-0 py-1"} text-[14px] leading-relaxed relative group whitespace-pre-wrap
                       ${
                         msg.role === "user"
                           ? isLightTheme
@@ -3580,108 +4058,27 @@ Provide only the answer, nothing else.`;
                   <div ref={messagesEndRef} />
                 </div>
               )}
-
-              {/* Quick Actions - Minimal & Clean */}
-              <div
-                className={`flex flex-nowrap justify-center items-center gap-1.5 px-4 pb-3 overflow-x-hidden ${rollingTranscript && showTranscript ? "pt-1" : "pt-3"}`}
-              >
-                <button
-                  onClick={handleWhatToSay}
-                  disabled={!!actionLoading.whatToSay}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
-                  style={appearance.chipStyle}
-                >
-                  {actionLoading.whatToSay ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                  ) : (
-                    <Pencil className="w-3 h-3 opacity-70" />
-                  )}
-                  <span>What to answer?</span>
-                </button>
-                <button
-                  onClick={handleClarify}
-                  disabled={!!actionLoading.clarify}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
-                  style={appearance.chipStyle}
-                >
-                  {actionLoading.clarify ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                  ) : (
-                    <MessageSquare className="w-3 h-3 opacity-70" />
-                  )}
-                  <span>Clarify</span>
-                </button>
-                <button
-                  onClick={
-                    actionButtonMode === "brainstorm"
-                      ? handleBrainstorm
-                      : handleRecap
-                  }
-                  disabled={
-                    actionButtonMode === "brainstorm"
-                      ? !!actionLoading.brainstorm
-                      : !!actionLoading.recap
-                  }
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
-                  style={appearance.chipStyle}
-                >
-                  {actionButtonMode === "brainstorm" ? (
-                    <>
-                      {actionLoading.brainstorm ? (
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                      ) : (
-                        <Lightbulb className="w-3 h-3 opacity-70" />
-                      )}{" "}
-                      <span>Brainstorm</span>
-                    </>
-                  ) : (
-                    <>
-                      {actionLoading.recap ? (
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                      ) : (
-                        <RefreshCw className="w-3 h-3 opacity-70" />
-                      )}{" "}
-                      <span>Recap</span>
-                    </>
-                  )}
-                </button>
-                <button
-                  onClick={handleFollowUpQuestions}
-                  disabled={!!actionLoading.followUpQuestions}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
-                  style={appearance.chipStyle}
-                >
-                  {actionLoading.followUpQuestions ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                  ) : (
-                    <HelpCircle className="w-3 h-3 opacity-70" />
-                  )}
-                  <span>Follow Up Question</span>
-                </button>
-                <button
-                  onClick={handleAnswerNow}
-                  className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium transition-all active:scale-95 duration-200 interaction-base interaction-press min-w-[74px] whitespace-nowrap shrink-0 ${
-                    isManualRecording
-                      ? "bg-red-500/10 text-red-400 ring-1 ring-red-500/20"
-                      : "overlay-chip-surface overlay-text-interactive hover:text-emerald-500 hover:bg-emerald-500/10"
-                  }`}
-                  style={isManualRecording ? undefined : appearance.chipStyle}
-                >
-                  {isManualRecording ? (
-                    <>
-                      <div className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
-                      Stop
-                    </>
-                  ) : (
-                    <>
-                      <Zap className="w-3 h-3 opacity-70" /> Answer
-                    </>
-                  )}
-                </button>
+              {messages.length === 0 && !isManualRecording && !isProcessing && (
+                <div className="h-full min-h-[72px]" />
+              )}
               </div>
 
+              <div
+                data-testid="natively-command-dock"
+                className="sticky bottom-0 shrink-0 min-h-[88px] max-h-[148px] overflow-y-auto border-t no-drag overlay-shell-surface z-20"
+                style={{
+                  ...appearance.shellStyle,
+                  borderLeft: "none",
+                  borderRight: "none",
+                  borderBottom: "none",
+                  borderRadius: 0,
+                  boxShadow: isLightTheme
+                    ? "0 -12px 24px rgba(148, 163, 184, 0.14)"
+                    : "0 -12px 24px rgba(2, 6, 23, 0.28)",
+                }}
+              >
               {/* Input Area */}
-              <div className="p-3 pt-0">
+              <div className="px-3 py-2">
                 {/* Latent Context Preview (Attached Screenshot) */}
                 {attachedContext.length > 0 && (
                   <div
@@ -3736,19 +4133,37 @@ Provide only the answer, nothing else.`;
                 <div className="relative group">
                   <input
                     ref={textInputRef}
+                    data-testid="natively-command-input"
                     type="text"
                     value={inputValue}
                     onChange={(e) => setInputValue(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && handleManualSubmit()}
-                    className={`w-full border focus:ring-1 rounded-xl pl-3 pr-10 py-2.5 focus:outline-none transition-all duration-200 ease-sculpted text-[13px] leading-relaxed ${inputClass}`}
+                    className={`w-full border focus:ring-1 rounded-xl pl-3 pr-10 py-2 focus:outline-none transition-all duration-200 ease-sculpted text-[13px] leading-relaxed ${inputClass}`}
                     style={appearance.inputStyle}
                   />
+                  <button
+                    data-testid="natively-command-send"
+                    onClick={handleManualSubmit}
+                    disabled={!inputValue.trim()}
+                    className={`absolute right-1.5 top-1/2 -translate-y-1/2 w-7 h-7 rounded-lg flex items-center justify-center transition-all active:scale-95 ${
+                      inputValue.trim()
+                        ? "bg-[#007AFF] text-white shadow-sm shadow-blue-500/20 hover:bg-[#0071E3]"
+                        : "overlay-icon-surface overlay-text-muted cursor-not-allowed"
+                    }`}
+                    style={inputValue.trim() ? undefined : appearance.iconStyle}
+                    title="Send"
+                  >
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
 
                   {/* Custom Rich Placeholder */}
                   {!inputValue && (
-                    <div className="absolute left-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5 pointer-events-none text-[13px] overlay-text-muted">
-                      <span>Ask anything on screen or conversation, or</span>
-                      <div className="flex items-center gap-1 opacity-80">
+                    <div className="absolute inset-x-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5 pointer-events-none text-[13px] overlay-text-muted overflow-hidden">
+                      <span className="truncate">
+                        Ask anything on screen or conversation
+                      </span>
+                      <div className="hidden sm:flex items-center gap-1 opacity-80 shrink-0">
+                        <span className="text-[11px] opacity-70">or</span>
                         {(
                           shortcuts.selectiveScreenshot || ["⌘", "Shift", "H"]
                         ).map((key, i) => (
@@ -3763,19 +4178,138 @@ Provide only the answer, nothing else.`;
                           </React.Fragment>
                         ))}
                       </div>
-                      <span>for selective screenshot</span>
                     </div>
                   )}
 
-                  {!inputValue && (
-                    <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1 pointer-events-none opacity-20">
-                      <span className="text-[10px]">↵</span>
-                    </div>
+                </div>
+
+                {/* Quick Actions - pinned below input so typing never disappears */}
+                <div
+                  className="flex flex-nowrap justify-start items-center gap-1.5 overflow-x-auto mt-1.5 pb-0.5"
+                  style={{ scrollbarWidth: "none" }}
+                >
+                  <button
+                    data-testid="natively-action-what-to-answer"
+                    onClick={handleWhatToSay}
+                    disabled={!!actionLoading.whatToSay}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10.5px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
+                    style={appearance.chipStyle}
+                  >
+                    {actionLoading.whatToSay ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <Pencil className="w-3 h-3 opacity-70" />
+                    )}
+                    <span>What to say</span>
+                  </button>
+                  <button
+                    data-testid="natively-action-clarify"
+                    onClick={handleClarify}
+                    disabled={!!actionLoading.clarify}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10.5px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
+                    style={appearance.chipStyle}
+                  >
+                    {actionLoading.clarify ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <MessageSquare className="w-3 h-3 opacity-70" />
+                    )}
+                    <span>Clarify</span>
+                  </button>
+                  <button
+                    data-testid="natively-action-dynamic"
+                    onClick={
+                      actionButtonMode === "brainstorm"
+                        ? handleBrainstorm
+                        : handleRecap
+                    }
+                    disabled={
+                      actionButtonMode === "brainstorm"
+                        ? !!actionLoading.brainstorm
+                        : !!actionLoading.recap
+                    }
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10.5px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
+                    style={appearance.chipStyle}
+                  >
+                    {actionButtonMode === "brainstorm" ? (
+                      <>
+                        {actionLoading.brainstorm ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Lightbulb className="w-3 h-3 opacity-70" />
+                        )}{" "}
+                        <span>Brainstorm</span>
+                      </>
+                    ) : (
+                      <>
+                        {actionLoading.recap ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-3 h-3 opacity-70" />
+                        )}{" "}
+                        <span>Recap</span>
+                      </>
+                    )}
+                  </button>
+                  <button
+                    data-testid="natively-action-follow-up"
+                    onClick={handleFollowUpQuestions}
+                    disabled={!!actionLoading.followUpQuestions}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10.5px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
+                    style={appearance.chipStyle}
+                  >
+                    {actionLoading.followUpQuestions ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <HelpCircle className="w-3 h-3 opacity-70" />
+                    )}
+                    <span>Follow Up</span>
+                  </button>
+                  <button
+                    data-testid="natively-action-answer"
+                    onClick={handleAnswerNow}
+                    className={`flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10.5px] font-medium transition-all active:scale-95 duration-200 interaction-base interaction-press min-w-[68px] whitespace-nowrap shrink-0 ${
+                      isManualRecording
+                        ? "bg-red-500/10 text-red-400 ring-1 ring-red-500/20"
+                        : "overlay-chip-surface overlay-text-interactive hover:text-emerald-500 hover:bg-emerald-500/10"
+                    }`}
+                    style={isManualRecording ? undefined : appearance.chipStyle}
+                  >
+                    {isManualRecording ? (
+                      <>
+                        <div className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+                        Stop
+                      </>
+                    ) : (
+                      <>
+                        <Zap className="w-3 h-3 opacity-70" /> Answer
+                      </>
+                    )}
+                  </button>
+                  {isConversationFocusMode && (
+                    <button
+                      data-testid="natively-action-tools"
+                      onClick={() => setIsCommandToolsOpen((prev) => !prev)}
+                      className={`flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10.5px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
+                      style={appearance.chipStyle}
+                      title={
+                        isCommandToolsOpen
+                          ? "Hide model and settings controls"
+                          : "Show model and settings controls"
+                      }
+                    >
+                      <SlidersHorizontal className="w-3 h-3 opacity-70" />
+                      <span>{isCommandToolsOpen ? "Hide tools" : "Tools"}</span>
+                    </button>
                   )}
                 </div>
 
                 {/* Bottom Row */}
-                <div className="flex items-center justify-between mt-3 px-0.5">
+                {(!isConversationFocusMode || isCommandToolsOpen) && (
+                <div
+                  data-testid="natively-secondary-controls"
+                  className="flex items-center justify-between mt-1.5 px-0.5"
+                >
                   <div className="flex items-center gap-1.5">
                     <ModelSelector
                       currentModel={currentModel}
@@ -3985,23 +4519,10 @@ Provide only the answer, nothing else.`;
                     </div>
                   </div>
 
-                  <button
-                    onClick={handleManualSubmit}
-                    disabled={!inputValue.trim()}
-                    className={`
-                                    w-7 h-7 rounded-full flex items-center justify-center
-                                    interaction-base interaction-press
-                                    ${
-                                      inputValue.trim()
-                                        ? "bg-[#007AFF] text-white shadow-lg shadow-blue-500/20 hover:bg-[#0071E3]"
-                                        : "overlay-icon-surface overlay-text-muted cursor-not-allowed"
-                                    }
-                                `}
-                    style={inputValue.trim() ? undefined : appearance.iconStyle}
-                  >
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
                 </div>
+                )}
+              </div>
+              </div>
               </div>
             </div>
           </motion.div>

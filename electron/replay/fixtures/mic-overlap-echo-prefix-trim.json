@@ -1,0 +1,43 @@
+{
+  "name": "Mic Overlap Echo Prefix Trim",
+  "description": "A real-world microphone utterance can start with speaker echo and end with the user's actual intervention. The router must keep ME while trimming the echoed prefix.",
+  "thresholds": {
+    "maxFalseMeRate": 0,
+    "maxDuplicateRate": 0,
+    "minInterlocutorFinals": 1,
+    "maxSuppressedExpectedMe": 0,
+    "maxUnsuppressedExpectedSuppressed": 0,
+    "maxRoleMismatches": 0
+  },
+  "events": [
+    {
+      "channel": "system",
+      "provider": "parakeet",
+      "speaker": "locuteur_1",
+      "text": "Je vais obtenir le lien pour pouvoir me faire payer quand les gens visitent l'annonce a travers mon lien.",
+      "timestamp": 1778489430000,
+      "final": true,
+      "confidence": 0.95,
+      "diarized": true,
+      "speakerId": 1,
+      "expectedRole": "speaker_1"
+    },
+    {
+      "channel": "mic",
+      "provider": "parakeet",
+      "speaker": "user",
+      "text": "Je vais obtenir le lien pour pouvoir me faire payer quand les gens visitent l'annonce a travers mon lien. Je comprends, c'est parce que lorsque le marchand pousse son annonce et que le client vient pour la publier, il faut clarifier qui gagne quoi.",
+      "timestamp": 1778489432400,
+      "final": true,
+      "confidence": 0.94,
+      "diarized": false,
+      "systemAudioActive": true,
+      "micGateActive": true,
+      "expectedRole": "me",
+      "expectedTextIncludes": "Je comprends, c'est parce que",
+      "expectedTextExcludes": [
+        "Je vais obtenir le lien"
+      ]
+    }
+  ]
+}
