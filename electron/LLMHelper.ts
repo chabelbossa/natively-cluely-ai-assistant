@@ -932,6 +932,7 @@ CRITICAL RULES:
     // Load active mode system prompt and context block (reference files + custom context)
     let activeModePrompt = '';
     let modeContextBlock = '';
+    let projectContextBlock = '';
     try {
       const { ModesManager } = require('./services/ModesManager');
       const modesMgr = ModesManager.getInstance();
@@ -940,11 +941,21 @@ CRITICAL RULES:
     } catch (_modeErr: any) {
       console.warn('[LLMHelper] ModesManager load failed in generateSuggestion (non-fatal):', _modeErr?.message);
     }
+    try {
+      const { ProjectContextManager } = require('./services/ProjectContextManager');
+      projectContextBlock = ProjectContextManager.getInstance().buildActiveProjectContextBlock() ?? '';
+    } catch (_projErr: any) {
+      console.warn('[LLMHelper] ProjectContextManager load failed in generateSuggestion (non-fatal):', _projErr?.message);
+    }
 
-    // Prepend mode context block (reference files, custom context) to the transcript context
-    const enrichedContext = modeContextBlock
-      ? `${modeContextBlock}\n\n${context}`
-      : context;
+    // Prepend mode context block (reference files, custom context) to the transcript context.
+    // The active project block is also prepended so the LLM has the project's stack, last
+    // commit, user description, auto-summary, and any selected topics in scope.
+    const contextPieces: string[] = [];
+    if (modeContextBlock) contextPieces.push(modeContextBlock);
+    if (projectContextBlock) contextPieces.push(projectContextBlock);
+    contextPieces.push(context);
+    const enrichedContext = contextPieces.join('\n\n');
 
     // Inject custom user notes into every suggestion when present
     const customNotesBlock = this.customNotes?.trim()
@@ -2507,6 +2518,32 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       }
     } catch (_modeErr: any) {
       console.warn('[LLMHelper] ModesManager injection failed (non-fatal):', _modeErr?.message);
+    }
+
+    // ============================================================
+    // ACTIVE PROJECT INJECTION (Context block — orthogonal to Mode)
+    // ============================================================
+    // The [ACTIVE PROJECT] block carries the project's stack, last commit,
+    // user description, auto-summary, and any selected topics. It is
+    // appended after the mode block so the LLM sees the persona context
+    // first, then the project context. Hard-capped by the manager to 3 KB.
+    try {
+      const { ProjectContextManager } = require('./services/ProjectContextManager');
+      const projectContextBlock = ProjectContextManager.getInstance().buildActiveProjectContextBlock();
+      if (projectContextBlock) {
+        const COMBINED_CTX_CAP = 60_000;
+        const existingLen = context?.length ?? 0;
+        if (existingLen + projectContextBlock.length > COMBINED_CTX_CAP) {
+          const available = Math.max(0, COMBINED_CTX_CAP - existingLen);
+          const trimmed = available > 0 ? projectContextBlock.slice(0, available) + '\n[...project context truncated]' : '';
+          console.warn(`[LLMHelper] Combined context exceeded ${COMBINED_CTX_CAP} chars — project context trimmed`);
+          if (trimmed) context = context ? `${trimmed}\n\n${context}` : trimmed;
+        } else {
+          context = context ? `${projectContextBlock}\n\n${context}` : projectContextBlock;
+        }
+      }
+    } catch (_projErr: any) {
+      console.warn('[LLMHelper] ProjectContextManager injection failed (non-fatal):', _projErr?.message);
     }
 
     // Preparation

@@ -591,6 +591,58 @@ export class DatabaseManager {
             this.db.pragma('user_version = 14');
         }
 
+        // Version 14 → 15: Add project_contexts, project_context_topics,
+        // and project_context_indexed_files tables. These back the
+        // "Project Context" feature: a user can pick a local project
+        // (PharmaOps, WaChap, Locapay, ...) as the active context for
+        // a meeting, and its summary + topics get injected into the LLM
+        // system prompt.
+        if (version < 15) {
+            console.log('[DatabaseManager] Applying migration v14 → v15: Add project_context tables');
+            this.db.exec(`
+                CREATE TABLE IF NOT EXISTS project_contexts (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    root_path TEXT NOT NULL UNIQUE,
+                    stack TEXT,
+                    description TEXT NOT NULL DEFAULT '',
+                    auto_summary TEXT NOT NULL DEFAULT '',
+                    git_remote TEXT,
+                    last_commit TEXT,
+                    last_scanned_at TEXT,
+                    is_active INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS project_context_topics (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(project_id) REFERENCES project_contexts(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS project_context_indexed_files (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT '',
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    indexed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(project_id) REFERENCES project_contexts(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_project_topics
+                    ON project_context_topics(project_id, sort_order);
+                CREATE INDEX IF NOT EXISTS idx_project_files
+                    ON project_context_indexed_files(project_id);
+            `);
+            this.db.pragma('user_version = 15');
+        }
+
         console.log('[DatabaseManager] Migrations completed.');
     }
 
@@ -789,6 +841,258 @@ export class DatabaseManager {
             this.db.prepare('DELETE FROM mode_note_sections WHERE mode_id = ?').run(modeId);
         } catch (e) {
             console.error('[DatabaseManager] deleteAllNoteSections failed:', e);
+        }
+    }
+
+    // ============================================
+    // Project Contexts CRUD
+    // ============================================
+
+    public getProjectContexts(): any[] {
+        if (!this.db) return [];
+        try {
+            return this.db.prepare(
+                'SELECT * FROM project_contexts ORDER BY name COLLATE NOCASE ASC'
+            ).all();
+        } catch (e) {
+            console.error('[DatabaseManager] getProjectContexts failed:', e);
+            return [];
+        }
+    }
+
+    public getProjectContextById(id: string): any | null {
+        if (!this.db) return null;
+        try {
+            return this.db.prepare(
+                'SELECT * FROM project_contexts WHERE id = ?'
+            ).get(id) ?? null;
+        } catch (e) {
+            console.error('[DatabaseManager] getProjectContextById failed:', e);
+            return null;
+        }
+    }
+
+    public getProjectContextByPath(rootPath: string): any | null {
+        if (!this.db) return null;
+        try {
+            return this.db.prepare(
+                'SELECT * FROM project_contexts WHERE root_path = ?'
+            ).get(rootPath) ?? null;
+        } catch (e) {
+            console.error('[DatabaseManager] getProjectContextByPath failed:', e);
+            return null;
+        }
+    }
+
+    public getActiveProjectContext(): any | null {
+        if (!this.db) return null;
+        try {
+            return this.db.prepare(
+                'SELECT * FROM project_contexts WHERE is_active = 1 LIMIT 1'
+            ).get() ?? null;
+        } catch (e) {
+            console.error('[DatabaseManager] getActiveProjectContext failed:', e);
+            return null;
+        }
+    }
+
+    public upsertProjectContext(project: {
+        id: string;
+        name: string;
+        rootPath: string;
+        stack: string | null;
+        description: string;
+        autoSummary: string;
+        gitRemote: string | null;
+        lastCommit: string | null;
+        isActive?: boolean;
+    }): void {
+        if (!this.db) return;
+        try {
+            this.db.prepare(`
+                INSERT INTO project_contexts
+                    (id, name, root_path, stack, description, auto_summary,
+                     git_remote, last_commit, last_scanned_at, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+                ON CONFLICT(root_path) DO UPDATE SET
+                    name = excluded.name,
+                    stack = excluded.stack,
+                    description = excluded.description,
+                    auto_summary = excluded.auto_summary,
+                    git_remote = excluded.git_remote,
+                    last_commit = excluded.last_commit,
+                    last_scanned_at = excluded.last_scanned_at
+            `).run(
+                project.id,
+                project.name,
+                project.rootPath,
+                project.stack,
+                project.description,
+                project.autoSummary,
+                project.gitRemote,
+                project.lastCommit,
+                project.isActive ? 1 : 0,
+            );
+        } catch (e) {
+            console.error('[DatabaseManager] upsertProjectContext failed:', e);
+        }
+    }
+
+    public updateProjectContext(id: string, updates: {
+        name?: string;
+        description?: string;
+        stack?: string | null;
+        autoSummary?: string;
+    }): void {
+        if (!this.db) return;
+        try {
+            if (updates.name !== undefined) {
+                this.db.prepare('UPDATE project_contexts SET name = ? WHERE id = ?').run(updates.name, id);
+            }
+            if (updates.description !== undefined) {
+                this.db.prepare('UPDATE project_contexts SET description = ? WHERE id = ?').run(updates.description, id);
+            }
+            if (updates.stack !== undefined) {
+                this.db.prepare('UPDATE project_contexts SET stack = ? WHERE id = ?').run(updates.stack, id);
+            }
+            if (updates.autoSummary !== undefined) {
+                this.db.prepare('UPDATE project_contexts SET auto_summary = ? WHERE id = ?').run(updates.autoSummary, id);
+            }
+        } catch (e) {
+            console.error('[DatabaseManager] updateProjectContext failed:', e);
+        }
+    }
+
+    public deleteProjectContext(id: string): void {
+        if (!this.db) return;
+        try {
+            // ON DELETE CASCADE on topics and indexed_files handles children.
+            this.db.prepare('DELETE FROM project_contexts WHERE id = ?').run(id);
+        } catch (e) {
+            console.error('[DatabaseManager] deleteProjectContext failed:', e);
+        }
+    }
+
+    public setActiveProjectContext(id: string | null): void {
+        if (!this.db) return;
+        try {
+            const txn = this.db.transaction(() => {
+                this.db!.prepare('UPDATE project_contexts SET is_active = 0').run();
+                if (id) {
+                    const result = this.db!.prepare(
+                        'UPDATE project_contexts SET is_active = 1 WHERE id = ?'
+                    ).run(id);
+                    if (result.changes === 0) {
+                        console.warn(`[DatabaseManager] setActiveProjectContext: no project with id "${id}" — cleared`);
+                    }
+                }
+            });
+            txn();
+        } catch (e) {
+            console.error('[DatabaseManager] setActiveProjectContext failed:', e);
+        }
+    }
+
+    // ── Topics ───────────────────────────────────────────────────
+
+    public getProjectTopics(projectId: string): any[] {
+        if (!this.db) return [];
+        try {
+            return this.db.prepare(
+                'SELECT * FROM project_context_topics WHERE project_id = ? ORDER BY sort_order ASC, created_at ASC'
+            ).all(projectId);
+        } catch (e) {
+            console.error('[DatabaseManager] getProjectTopics failed:', e);
+            return [];
+        }
+    }
+
+    public addProjectTopic(topic: {
+        id: string;
+        projectId: string;
+        title: string;
+        description: string;
+        sortOrder: number;
+    }): void {
+        if (!this.db) return;
+        try {
+            this.db.prepare(`
+                INSERT INTO project_context_topics
+                    (id, project_id, title, description, sort_order)
+                VALUES (?, ?, ?, ?, ?)
+            `).run(topic.id, topic.projectId, topic.title, topic.description, topic.sortOrder);
+        } catch (e) {
+            console.error('[DatabaseManager] addProjectTopic failed:', e);
+        }
+    }
+
+    public updateProjectTopic(id: string, updates: {
+        title?: string;
+        description?: string;
+        sortOrder?: number;
+    }): void {
+        if (!this.db) return;
+        try {
+            if (updates.title !== undefined) {
+                this.db.prepare('UPDATE project_context_topics SET title = ? WHERE id = ?').run(updates.title, id);
+            }
+            if (updates.description !== undefined) {
+                this.db.prepare('UPDATE project_context_topics SET description = ? WHERE id = ?').run(updates.description, id);
+            }
+            if (updates.sortOrder !== undefined) {
+                this.db.prepare('UPDATE project_context_topics SET sort_order = ? WHERE id = ?').run(updates.sortOrder, id);
+            }
+        } catch (e) {
+            console.error('[DatabaseManager] updateProjectTopic failed:', e);
+        }
+    }
+
+    public deleteProjectTopic(id: string): void {
+        if (!this.db) return;
+        try {
+            this.db.prepare('DELETE FROM project_context_topics WHERE id = ?').run(id);
+        } catch (e) {
+            console.error('[DatabaseManager] deleteProjectTopic failed:', e);
+        }
+    }
+
+    // ── Indexed Files ───────────────────────────────────────────
+
+    public getProjectIndexedFiles(projectId: string): any[] {
+        if (!this.db) return [];
+        try {
+            return this.db.prepare(
+                'SELECT * FROM project_context_indexed_files WHERE project_id = ? ORDER BY file_name ASC'
+            ).all(projectId);
+        } catch (e) {
+            console.error('[DatabaseManager] getProjectIndexedFiles failed:', e);
+            return [];
+        }
+    }
+
+    public replaceProjectIndexedFiles(projectId: string, files: Array<{
+        id: string;
+        filePath: string;
+        fileName: string;
+        content: string;
+        sizeBytes: number;
+    }>): void {
+        if (!this.db) return;
+        try {
+            const txn = this.db.transaction(() => {
+                this.db!.prepare('DELETE FROM project_context_indexed_files WHERE project_id = ?').run(projectId);
+                const insert = this.db!.prepare(`
+                    INSERT INTO project_context_indexed_files
+                        (id, project_id, file_path, file_name, content, size_bytes, indexed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                `);
+                for (const f of files) {
+                    insert.run(f.id, projectId, f.filePath, f.fileName, f.content, f.sizeBytes);
+                }
+            });
+            txn();
+        } catch (e) {
+            console.error('[DatabaseManager] replaceProjectIndexedFiles failed:', e);
         }
     }
 

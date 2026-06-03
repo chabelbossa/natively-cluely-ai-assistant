@@ -4566,4 +4566,177 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { success: false, error: e.message };
     }
   });
+
+  // ==========================================
+  // Project Context — local project selection for meetings
+  // ==========================================
+
+  const projectContextBroadcast = (payload: { id: string | null; name: string | null }) => {
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed()) {
+        win.webContents.send("project-context:changed", payload);
+      }
+    });
+  };
+
+  safeHandle("project-context:scan", async (_: any, opts?: { roots?: string[] }) => {
+    try {
+      const { ProjectContextManager } = require("./services/ProjectContextManager");
+      const mgr = ProjectContextManager.getInstance();
+      const projects = await mgr.scanAndIngest({ roots: opts?.roots });
+      return { success: true, projects };
+    } catch (e: any) {
+      console.error("[IPC] project-context:scan error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("project-context:get-all", async () => {
+    try {
+      const { ProjectContextManager } = require("./services/ProjectContextManager");
+      return ProjectContextManager.getInstance().getAll();
+    } catch (e: any) {
+      console.error("[IPC] project-context:get-all error:", e);
+      return [];
+    }
+  });
+
+  safeHandle("project-context:get-active", async () => {
+    try {
+      const { ProjectContextManager } = require("./services/ProjectContextManager");
+      return ProjectContextManager.getInstance().getActive();
+    } catch (e: any) {
+      console.error("[IPC] project-context:get-active error:", e);
+      return null;
+    }
+  });
+
+  safeHandle("project-context:get", async (_: any, id: string) => {
+    try {
+      const { ProjectContextManager } = require("./services/ProjectContextManager");
+      return ProjectContextManager.getInstance().getById(id);
+    } catch (e: any) {
+      console.error("[IPC] project-context:get error:", e);
+      return null;
+    }
+  });
+
+  safeHandle(
+    "project-context:update",
+    async (
+      _: any,
+      id: string,
+      updates: { name?: string; description?: string; stack?: string | null; autoSummary?: string },
+    ) => {
+      try {
+        const { ProjectContextManager } = require("./services/ProjectContextManager");
+        ProjectContextManager.getInstance().update(id, updates);
+        const updated = ProjectContextManager.getInstance().getById(id);
+        return { success: true, project: updated };
+      } catch (e: any) {
+        console.error("[IPC] project-context:update error:", e);
+        return { success: false, error: e.message };
+      }
+    },
+  );
+
+  safeHandle("project-context:set-active", async (_: any, id: string | null) => {
+    try {
+      const { ProjectContextManager } = require("./services/ProjectContextManager");
+      ProjectContextManager.getInstance().setActive(id);
+      const active = id ? ProjectContextManager.getInstance().getById(id) : null;
+      projectContextBroadcast({ id, name: active?.name ?? null });
+      return { success: true };
+    } catch (e: any) {
+      console.error("[IPC] project-context:set-active error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("project-context:delete", async (_: any, id: string) => {
+    try {
+      const { ProjectContextManager } = require("./services/ProjectContextManager");
+      ProjectContextManager.getInstance().delete(id);
+      return { success: true };
+    } catch (e: any) {
+      console.error("[IPC] project-context:delete error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("project-context:rescan", async (_: any, rootPath: string) => {
+    try {
+      const { ProjectContextManager } = require("./services/ProjectContextManager");
+      const updated = await ProjectContextManager.getInstance().rescanOne(rootPath);
+      return { success: true, project: updated };
+    } catch (e: any) {
+      console.error("[IPC] project-context:rescan error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  // ── Topics ────────────────────────────────────────────────────
+
+  safeHandle("project-context:get-topics", async (_: any, projectId: string) => {
+    try {
+      const { ProjectContextManager } = require("./services/ProjectContextManager");
+      return ProjectContextManager.getInstance().getTopics(projectId);
+    } catch (e: any) {
+      console.error("[IPC] project-context:get-topics error:", e);
+      return [];
+    }
+  });
+
+  safeHandle(
+    "project-context:add-topic",
+    async (_: any, projectId: string, title: string, description: string) => {
+      try {
+        const { ProjectContextManager } = require("./services/ProjectContextManager");
+        const topic = ProjectContextManager.getInstance().addTopic(projectId, title, description);
+        return { success: true, topic };
+      } catch (e: any) {
+        console.error("[IPC] project-context:add-topic error:", e);
+        return { success: false, error: e.message };
+      }
+    },
+  );
+
+  safeHandle(
+    "project-context:update-topic",
+    async (
+      _: any,
+      id: string,
+      updates: { title?: string; description?: string; sortOrder?: number },
+    ) => {
+      try {
+        const { ProjectContextManager } = require("./services/ProjectContextManager");
+        ProjectContextManager.getInstance().updateTopic(id, updates);
+        return { success: true };
+      } catch (e: any) {
+        console.error("[IPC] project-context:update-topic error:", e);
+        return { success: false, error: e.message };
+      }
+    },
+  );
+
+  safeHandle("project-context:delete-topic", async (_: any, id: string) => {
+    try {
+      const { ProjectContextManager } = require("./services/ProjectContextManager");
+      ProjectContextManager.getInstance().deleteTopic(id);
+      return { success: true };
+    } catch (e: any) {
+      console.error("[IPC] project-context:delete-topic error:", e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  safeHandle("project-context:default-roots", async () => {
+    try {
+      const { DEFAULT_SCAN_ROOTS } = require("../types/projectContext");
+      return DEFAULT_SCAN_ROOTS;
+    } catch (e: any) {
+      console.error("[IPC] project-context:default-roots error:", e);
+      return [];
+    }
+  });
 }

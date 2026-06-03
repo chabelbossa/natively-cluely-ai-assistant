@@ -269,6 +269,34 @@ export interface ElectronAPI {
   modesDeleteNoteSection: (id: string) => Promise<{ success: boolean; error?: string }>
   modesRemoveAllNoteSections: (modeId: string) => Promise<{ success: boolean; error?: string }>
 
+  // Project Context
+  projectContextGetAll: () => Promise<Array<{
+    id: string; name: string; rootPath: string; stack: string | null;
+    description: string; autoSummary: string; gitRemote: string | null;
+    lastCommit: string | null; lastScannedAt: string; isActive: boolean; createdAt: string;
+  }>>
+  projectContextGet: (id: string) => Promise<{
+    id: string; name: string; rootPath: string; stack: string | null;
+    description: string; autoSummary: string; gitRemote: string | null;
+    lastCommit: string | null; lastScannedAt: string; isActive: boolean; createdAt: string;
+  } | null>
+  projectContextGetActive: () => Promise<{
+    id: string; name: string; rootPath: string; stack: string | null;
+    description: string; autoSummary: string; gitRemote: string | null;
+    lastCommit: string | null; lastScannedAt: string; isActive: boolean; createdAt: string;
+  } | null>
+  projectContextScan: (opts?: { roots?: string[] }) => Promise<{ success: boolean; projects?: any[]; error?: string }>
+  projectContextRescan: (rootPath: string) => Promise<{ success: boolean; project?: any; error?: string }>
+  projectContextUpdate: (id: string, updates: { name?: string; description?: string; stack?: string | null; autoSummary?: string }) => Promise<{ success: boolean; project?: any; error?: string }>
+  projectContextSetActive: (id: string | null) => Promise<{ success: boolean; error?: string }>
+  projectContextDelete: (id: string) => Promise<{ success: boolean; error?: string }>
+  projectContextDefaultRoots: () => Promise<string[]>
+  projectContextGetTopics: (projectId: string) => Promise<Array<{ id: string; projectId: string; title: string; description: string; sortOrder: number; createdAt: string }>>
+  projectContextAddTopic: (projectId: string, title: string, description: string) => Promise<{ success: boolean; topic?: any; error?: string }>
+  projectContextUpdateTopic: (id: string, updates: { title?: string; description?: string; sortOrder?: number }) => Promise<{ success: boolean; error?: string }>
+  projectContextDeleteTopic: (id: string) => Promise<{ success: boolean; error?: string }>
+  onProjectContextChanged: (callback: (data: { id: string | null; name: string | null }) => void) => () => void
+
   // Meeting Lifecycle
   startMeeting: (metadata?: StartMeetingMetadata) => Promise<{ success: boolean; error?: string }>
   getMeetingBrief: () => Promise<MeetingBriefData | null>

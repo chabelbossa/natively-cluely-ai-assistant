@@ -44,6 +44,9 @@ import {
   Loader2,
   Globe,
 } from "lucide-react";
+import { ProjectBadge } from "./ProjectBadge";
+import { ProjectPicker } from "./ProjectPicker";
+import { useProjectContext } from "../hooks/useProjectContext";
 import { motion, AnimatePresence } from "framer-motion";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import {
@@ -594,6 +597,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const [aiLang, setAiLang] = useState<string>("auto");
   const modeRef = useRef<HTMLDivElement>(null);
   const langRef = useRef<HTMLDivElement>(null);
+
+  // Active project context (orthogonal to mode). Selecting a project
+  // makes its metadata (stack, description, topics) available to the LLM.
+  const { active: activeProject, setActive: setActiveProject } = useProjectContext();
+  const [isProjectPickerOpen, setIsProjectPickerOpen] = useState(false);
 
   useEffect(() => {
     // Load initial active mode name
@@ -4322,6 +4330,13 @@ Provide only the answer, nothing else.`;
                       style={appearance.dividerStyle}
                     />
 
+                    {/* Project Context Badge */}
+                    <ProjectBadge
+                      active={activeProject}
+                      onOpen={() => setIsProjectPickerOpen(true)}
+                      onClear={() => setActiveProject(null)}
+                    />
+
                     {/* Mode Selector */}
                     <div className="relative" ref={modeRef}>
                       <button
@@ -4528,6 +4543,15 @@ Provide only the answer, nothing else.`;
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Project Picker modal */}
+      <ProjectPicker
+        isOpen={isProjectPickerOpen}
+        onClose={() => setIsProjectPickerOpen(false)}
+        onManageInSettings={() => {
+          window.electronAPI?.openSettingsTab?.('project-context');
+        }}
+      />
     </div>
   );
 };

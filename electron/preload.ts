@@ -406,6 +406,22 @@ interface ElectronAPI {
   modesDeleteNoteSection: (id: string) => Promise<{ success: boolean; error?: string }>;
   modesRemoveAllNoteSections: (modeId: string) => Promise<{ success: boolean; error?: string }>;
 
+  // Project Context API
+  projectContextGetAll: () => Promise<Array<{ id: string; name: string; rootPath: string; stack: string | null; description: string; autoSummary: string; gitRemote: string | null; lastCommit: string | null; lastScannedAt: string; isActive: boolean; createdAt: string; topicCount?: number; fileCount?: number }>>;
+  projectContextGet: (id: string) => Promise<{ id: string; name: string; rootPath: string; stack: string | null; description: string; autoSummary: string; gitRemote: string | null; lastCommit: string | null; lastScannedAt: string; isActive: boolean; createdAt: string } | null>;
+  projectContextGetActive: () => Promise<{ id: string; name: string; rootPath: string; stack: string | null; description: string; autoSummary: string; gitRemote: string | null; lastCommit: string | null; lastScannedAt: string; isActive: boolean; createdAt: string } | null>;
+  projectContextScan: (opts?: { roots?: string[] }) => Promise<{ success: boolean; projects?: any[]; error?: string }>;
+  projectContextRescan: (rootPath: string) => Promise<{ success: boolean; project?: any; error?: string }>;
+  projectContextUpdate: (id: string, updates: { name?: string; description?: string; stack?: string | null; autoSummary?: string }) => Promise<{ success: boolean; project?: any; error?: string }>;
+  projectContextSetActive: (id: string | null) => Promise<{ success: boolean; error?: string }>;
+  projectContextDelete: (id: string) => Promise<{ success: boolean; error?: string }>;
+  projectContextDefaultRoots: () => Promise<string[]>;
+  projectContextGetTopics: (projectId: string) => Promise<Array<{ id: string; projectId: string; title: string; description: string; sortOrder: number; createdAt: string }>>;
+  projectContextAddTopic: (projectId: string, title: string, description: string) => Promise<{ success: boolean; topic?: any; error?: string }>;
+  projectContextUpdateTopic: (id: string, updates: { title?: string; description?: string; sortOrder?: number }) => Promise<{ success: boolean; error?: string }>;
+  projectContextDeleteTopic: (id: string) => Promise<{ success: boolean; error?: string }>;
+  onProjectContextChanged: (callback: (data: { id: string | null; name: string | null }) => void) => () => void;
+
   // Codex Multi-Auth OAuth
   codexAuthStart: () => Promise<{ success: boolean; account?: any; error?: string }>;
   codexAuthAddAccount: (alias: string) => Promise<{ success: boolean; account?: any; error?: string }>;
@@ -1350,6 +1366,26 @@ contextBridge.exposeInMainWorld("electronAPI", {
   modesUpdateNoteSection: (id: string, updates: { title?: string; description?: string }) => ipcRenderer.invoke('modes:update-note-section', id, updates),
   modesDeleteNoteSection: (id: string) => ipcRenderer.invoke('modes:delete-note-section', id),
   modesRemoveAllNoteSections: (modeId: string) => ipcRenderer.invoke('modes:remove-all-note-sections', modeId),
+
+  // Project Context API
+  projectContextGetAll: () => ipcRenderer.invoke('project-context:get-all'),
+  projectContextGet: (id: string) => ipcRenderer.invoke('project-context:get', id),
+  projectContextGetActive: () => ipcRenderer.invoke('project-context:get-active'),
+  projectContextScan: (opts?: { roots?: string[] }) => ipcRenderer.invoke('project-context:scan', opts),
+  projectContextRescan: (rootPath: string) => ipcRenderer.invoke('project-context:rescan', rootPath),
+  projectContextUpdate: (id: string, updates: { name?: string; description?: string; stack?: string | null; autoSummary?: string }) => ipcRenderer.invoke('project-context:update', id, updates),
+  projectContextSetActive: (id: string | null) => ipcRenderer.invoke('project-context:set-active', id),
+  projectContextDelete: (id: string) => ipcRenderer.invoke('project-context:delete', id),
+  projectContextDefaultRoots: () => ipcRenderer.invoke('project-context:default-roots'),
+  projectContextGetTopics: (projectId: string) => ipcRenderer.invoke('project-context:get-topics', projectId),
+  projectContextAddTopic: (projectId: string, title: string, description: string) => ipcRenderer.invoke('project-context:add-topic', projectId, title, description),
+  projectContextUpdateTopic: (id: string, updates: { title?: string; description?: string; sortOrder?: number }) => ipcRenderer.invoke('project-context:update-topic', id, updates),
+  projectContextDeleteTopic: (id: string) => ipcRenderer.invoke('project-context:delete-topic', id),
+  onProjectContextChanged: (callback: (data: { id: string | null; name: string | null }) => void) => {
+    const sub = (_: any, data: { id: string | null; name: string | null }) => callback(data);
+    ipcRenderer.on('project-context:changed', sub);
+    return () => { ipcRenderer.removeListener('project-context:changed', sub); };
+  },
 
   // Codex Multi-Auth OAuth
   codexAuthStart: () => ipcRenderer.invoke("codex-auth-start"),
