@@ -84,9 +84,12 @@ export const MODE_TEMPLATES: Array<{
 // Default note sections seeded when a mode is created from a template
 export const TEMPLATE_NOTE_SECTIONS: Record<ModeTemplateType, Array<{ title: string; description: string }>> = {
     general: [
-        { title: 'Summary',      description: 'High-level summary of the conversation.' },
-        { title: 'Action items', description: 'Tasks and follow-ups identified.' },
-        { title: 'Key points',   description: 'Important points discussed.' },
+        { title: 'Résumé exécutif',  description: 'Outcome, scope, and the few points someone needs first after the meeting.' },
+        { title: 'Décisions',        description: 'Concrete decisions, retained directions, and explicit tradeoffs.' },
+        { title: "Plan d'action",    description: 'Specific next steps, owners when known, and follow-up work.' },
+        { title: 'Questions ouvertes', description: 'Unresolved product, business, technical, or implementation questions.' },
+        { title: 'Risques',          description: 'Risks, blockers, fragile assumptions, or operational concerns.' },
+        { title: 'Points à vérifier', description: 'Numbers, facts, provider behavior, or source details that must be checked.' },
     ],
     'looking-for-work': [
         { title: 'Follow-up actions',      description: 'Next interview steps or additional materials I said I would send if applicable.' },

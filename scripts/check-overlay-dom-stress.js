@@ -20,6 +20,7 @@ const requiredTestIds = [
   "natively-live-transcript-panel",
   "natively-chat-scroll",
   "natively-command-dock",
+  "natively-attached-screenshot-strip",
   "natively-command-input",
   "natively-command-send",
   "natively-action-what-to-answer",
@@ -175,6 +176,25 @@ const html = `<!doctype html>
       .dock-inner {
         padding: 8px 12px;
       }
+      [data-testid="natively-attached-screenshot-strip"] {
+        min-height: 34px;
+        margin-bottom: 6px;
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        border-radius: 8px;
+        padding: 6px 8px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        overflow: hidden;
+        background: rgba(248, 250, 252, 0.74);
+      }
+      [data-testid="natively-attached-screenshot-strip"] img {
+        width: 42px;
+        height: 28px;
+        object-fit: cover;
+        border-radius: 6px;
+        flex: 0 0 auto;
+      }
       .input-wrap {
         position: relative;
       }
@@ -253,12 +273,17 @@ const html = `<!doctype html>
               <p>Quel exemple concret peut-on demander sans rompre le rythme ?</p>
               <p>Quelle décision doit être verrouillée avant de passer au sujet suivant ?</p>
             </div>
-          </main>
-          <footer data-testid="natively-command-dock">
-            <div class="dock-inner">
-              <div class="input-wrap">
+              </main>
+              <footer data-testid="natively-command-dock">
+                <div class="dock-inner">
+                  <div data-testid="natively-attached-screenshot-strip">
+                    <span>1 screenshot attached</span>
+                    <img alt="Screenshot 1" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='84' height='56'%3E%3Crect width='84' height='56' fill='%23007aff'/%3E%3C/svg%3E" />
+                    <button aria-label="Remove all screenshots">×</button>
+                  </div>
+                  <div class="input-wrap">
                 <input data-testid="natively-command-input" value="" placeholder="Ask anything on screen or conversation" />
-                <button data-testid="natively-command-send">→</button>
+                <button data-testid="natively-command-send" aria-disabled="false">→</button>
               </div>
               <div class="actions">
                 <button data-testid="natively-action-what-to-answer">What to say</button>
@@ -357,8 +382,24 @@ async function assertInViewport(page, testId) {
       `conversation content should start near the top, got ${firstMessageOffset}px`,
     );
 
+    await assertInViewport(page, "natively-attached-screenshot-strip");
+    const screenshotStrip = await box(page, "natively-attached-screenshot-strip");
+    assert(
+      screenshotStrip.bounds.height <= 44,
+      `attached screenshot strip is too tall: ${screenshotStrip.bounds.height}px`,
+    );
+
     const inputBefore = await assertInViewport(page, "natively-command-input");
     await assertInViewport(page, "natively-command-send");
+    const sendDisabled = await page
+      .getByTestId("natively-command-send")
+      .evaluate((element) => element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true");
+    assert(!sendDisabled, "send button must stay active with an attached screenshot");
+    await page.getByTestId("natively-command-input").focus();
+    const focusedInput = await page
+      .getByTestId("natively-command-input")
+      .evaluate((element) => document.activeElement === element);
+    assert(focusedInput, "command input must remain focusable with an attached screenshot");
     await assertInViewport(page, "natively-action-what-to-answer");
     await assertInViewport(page, "natively-action-clarify");
     await assertInViewport(page, "natively-action-follow-up");
@@ -388,6 +429,9 @@ async function assertInViewport(page, testId) {
       "input should remain pinned while chat scrolls",
     );
 
+    await page.getByTestId("natively-attached-screenshot-strip").evaluate((element) => {
+      element.remove();
+    });
     await page.getByTestId("natively-action-tools").click();
     await assertInViewport(page, "natively-secondary-controls");
     await assertInViewport(page, "natively-command-input");

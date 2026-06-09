@@ -11,6 +11,7 @@ export type QueryIntent =
     | 'speaker_lookup'    // "What did X say?"
     | 'action_items'      // "What are my action items?"
     | 'summary'           // "Summarize..."
+    | 'concept_explanation' // "What is X based on what was said?"
     | 'open_question';    // Default fallback
 
 export interface RetrievalOptions {
@@ -57,8 +58,8 @@ export class RAGRetriever {
     ): Promise<RetrievedContext> {
         const {
             meetingId,
-            maxTokens = 1500,
-            topK = 8,
+            maxTokens = 4200,
+            topK = 12,
             recencyWeight = 0.3,
             intent: overrideIntent
         } = options;
@@ -86,8 +87,8 @@ export class RAGRetriever {
         const providerName = this.embeddingPipeline.getActiveProviderName();
         let candidates = await this.vectorStore.searchSimilar(queryEmbedding, {
             meetingId,
-            limit: topK * 2,
-            minSimilarity: 0.25,
+            limit: topK * 3,
+            minSimilarity: meetingId ? 0.18 : 0.25,
             providerName
         });
 
@@ -110,6 +111,9 @@ export class RAGRetriever {
         }));
 
         candidates.sort((a, b) => (b.finalScore || 0) - (a.finalScore || 0));
+        if (meetingId) {
+            candidates = this.expandMeetingCandidates(candidates, meetingId);
+        }
 
         // 4. Select top-K within token budget
         const selected: ScoredChunk[] = [];
@@ -269,6 +273,36 @@ export class RAGRetriever {
         return (relevanceWeight * chunk.similarity) + (recencyWeight * recencyScore);
     }
 
+    private expandMeetingCandidates(candidates: ScoredChunk[], meetingId: string): ScoredChunk[] {
+        if (candidates.length === 0) return candidates;
+
+        const neighborChunks = this.vectorStore.getNeighborChunks(
+            meetingId,
+            candidates.slice(0, 8).map(chunk => chunk.chunkIndex),
+            1
+        );
+
+        const byIndex = new Map<number, ScoredChunk>();
+        for (const candidate of candidates) {
+            byIndex.set(candidate.chunkIndex, candidate);
+        }
+
+        for (const chunk of neighborChunks) {
+            if (byIndex.has(chunk.chunkIndex)) continue;
+            const nearestSeed = candidates
+                .slice(0, 8)
+                .sort((a, b) => Math.abs(a.chunkIndex - chunk.chunkIndex) - Math.abs(b.chunkIndex - chunk.chunkIndex))[0];
+            const inheritedSimilarity = Math.max(0.18, (nearestSeed?.similarity ?? 0.2) * 0.92);
+            byIndex.set(chunk.chunkIndex, {
+                ...chunk,
+                similarity: inheritedSimilarity,
+                finalScore: nearestSeed?.finalScore ? nearestSeed.finalScore * 0.92 : inheritedSimilarity,
+            });
+        }
+
+        return [...byIndex.values()].sort((a, b) => (b.finalScore || 0) - (a.finalScore || 0));
+    }
+
     /**
      * Detect query intent for biasing retrieval strategy
      * Uses regex patterns, not LLM - fast and deterministic
@@ -304,6 +338,11 @@ export class RAGRetriever {
         if (/\b(summar|overview|recap|highlights?|key points?)\b/.test(lower) ||
             /^(summarize|recap|give me a summary)/.test(lower)) {
             return 'summary';
+        }
+
+        // Concept/explanation patterns, including French meeting Q&A phrasing.
+        if (/\b(c'est quoi|c est quoi|qu'est ce que|qu est ce que|explique|expliquer|definition|définition|definis|définis|que signifie|d'apres|d après|selon ce qui est dit|what is|explain|define|meaning of|hierachique|hierarchique|hiérarchique)\b/i.test(lower)) {
+            return 'concept_explanation';
         }
 
         return 'open_question';

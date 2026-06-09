@@ -23,6 +23,15 @@ export interface MeetingContextPacket {
     canonicalRole?: string;
     qualityFlags?: string[];
   }>;
+  retrievedEvidenceSegments: Array<{
+    role: string;
+    speaker?: string;
+    text: string;
+    timestamp: number;
+    canonicalRole?: string;
+    qualityFlags?: string[];
+    score: number;
+  }>;
   rejectedSegments: Array<{
     role: string;
     speaker?: string;
@@ -51,6 +60,7 @@ interface BuildPacketInput {
   liveStateBlock?: string;
   fallback?: string;
   additionalItems?: ContextItem[];
+  preferLocalUserTarget?: boolean;
 }
 
 const MAX_PACKET_CONTEXT = 24_000;
@@ -95,13 +105,29 @@ export class MeetingContextPacketBuilder {
     const contextTrustScore = this.computeContextTrustScore(actionItems, reliableInterlocutorItems);
     const interlocutorFocus = this.deriveInterlocutorFocus(reliableInterlocutorItems);
     const localUserFocus = this.deriveLocalUserFocus(actionItems);
-    const actionTarget = this.pickActionTarget(hasReliableInterlocutor, interlocutorFocus, localUserFocus);
+    const actionTarget = this.pickActionTarget(
+      hasReliableInterlocutor,
+      interlocutorFocus,
+      localUserFocus,
+      input.preferLocalUserTarget === true,
+    );
     const supportingInterlocutorItems = this.pickSupportingInterlocutorItems(reliableInterlocutorItems, interlocutorFocus);
+    const retrievedEvidenceItems = this.findRelevantPriorEvidence(actionItems, actionTarget);
+    const retrievedEvidenceSegments = retrievedEvidenceItems.map((item) => ({
+      role: item.role,
+      speaker: item.speaker,
+      text: item.text,
+      timestamp: item.timestamp,
+      canonicalRole: item.canonicalRole,
+      qualityFlags: item.qualityFlags,
+      score: (item as ContextItem & { evidenceScore?: number }).evidenceScore || 0,
+    }));
     const languageHint = this.detectLanguage([
       actionTarget.text,
       interlocutorFocus.text,
       localUserFocus.text,
       ...actionItems.map((item) => item.text),
+      ...retrievedEvidenceItems.map((item) => item.text),
     ].join(' '));
     const rejectedSegments = this.buildRejectedSegments(input.lastSeconds, actionItems);
     const systemPrompt = this.buildSystemPrompt(
@@ -122,6 +148,7 @@ export class MeetingContextPacketBuilder {
       this.buildInterlocutorFocusBlock(interlocutorFocus),
       this.buildLocalUserFocusBlock(localUserFocus),
       this.buildActionTargetBlock(input.action, actionTarget, supportingInterlocutorItems),
+      this.buildRelevantEvidenceBlock(retrievedEvidenceItems, actionTarget),
       this.buildQualityBlock(hasReliableInterlocutor, languageHint, actionItems, rejectedSegments, interlocutorFocus, actionTarget),
       this.buildSelectedTranscriptBlock(actionItems),
       input.transcriptContext?.trim()
@@ -147,6 +174,8 @@ export class MeetingContextPacketBuilder {
       `packet_target_confidence=${actionTarget.confidence.toFixed(2)}`,
       `packet_target_text=${this.truncate(actionTarget.text, 220) || 'none'}`,
       `packet_supporting_interlocutor_segments=${supportingInterlocutorItems.length}`,
+      `packet_retrieved_evidence_segments=${retrievedEvidenceSegments.length}`,
+      `packet_retrieved_evidence_terms=${this.extractEvidenceKeywords(`${actionTarget.text} ${interlocutorFocus.text} ${localUserFocus.text}`).slice(0, 12).join(',') || 'none'}`,
       `packet_selected_segments=${selectedSegments.length}`,
       `packet_rejected_segments=${rejectedSegments.length}`,
       `packet_transcript_repair_changed=${repairResult.changed}`,
@@ -168,6 +197,7 @@ export class MeetingContextPacketBuilder {
       systemPrompt,
       diagnostics,
       selectedSegments,
+      retrievedEvidenceSegments,
       rejectedSegments,
     };
   }
@@ -243,6 +273,8 @@ Action target: ${actionTarget.kind} (${actionTarget.confidence.toFixed(2)}) ${ac
 - If Action target source=local_user, answer the local user's mic question directly and explicitly avoid relabeling it as Speaker.
 - Meeting brief is background only; never claim it was said in the meeting unless it appears in transcript.
 - Before answering, first use the repaired transcript and reconstructed sentence boundaries. Do not answer from raw cut fragments when a repaired version is available.
+- Use RELEVANT PRIOR MEETING EVIDENCE as supporting memory when the latest fragment refers back to an earlier topic, number, account, tool, proxy, subscription, bug, or decision.
+- Prefer a synthesis across current focus + prior evidence over an answer based on one isolated transcript slice.
 - If ASR visibly split a sentence, infer only missing connective grammar from nearby words; never invent new facts that are absent from the repaired transcript.
 - If reliable interlocutor context is missing, say that briefly and do not invent facts.
 - If reliable context exists but is noisy, use the strongest concrete interlocutor facts and ask/answer around the next practical step.
@@ -562,6 +594,114 @@ instruction=This came from ME/LOCAL MIC. It is allowed as a direct user request,
     ].join('\n');
   }
 
+  private buildRelevantEvidenceBlock(items: ContextItem[], actionTarget: MeetingActionTarget): string {
+    if (items.length === 0) return '';
+
+    const targetText = actionTarget.text ? this.truncate(actionTarget.text, 360) : 'none';
+    return [
+      '[RELEVANT PRIOR MEETING EVIDENCE]',
+      `target=${targetText}`,
+      'instruction=Use these older but related turns as evidence when the current focus is underspecified. Do not quote them blindly; synthesize them with the current target.',
+      ...items.slice(-8).map((item, index) => {
+        const score = ((item as ContextItem & { evidenceScore?: number }).evidenceScore || 0).toFixed(2);
+        return `evidence_${index + 1} score=${score} ${this.formatLabel(item)}: ${this.truncate(item.text, 520)}`;
+      }),
+      '[/RELEVANT PRIOR MEETING EVIDENCE]',
+    ].join('\n');
+  }
+
+  private findRelevantPriorEvidence(selectedItems: ContextItem[], actionTarget: MeetingActionTarget): ContextItem[] {
+    const selectedKeys = new Set(selectedItems.map((item) => this.key(item.role, item.text, item.timestamp)));
+    const selectedText = selectedItems
+      .slice(-10)
+      .map((item) => item.text)
+      .join(' ');
+    const queryText = [
+      actionTarget.text,
+      selectedText,
+    ].filter(Boolean).join(' ');
+    const keywords = this.extractEvidenceKeywords(queryText);
+    if (keywords.length < 2) return [];
+
+    const newestSelected = selectedItems.reduce((max, item) => Math.max(max, item.timestamp || 0), 0);
+    const oldestSelected = selectedItems.reduce((min, item) => Math.min(min, item.timestamp || Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
+
+    return this.session.getFullTranscript()
+      .filter((segment) => segment.final && segment.text.trim().length > 0)
+      .map((segment): ContextItem => ({
+        role: ((segment as any).role || this.mapRole(segment.canonicalRole, segment.speaker)) as ContextItem['role'],
+        speaker: segment.speaker,
+        text: this.cleanSpeechUnit(segment.text),
+        timestamp: segment.timestamp,
+        confidence: segment.confidence,
+        source: 'recorded',
+        canonicalRole: segment.canonicalRole,
+        qualityFlags: segment.qualityFlags,
+      }))
+      .filter((item) => item.text && !selectedKeys.has(this.key(item.role, item.text, item.timestamp)))
+      .map((item) => ({
+        item,
+        score: this.scoreEvidenceCandidate(item, keywords, newestSelected, oldestSelected),
+      }))
+      .filter((entry) => entry.score >= 2.2)
+      .sort((a, b) => b.score - a.score || a.item.timestamp - b.item.timestamp)
+      .slice(0, 8)
+      .sort((a, b) => a.item.timestamp - b.item.timestamp)
+      .map(({ item, score }) => ({
+        ...item,
+        evidenceScore: score,
+      } as ContextItem & { evidenceScore: number }));
+  }
+
+  private scoreEvidenceCandidate(
+    item: ContextItem,
+    keywords: string[],
+    newestSelected: number,
+    oldestSelected: number,
+  ): number {
+    const normalized = this.normalize(item.text);
+    const itemWords = new Set(normalized.split(' ').filter(Boolean));
+    const overlap = keywords.filter((keyword) => itemWords.has(keyword) || normalized.includes(keyword));
+    if (overlap.length === 0) return 0;
+
+    let score = overlap.length * 1.25;
+    if (item.role === 'interviewer' && this.isReliableInterlocutorItem(item)) score += 1.1;
+    if (item.role === 'user') score += 0.25;
+    if (/\d/.test(item.text)) score += 0.55;
+    if (/\b(ip|proxy|proxies|webshare|abonnement|compte|connecte|connecté|recording|typing|wachap|android|flux|ia|pierre)\b/i.test(normalized)) {
+      score += 0.9;
+    }
+
+    const distanceFromWindow = newestSelected > 0
+      ? Math.min(Math.abs(newestSelected - item.timestamp), Math.abs(oldestSelected - item.timestamp))
+      : 0;
+    if (distanceFromWindow > 0) {
+      score += Math.max(0, 1.2 - distanceFromWindow / (12 * 60 * 1000));
+    }
+
+    const flags = new Set(item.qualityFlags || []);
+    if (flags.has('stt_low_quality') || flags.has('possible_overlap')) score -= 0.6;
+    if (flags.has('late_flush_duplicate') || flags.has('unstable_fragment')) score -= 2.5;
+
+    return score;
+  }
+
+  private extractEvidenceKeywords(text: string): string[] {
+    const stopWords = new Set([
+      'avec', 'pour', 'dans', 'donc', 'alors', 'comme', 'cette', 'cela', 'quand', 'vous', 'nous', 'leur', 'leurs', 'notre', 'votre',
+      'that', 'this', 'with', 'from', 'your', 'their', 'quoi', 'quel', 'quelle', 'quels', 'quelles', 'comment', 'pourquoi',
+      'est', 'sont', 'etre', 'être', 'avoir', 'faire', 'fait', 'dire', 'peux', 'peut', 'pouvez', 'veux', 'vouloir',
+      'une', 'des', 'les', 'sur', 'par', 'plus', 'moins', 'très', 'tres', 'bien', 'ok', 'okay', 'donc',
+    ]);
+
+    return [...new Set(this.normalize(text)
+      .split(' ')
+      .map((word) => word.trim())
+      .filter((word) => word.length >= 3 || /^\d+$/.test(word))
+      .filter((word) => !stopWords.has(word))
+      .slice(0, 48))];
+  }
+
   private formatLabel(item: ContextItem): string {
     if (item.role === 'assistant') return '[ASSISTANT_PREVIOUS]';
     if (item.role === 'user') return '[ME_LOCAL_MIC]';
@@ -738,7 +878,12 @@ instruction=This came from ME/LOCAL MIC. It is allowed as a direct user request,
     hasReliableInterlocutor: boolean,
     interlocutorFocus: InterlocutorFocus,
     localUserFocus: InterlocutorFocus,
+    preferLocalUserTarget = false,
   ): MeetingActionTarget {
+    if (preferLocalUserTarget && localUserFocus.kind !== 'none' && localUserFocus.text.trim().length > 0) {
+      return { ...localUserFocus, source: 'local_user' };
+    }
+
     if (hasReliableInterlocutor && interlocutorFocus.kind !== 'none') {
       return { ...interlocutorFocus, source: 'interlocutor' };
     }
@@ -777,7 +922,7 @@ instruction=This came from ME/LOCAL MIC. It is allowed as a direct user request,
     const candidates = this.splitIntoSpeechUnits(text);
     for (let i = candidates.length - 1; i >= 0; i--) {
       const candidate = candidates[i];
-      if (this.looksLikeImplicitRequest(candidate)) {
+      if (this.looksLikeImplicitRequest(candidate) && !this.looksLikeExplanatoryFutureStatement(candidate)) {
         return this.cleanSpeechUnit(candidate);
       }
     }
@@ -1034,8 +1179,14 @@ instruction=This came from ME/LOCAL MIC. It is allowed as a direct user request,
     const normalized = this.normalize(text);
     const words = normalized.split(' ').filter(Boolean);
     if (words.length < 4 || words.length > 110) return false;
-    return /\b(il faut|tu dois|vous devez|on doit|on va|tu vas|vous allez|j aimerais que|je veux que|prochaine etape|prochaine étape|priorite|priorité|deadline|a faire|à faire|we need|you need|please|next step|priority)\b/i.test(normalized) ||
+    return /\b(il faut|tu dois|vous devez|on doit|j aimerais que|je veux que|prochaine etape|prochaine étape|priorite|priorité|deadline|a faire|à faire|we need|you need|please|next step|priority)\b/i.test(normalized) ||
       /\b(tu|vous)\s+(commence|commencer|regarde|regarder|verifie|vérifie|prepare|prépare|envoie|envoyer|confirme|confirmer)\b/i.test(normalized);
+  }
+
+  private looksLikeExplanatoryFutureStatement(text: string): boolean {
+    const normalized = this.normalize(text);
+    return /\b(tu vas|vous allez|on va)\s+(peut etre|peut être|pouvoir|mod[eé]liser|voir|dire|avoir|faire)\b/i.test(normalized) ||
+      /\bavec\s+le\s+processus\s*$/i.test(normalized);
   }
 
   private detectLanguage(text: string): MeetingContextPacket['languageHint'] {

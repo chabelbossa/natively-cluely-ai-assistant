@@ -177,6 +177,7 @@ import { warmupIntentClassifier } from "./llm"
 import { TranscriptRouter } from "./transcript/TranscriptRouter"
 import type { RawTranscriptSegment } from "./transcript/types"
 import { MeetingBriefManager } from "./meeting/MeetingBriefManager"
+import { MeetingSummaryAgent } from "./meeting/MeetingSummaryAgent"
 import { MeetingDebugRecorder } from "./diagnostics/MeetingDebugRecorder"
 import { AudioDebugRecorder, type AudioDebugTrackName } from "./diagnostics/AudioDebugRecorder"
 
@@ -2394,7 +2395,7 @@ export class AppState {
             });
             this._systemAudioSilentWarningActive = true;
             this.broadcast('system-audio-silent', {
-              message: 'System audio is silent — Speaker separation will not work. Check Screen Recording permission in System Settings.',
+              message: 'System audio is silent — other participants will not be captured until system audio is restored. Check Screen Recording permission and the output device.',
               rms: level.rms,
               peak: level.peak,
             });
@@ -2732,6 +2733,36 @@ export class AppState {
 
   public getIntelligenceManager(): IntelligenceManager {
     return this.intelligenceManager
+  }
+
+  public async regenerateMeetingSummary(
+    meetingId: string,
+    options: { useAudioReplay?: boolean } = {},
+  ): Promise<{ success: boolean; detailedSummary?: any; error?: string }> {
+    try {
+      const meeting = DatabaseManager.getInstance().getMeetingDetails(meetingId);
+      if (!meeting) {
+        return { success: false, error: 'Meeting not found' };
+      }
+
+      const agent = new MeetingSummaryAgent(this.processingHelper.getLLMHelper());
+      const detailedSummary = await agent.generateFromMeeting(meeting, {
+        useAudioReplay: options.useAudioReplay === true,
+      });
+      const saved = DatabaseManager.getInstance().updateMeetingSummary(meetingId, detailedSummary);
+      if (!saved) {
+        return { success: false, error: 'Failed to save regenerated summary' };
+      }
+
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (!win.isDestroyed()) win.webContents.send('meetings-updated');
+      });
+
+      return { success: true, detailedSummary };
+    } catch (error: any) {
+      console.error('[AppState] Failed to regenerate meeting summary:', error);
+      return { success: false, error: error?.message || String(error) };
+    }
   }
 
   public getThemeManager(): ThemeManager {

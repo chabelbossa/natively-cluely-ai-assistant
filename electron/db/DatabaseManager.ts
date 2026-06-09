@@ -19,6 +19,12 @@ export interface Meeting {
         actionItemsTitle?: string;
         keyPointsTitle?: string;
         sections?: Array<{ title: string; bullets: string[] }>;
+        quality?: {
+            score: number;
+            checks: string[];
+            sourcesUsed: string[];
+            needsReview: boolean;
+        };
     };
     transcript?: Array<{
         speaker: string;
@@ -491,9 +497,12 @@ export class DatabaseManager {
                 : null;
             if (modeExists && !existing) {
                 const defaultSections = [
-                    { title: 'Summary',      description: 'High-level summary of the conversation.' },
-                    { title: 'Action items', description: 'Tasks and follow-ups identified.' },
-                    { title: 'Key points',   description: 'Important points discussed.' },
+                    { title: 'Résumé exécutif',  description: 'Outcome, scope, and the few points someone needs first after the meeting.' },
+                    { title: 'Décisions',        description: 'Concrete decisions, retained directions, and explicit tradeoffs.' },
+                    { title: "Plan d'action",    description: 'Specific next steps, owners when known, and follow-up work.' },
+                    { title: 'Questions ouvertes', description: 'Unresolved product, business, technical, or implementation questions.' },
+                    { title: 'Risques',          description: 'Risks, blockers, fragile assumptions, or operational concerns.' },
+                    { title: 'Points à vérifier', description: 'Numbers, facts, provider behavior, or source details that must be checked.' },
                 ];
                 const insertSection = this.db.prepare(
                     'INSERT OR IGNORE INTO mode_note_sections (id, mode_id, title, description, sort_order) VALUES (?, ?, ?, ?, ?)'
@@ -510,9 +519,12 @@ export class DatabaseManager {
             console.log('[DatabaseManager] Applying migration v12 → v13: Backfill missing mode note sections');
             const BACKFILL_SECTIONS: Record<string, Array<{ title: string; description: string }>> = {
                 general: [
-                    { title: 'Summary',      description: 'High-level summary of the conversation.' },
-                    { title: 'Action items', description: 'Tasks and follow-ups identified.' },
-                    { title: 'Key points',   description: 'Important points discussed.' },
+                    { title: 'Résumé exécutif',  description: 'Outcome, scope, and the few points someone needs first after the meeting.' },
+                    { title: 'Décisions',        description: 'Concrete decisions, retained directions, and explicit tradeoffs.' },
+                    { title: "Plan d'action",    description: 'Specific next steps, owners when known, and follow-up work.' },
+                    { title: 'Questions ouvertes', description: 'Unresolved product, business, technical, or implementation questions.' },
+                    { title: 'Risques',          description: 'Risks, blockers, fragile assumptions, or operational concerns.' },
+                    { title: 'Points à vérifier', description: 'Numbers, facts, provider behavior, or source details that must be checked.' },
                 ],
                 'looking-for-work': [
                     { title: 'Follow-up actions',       description: 'Next interview steps or additional materials I said I would send if applicable.' },
@@ -641,6 +653,37 @@ export class DatabaseManager {
                     ON project_context_indexed_files(project_id);
             `);
             this.db.pragma('user_version = 15');
+        }
+
+        // Version 15 → 16: Replace the default General note template with
+        // agentic post-meeting sections. Only generic old sections are replaced;
+        // user-customized General modes are left intact.
+        if (version < 16) {
+            console.log('[DatabaseManager] Applying migration v15 → v16: Upgrade General meeting note sections');
+            const agenticGeneralSections = [
+                { title: 'Résumé exécutif',  description: 'Outcome, scope, and the few points someone needs first after the meeting.' },
+                { title: 'Décisions',        description: 'Concrete decisions, retained directions, and explicit tradeoffs.' },
+                { title: "Plan d'action",    description: 'Specific next steps, owners when known, and follow-up work.' },
+                { title: 'Questions ouvertes', description: 'Unresolved product, business, technical, or implementation questions.' },
+                { title: 'Risques',          description: 'Risks, blockers, fragile assumptions, or operational concerns.' },
+                { title: 'Points à vérifier', description: 'Numbers, facts, provider behavior, or source details that must be checked.' },
+            ];
+            const generalModes = this.db.prepare('SELECT id FROM modes WHERE template_type = ?').all('general') as Array<{ id: string }>;
+            const deleteSections = this.db.prepare('DELETE FROM mode_note_sections WHERE mode_id = ?');
+            const insertSection = this.db.prepare(
+                'INSERT OR IGNORE INTO mode_note_sections (id, mode_id, title, description, sort_order) VALUES (?, ?, ?, ?, ?)'
+            );
+            for (const mode of generalModes) {
+                const existing = this.db.prepare('SELECT title FROM mode_note_sections WHERE mode_id = ? ORDER BY sort_order ASC').all(mode.id) as Array<{ title: string }>;
+                const titles = existing.map(row => row.title).join('|').toLowerCase();
+                const isOldGeneric = titles === 'summary|action items|key points' || titles === 'summary|action items|key points|';
+                if (mode.id !== 'mode_general_default' && !isOldGeneric) continue;
+                deleteSections.run(mode.id);
+                agenticGeneralSections.forEach((section, index) => {
+                    insertSection.run(`ns_agentic_general_${mode.id}_${index}`, mode.id, section.title, section.description, index);
+                });
+            }
+            this.db.pragma('user_version = 16');
         }
 
         console.log('[DatabaseManager] Migrations completed.');
@@ -1398,7 +1441,15 @@ export class DatabaseManager {
         }
     }
 
-    public updateMeetingSummary(id: string, updates: { overview?: string, actionItems?: string[], keyPoints?: string[], actionItemsTitle?: string, keyPointsTitle?: string }): boolean {
+    public updateMeetingSummary(id: string, updates: {
+        overview?: string;
+        actionItems?: string[];
+        keyPoints?: string[];
+        actionItemsTitle?: string;
+        keyPointsTitle?: string;
+        sections?: Array<{ title: string; bullets: string[] }>;
+        quality?: { score: number; checks: string[]; sourcesUsed: string[]; needsReview: boolean };
+    }): boolean {
         if (!this.db) return false;
 
         try {

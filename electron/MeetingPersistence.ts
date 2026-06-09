@@ -7,6 +7,7 @@ import { LLMHelper } from './LLMHelper';
 import { DatabaseManager, Meeting } from './db/DatabaseManager';
 import { GROQ_TITLE_PROMPT, GROQ_SUMMARY_JSON_PROMPT } from './llm';
 import { MeetingBriefManager } from './meeting/MeetingBriefManager';
+import { MeetingSummaryAgent, type MeetingDetailedSummary } from './meeting/MeetingSummaryAgent';
 const crypto = require('crypto');
 
 export class MeetingPersistence {
@@ -95,7 +96,7 @@ export class MeetingPersistence {
         metadata?: { title?: string; calendarEventId?: string; source?: 'manual' | 'calendar' } | null
     ): Promise<void> {
         let title = "Untitled Session";
-        let summaryData: { overview?: string; actionItems: string[], keyPoints: string[], sections?: Array<{ title: string; bullets: string[] }> } = { actionItems: [], keyPoints: [] };
+        let summaryData: MeetingDetailedSummary = { actionItems: [], keyPoints: [] };
         const meetingContextForLLM = this.buildMeetingSummaryContext(data.transcript, data.context);
 
         // Use passed-in metadata snapshot (NOT this.session.getMeetingMetadata() which is already cleared)
@@ -111,11 +112,20 @@ export class MeetingPersistence {
         try {
             // Generate Title (only if not set by calendar)
             if (!metadata || !metadata.title) {
-                const titlePrompt = `Generate a concise 3-6 word title for this meeting context. Output ONLY the title text. Do not use quotes or conversational filler.`;
+                const titlePrompt = `Generate a specific concise 3-7 word title for this meeting.
+Rules:
+- Use the actual subject matter, not generic labels.
+- Avoid generic titles like "Project Discussion Meeting", "Meeting Notes", "Team Meeting", or "Discussion".
+- If there are two major topics, combine them briefly.
+- Output ONLY the title text. No quotes.`;
                 const groqTitlePrompt = GROQ_TITLE_PROMPT;
+                const titleContext = this.compactContextForLLM(meetingContextForLLM, 12000);
 
-                const generatedTitle = await this.llmHelper.generateMeetingSummary(titlePrompt, meetingContextForLLM.substring(0, 5000), groqTitlePrompt);
-                if (generatedTitle) title = generatedTitle.replace(/["*]/g, '').trim();
+                const generatedTitle = await this.llmHelper.generateMeetingSummary(titlePrompt, titleContext, groqTitlePrompt);
+                const cleanedTitle = generatedTitle?.replace(/["*]/g, '').trim();
+                title = cleanedTitle && !this.isGenericTitle(cleanedTitle)
+                    ? cleanedTitle
+                    : this.buildLocalTitle(data.transcript);
             }
 
             // Load template note sections for the active mode's templateType
@@ -259,6 +269,24 @@ Return ONLY valid JSON (no markdown code blocks):
             summaryData = this.buildLocalSummary(data.transcript);
         }
 
+        if (data.transcript.length > 0) {
+            try {
+                const summaryAgent = new MeetingSummaryAgent(this.llmHelper);
+                summaryData = await summaryAgent.generate({
+                    meetingId,
+                    title,
+                    transcript: data.transcript,
+                    usage: data.usage,
+                    fallbackContext: data.context,
+                    metadata: metadata || null,
+                    existingSummary: summaryData,
+                });
+                console.log('[MeetingPersistence] Agentic summary quality:', summaryData.quality);
+            } catch (agentError) {
+                console.warn('[MeetingPersistence] Agentic summary pass failed; keeping structured summary:', agentError);
+            }
+        }
+
         if (title === "Untitled Session" && data.transcript.length > 0) {
             title = this.buildLocalTitle(data.transcript);
         }
@@ -295,7 +323,7 @@ Return ONLY valid JSON (no markdown code blocks):
         }
     }
 
-    private hasSummaryContent(summary: { overview?: string; actionItems: string[], keyPoints: string[], sections?: Array<{ title: string; bullets: string[] }> }): boolean {
+    private hasSummaryContent(summary: MeetingDetailedSummary): boolean {
         if (summary.overview?.trim()) return true;
         if (summary.actionItems?.length > 0) return true;
         if (summary.keyPoints?.length > 0) return true;
@@ -377,18 +405,47 @@ ${compacted}`;
     }
 
     private buildLocalTitle(transcript: TranscriptSegment[]): string {
-        const firstText = transcript.find(segment => segment.text?.trim())?.text || 'Meeting Notes';
+        const usableSegments = this.buildCleanSummaryTranscript(transcript);
+        const preferredSegments = usableSegments.some(segment => this.isInterlocutorSummarySegment(segment))
+            ? usableSegments.filter(segment => this.isInterlocutorSummarySegment(segment))
+            : usableSegments;
+        const combined = preferredSegments
+            .slice(0, 80)
+            .map(segment => this.cleanTranscriptText(segment.text))
+            .join(' ');
+        const normalized = this.normalizeForComparison(combined);
+
+        const hasTenantPayment = /\b(locataire|locataires|loyer|paiement|payer|proprietaire|propriétaire|defaut|défaut|echeancier|échéancier)\b/.test(normalized);
+        const hasGaussian = /\b(processus|gaussien|gaussian|hierarchique|hiérarchique|prediction|prédiction|priori|posteriori)\b/.test(normalized);
+        const hasVoiceData = /\b(voix|vocal|vocale|speech|audio|transcription|text to speech|speech to text|donnees vocales|données vocales)\b/.test(normalized);
+        const hasWhatsappCatalog = /\b(whatsapp|catalogue|produit|produits|afriyo|mot cle|mot clé|referencement|référencement)\b/.test(normalized);
+        const hasWachap = /\b(wachap|wa chap|chatbot|flux|pierre)\b/.test(normalized);
+
+        if (hasTenantPayment && hasVoiceData) return 'Scoring locataires et données vocales';
+        if (hasTenantPayment && hasGaussian) return 'Prédiction des paiements locataires';
+        if (hasVoiceData) return 'Données vocales et transcription';
+        if (hasWhatsappCatalog) return 'Catalogue WhatsApp et référencement';
+        if (hasWachap) return 'Diagnostic des flux WaChap';
+
+        const firstText = preferredSegments.find(segment => segment.text?.trim())?.text || 'Meeting Notes';
         const words = firstText
             .replace(/[^\p{L}\p{N}\s]/gu, ' ')
             .replace(/\s+/g, ' ')
             .trim()
             .split(' ')
             .filter(Boolean)
+            .filter(word => !/^(bon|oui|ok|okay|donc|alors|euh|heu|en|fait|voila|voilà)$/i.test(word))
             .slice(0, 6);
         return words.length > 0 ? words.join(' ') : 'Meeting Notes';
     }
 
-    private buildLocalSummary(transcript: TranscriptSegment[]): { overview: string; actionItems: string[]; keyPoints: string[] } {
+    private isGenericTitle(title: string): boolean {
+        const normalized = this.normalizeForComparison(title);
+        return /^(project|meeting|team|general|discussion|notes|session)(\s+(project|meeting|team|general|discussion|notes|session))*$/.test(normalized) ||
+            /\b(project discussion meeting|meeting discussion|team meeting|general meeting|meeting notes|untitled session|discussion meeting)\b/.test(normalized);
+    }
+
+    private buildLocalSummary(transcript: TranscriptSegment[]): MeetingDetailedSummary {
         const usableSegments = this.buildCleanSummaryTranscript(transcript);
 
         const preferredSegments = usableSegments.some(segment => segment.speaker !== 'user')

@@ -5,7 +5,7 @@ const { spawnSync } = require('child_process');
 const Module = require('module');
 
 const root = path.resolve(__dirname, '..');
-const args = process.argv.slice(2);
+const args = process.argv.slice(2).filter((arg) => arg !== '--');
 const fixturePaths = args.length > 0
   ? args
   : [
@@ -114,7 +114,8 @@ function inspectFile(filePath) {
       packet.hasReliableInterlocutor &&
       (
         (packet.interlocutorFocus.kind === 'topic' && isWeakTopic(packet.interlocutorFocus.text)) ||
-        (packet.interlocutorFocus.kind === 'direct_question' && isWeakDirectQuestion(packet.interlocutorFocus.text))
+        (packet.interlocutorFocus.kind === 'direct_question' && isWeakDirectQuestion(packet.interlocutorFocus.text)) ||
+        (packet.interlocutorFocus.kind === 'implicit_request' && isWeakImplicitRequest(packet.interlocutorFocus.text))
       );
 
     const failed =
@@ -170,6 +171,7 @@ function inspectSyntheticCase(testCase) {
     testCase.mustNotInclude && testCase.mustNotInclude.some((term) => normalize(packet.interlocutorFocus.text).includes(normalize(term))) ||
     testCase.contextMustInclude && !testCase.contextMustInclude.every((term) => normalize(packet.context).includes(normalize(term))) ||
     (packet.interlocutorFocus.kind === 'topic' && isWeakTopic(packet.interlocutorFocus.text))
+    || (packet.interlocutorFocus.kind === 'implicit_request' && isWeakImplicitRequest(packet.interlocutorFocus.text))
   );
 
   return {
@@ -190,6 +192,31 @@ function inspectSyntheticCase(testCase) {
 }
 
 const syntheticCases = [
+  {
+    name: 'processus hierarchique explanation is not reduced to a truncated implicit request',
+    action: 'ANSWER',
+    selectedSegments: [
+      {
+        role: 'interviewer',
+        speaker: 'speaker_3',
+        canonicalRole: 'speaker_3',
+        timestamp: Date.now() - 18_000,
+        text: "J'avais entendu ce thème-là quand je faisais mes recherches, un processus gaussien organisé en plusieurs niveaux. Ça veut dire qu'on regarde aussi le comportement des locataires.",
+        qualityFlags: ['system_audio', 'speaker_stable', 'trusted_interlocutor'],
+      },
+      {
+        role: 'interviewer',
+        speaker: 'speaker_1',
+        canonicalRole: 'speaker_1',
+        timestamp: Date.now() - 8_000,
+        text: "Si on quitte le contexte des locataires, par exemple avec des données de natation, on a plusieurs profils. Avec un processus gaussien simple, tu vas peut-être modéliser chaque individu, alors qu'avec le processus hiérarchique tu fais entrer les différences entre profils comme les hommes et les femmes.",
+        qualityFlags: ['system_audio', 'speaker_stable', 'trusted_interlocutor'],
+      },
+    ],
+    expectKind: 'topic',
+    targetMustInclude: ['processus hiérarchique'],
+    mustNotInclude: ['tu vas peut être modéliser chaque individu de façon alors qu avec le processus'],
+  },
   {
     name: 'mic-only direct user question becomes local action target without speaker relabel',
     action: 'WHAT_TO_SAY',
@@ -432,6 +459,15 @@ function isWeakTopic(text) {
     return true;
   }
   if (words.length > 55) return true;
+  return false;
+}
+
+function isWeakImplicitRequest(text) {
+  const normalized = normalize(text);
+  const words = normalized.split(' ').filter(Boolean);
+  if (words.length < 8) return true;
+  if (/\bavec le processus$/.test(normalized)) return true;
+  if (/^(tu vois|en fait|bon|oui|d accord)\b/.test(normalized) && words.length <= 16) return true;
   return false;
 }
 

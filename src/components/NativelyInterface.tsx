@@ -828,7 +828,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     const unsubSilent = window.electronAPI?.onSystemAudioSilent?.(() => {
       setSystemAudioWarningTitle("Speaker Audio Is Silent");
       setSystemAudioWarning(
-        "System audio is silent. Natively will use mic fallback for speaker-like speech, but true speaker separation needs macOS Screen/System Audio Recording permission and an audible output device.",
+        "System audio is silent. Other participants will not be captured until macOS Screen/System Audio Recording permission and the output device are working.",
       );
       setIsExpanded(true);
     });
@@ -1015,6 +1015,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       if (prev.some((s) => s.path === data.path)) return prev;
       const updated = [...prev, data];
       return updated.slice(-5); // Keep last 5
+    });
+    requestAnimationFrame(() => {
+      textInputRef.current?.focus();
     });
   };
 
@@ -4090,51 +4093,49 @@ Provide only the answer, nothing else.`;
                 {/* Latent Context Preview (Attached Screenshot) */}
                 {attachedContext.length > 0 && (
                   <div
-                    className={`mb-2 rounded-lg p-2 transition-all duration-200 border ${subtleSurfaceClass}`}
+                    data-testid="natively-attached-screenshot-strip"
+                    className={`mb-1.5 min-h-[34px] rounded-lg px-2 py-1.5 transition-all duration-200 border ${subtleSurfaceClass}`}
                     style={appearance.subtleStyle}
                   >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-[11px] font-medium overlay-text-primary">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="shrink-0 text-[10.5px] font-medium overlay-text-primary">
                         {attachedContext.length} screenshot
                         {attachedContext.length > 1 ? "s" : ""} attached
                       </span>
+                      <div className="min-w-0 flex-1 flex items-center gap-1.5 overflow-x-auto">
+                        {attachedContext.map((ctx, idx) => (
+                          <div
+                            key={ctx.path}
+                            className="relative group/thumb flex-shrink-0"
+                          >
+                            <img
+                              src={ctx.preview}
+                              alt={`Screenshot ${idx + 1}`}
+                              className={`h-7 w-auto rounded border ${isLightTheme ? "border-black/15" : "border-white/20"}`}
+                            />
+                            <button
+                              onClick={() =>
+                                setAttachedContext((prev) =>
+                                  prev.filter((_, i) => i !== idx),
+                                )
+                              }
+                              className="absolute -top-1 -right-1 w-4 h-4 bg-red-500/80 hover:bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover/thumb:opacity-100 focus:opacity-100 transition-opacity"
+                              title="Remove"
+                            >
+                              <X className="w-2.5 h-2.5 text-white" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
                       <button
                         onClick={() => setAttachedContext([])}
-                        className="p-1 rounded-full transition-colors overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive"
+                        className="shrink-0 p-1 rounded-full transition-colors overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive"
                         title="Remove all"
                         style={appearance.iconStyle}
                       >
                         <X className="w-3.5 h-3.5" />
                       </button>
                     </div>
-                    <div className="flex gap-1.5 overflow-x-auto max-w-full pb-1">
-                      {attachedContext.map((ctx, idx) => (
-                        <div
-                          key={ctx.path}
-                          className="relative group/thumb flex-shrink-0"
-                        >
-                          <img
-                            src={ctx.preview}
-                            alt={`Screenshot ${idx + 1}`}
-                            className={`h-10 w-auto rounded border ${isLightTheme ? "border-black/15" : "border-white/20"}`}
-                          />
-                          <button
-                            onClick={() =>
-                              setAttachedContext((prev) =>
-                                prev.filter((_, i) => i !== idx),
-                              )
-                            }
-                            className="absolute -top-1 -right-1 w-4 h-4 bg-red-500/80 hover:bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover/thumb:opacity-100 transition-opacity"
-                            title="Remove"
-                          >
-                            <X className="w-2.5 h-2.5 text-white" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                    <span className="text-[10px] overlay-text-muted">
-                      Ask a question or click Answer
-                    </span>
                   </div>
                 )}
 
@@ -4152,13 +4153,13 @@ Provide only the answer, nothing else.`;
                   <button
                     data-testid="natively-command-send"
                     onClick={handleManualSubmit}
-                    disabled={!inputValue.trim()}
+                    disabled={!inputValue.trim() && attachedContext.length === 0}
                     className={`absolute right-1.5 top-1/2 -translate-y-1/2 w-7 h-7 rounded-lg flex items-center justify-center transition-all active:scale-95 ${
-                      inputValue.trim()
+                      inputValue.trim() || attachedContext.length > 0
                         ? "bg-[#007AFF] text-white shadow-sm shadow-blue-500/20 hover:bg-[#0071E3]"
                         : "overlay-icon-surface overlay-text-muted cursor-not-allowed"
                     }`}
-                    style={inputValue.trim() ? undefined : appearance.iconStyle}
+                    style={inputValue.trim() || attachedContext.length > 0 ? undefined : appearance.iconStyle}
                     title="Send"
                   >
                     <ArrowRight className="w-3.5 h-3.5" />

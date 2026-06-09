@@ -93,6 +93,21 @@ const checks = [
       /data-testid="natively-command-send"[\s\S]*onClick=\{handleManualSubmit\}[\s\S]*title="Send"[\s\S]*<ArrowRight className="w-3\.5 h-3\.5" \/>/,
   },
   {
+    name: "attached screenshot strip stays compact so the text input remains visible",
+    pattern:
+      /data-testid="natively-attached-screenshot-strip"[\s\S]*min-h-\[34px\][\s\S]*className=\{`h-7 w-auto rounded border/,
+  },
+  {
+    name: "screenshot attachment keeps command input focus for typing",
+    pattern:
+      /const handleScreenshotAttach[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*textInputRef\.current\?\.focus\(\)/,
+  },
+  {
+    name: "send button accepts image-only or image-plus-text submissions",
+    pattern:
+      /data-testid="natively-command-send"[\s\S]*disabled=\{!inputValue\.trim\(\) && attachedContext\.length === 0\}[\s\S]*inputValue\.trim\(\) \|\| attachedContext\.length > 0/,
+  },
+  {
     name: "AI answer cards scroll internally instead of pushing the dock",
     pattern: /maxHeight: "min\(20vh, 190px\)"[\s\S]*overflowY: "auto"/,
   },

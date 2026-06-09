@@ -76,6 +76,28 @@ const getModelDisplayName = (model: string): string => {
     return names[model] || (model.startsWith('ollama-') ? model.replace('ollama-', '') : model);
 };
 
+const buildMeetingRecallSystemPrompt = (contextString: string): string => `You are a senior meeting Q&A assistant. Answer only about this meeting, but do it like a strong assistant reading the transcript, not like a search result.
+
+Speaker contract:
+- ME / mic / user = the local app user.
+- INTERLOCUTOR / Speaker / system audio = other meeting participants.
+- If names are unavailable, say "the local user" or "another participant" instead of inventing names.
+
+Answering method:
+1. Identify what the user is really asking.
+2. Read the beginning, middle, and recent transcript excerpts together.
+3. Repair obvious ASR cuts and sentence boundaries silently from nearby turns.
+4. Synthesize across turns; do not answer by copying one malformed fragment.
+5. Start with the direct answer, then add the meeting-specific reason, implication, or example when useful.
+
+Quality bar:
+- Use the dominant language of the question and meeting.
+- If the question asks "c'est quoi / qu'est-ce que / explique", give a short definition, the meaning in this meeting, and a practical implication.
+- If information is genuinely missing, say what is supported and what is uncertain.
+- Never mention retrieval, chunks, database, embeddings, or internal context.
+
+${contextString}`;
+
 // ============================================
 // Typing Indicator Component
 // ============================================
@@ -330,11 +352,36 @@ const MeetingChatOverlay: React.FC<MeetingChatOverlayProps> = ({
         }
 
         if (meetingContext.transcript?.length) {
-            const recentTranscript = meetingContext.transcript.slice(-20);
-            const transcriptText = recentTranscript
-                .map(t => `[${t.speaker === 'user' ? 'Me' : 'Them'}]: ${t.text}`)
-                .join('\n');
-            parts.push(`\nRECENT TRANSCRIPT:\n${transcriptText}`);
+            const transcript = meetingContext.transcript;
+            const excerptSize = 45;
+            const first = transcript.slice(0, excerptSize);
+            const middleStart = Math.max(0, Math.floor(transcript.length / 2) - Math.floor(excerptSize / 2));
+            const middle = transcript.slice(middleStart, middleStart + excerptSize);
+            const recent = transcript.slice(-excerptSize);
+            const seen = new Set<string>();
+            const sections: Array<[string, typeof transcript]> = [
+                ['BEGINNING', first],
+                ['MIDDLE', middle],
+                ['RECENT', recent],
+            ];
+            const excerptLines = sections.flatMap(([label, rows]) => {
+                const entries = rows
+                    .map(t => {
+                        const key = `${t.timestamp}:${t.speaker}:${t.text}`;
+                        if (seen.has(key)) return null;
+                        seen.add(key);
+                        const speaker = String(t.speaker || '').toLowerCase();
+                        const role = speaker === 'user' || speaker === 'me' || speaker === 'mic'
+                            ? 'ME'
+                            : speaker === 'assistant'
+                                ? 'ASSISTANT_PREVIOUS'
+                                : 'INTERLOCUTOR';
+                        return `[${role}]: ${t.text}`;
+                    })
+                    .filter(Boolean);
+                return entries.length ? [`\n${label} TRANSCRIPT EXCERPT:`, ...entries] : [];
+            });
+            parts.push(excerptLines.join('\n'));
         }
 
         return parts.join('\n');
@@ -430,9 +477,7 @@ const MeetingChatOverlay: React.FC<MeetingChatOverlayProps> = ({
 
                     // FALLBACK LOGIC
                     const contextString = buildContextString();
-                    const systemPrompt = `You are recalling a specific meeting. Answer questions ONLY about this meeting. Be concise (2-4 sentences). Sound natural, like a human recalling. If information is not present, say so briefly. Never guess.
-
-${contextString}`;
+                    const systemPrompt = buildMeetingRecallSystemPrompt(contextString);
 
                     streamBuffer.reset();
                     const oldTokenCleanup = window.electronAPI?.onGeminiStreamToken((token: string) => {
@@ -481,9 +526,7 @@ ${contextString}`;
             } else {
                 // No meeting ID, standard fallback
                 const contextString = buildContextString();
-                const systemPrompt = `You are recalling a specific meeting. Answer questions ONLY about this meeting. Be concise (2-4 sentences). Sound natural, like a human recalling. If information is not present, say so briefly. Never guess.
-
-${contextString}`;
+                const systemPrompt = buildMeetingRecallSystemPrompt(contextString);
 
                 // Switch to Gemini streaming (RAF-batched)
                 streamBuffer.reset();

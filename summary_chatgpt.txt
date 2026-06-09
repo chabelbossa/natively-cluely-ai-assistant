@@ -1,0 +1,458 @@
+Voici le résumé utile de la réunion, nettoyé et transformé en plan d’action.
+
+## Résumé exécutif
+
+La réunion porte sur **trois gros chantiers WaChap** :
+
+1. **Rendre l’automatisation WhatsApp plus naturelle**
+
+   * Ajouter/systématiser le statut “en train d’écrire”.
+   * Pour les audios, simuler plutôt “en train d’enregistrer”.
+   * Avant qu’un agent IA réponde, essayer de faire passer le message reçu en état “envoyé/reçu/lu” selon ce que permet la librairie.
+   * Objectif : réduire l’effet “robot” et protéger les comptes.
+
+2. **Mettre en place une vraie gestion des proxys/IP**
+
+   * Utiliser des IP privées/statiques, probablement via WebShare.
+   * Tester d’abord avec les IP gratuites disponibles.
+   * Acheter les IP statiques seulement après validation technique.
+   * L’utilisateur choisit seulement le **pays** au frontend ; le backend choisit automatiquement l’IP disponible.
+   * Prioriser la stabilité : si un utilisateur a déjà une IP affectée et qu’elle est encore disponible, réutiliser la même.
+
+3. **Gérer l’expiration des abonnements**
+
+   * Aujourd’hui, les utilisateurs ne sont pas suffisamment notifiés avant expiration.
+   * Il faut envoyer des rappels avant expiration.
+   * À expiration complète, déconnecter les comptes WhatsApp concernés et libérer les IP.
+   * Il faut aussi vérifier s’il reste encore d’anciens comptes gratuits connectés.
+
+Ces points sont bien présents dans la transcription : discussion sur le `typing`, le délai, les proxys/IP, le choix du pays, la libération des IP à la déconnexion, les notifications d’abonnement, les comptes connectés et les tests WebShare. 
+
+---
+
+## Décisions ou orientations retenues
+
+### 1. Typing globalisé
+
+Le `typing` ne doit plus être une simple option isolée sur certains flux. Il faut le considérer comme un comportement par défaut de WaChap.
+
+Concrètement :
+
+* message texte → afficher “en train d’écrire” ;
+* message audio → afficher “en train d’enregistrer un audio” ;
+* le délai reste configurable ;
+* pour les flux, l’utilisateur ne devrait idéalement plus activer/désactiver le typing, mais plutôt choisir un délai ;
+* pour les campagnes et les envois directs, le backend applique un délai par défaut.
+
+Le but est que chaque message automatisé ait une simulation humaine minimale.
+
+---
+
+### 2. Gestion proxy/IP
+
+La logique souhaitée est :
+
+* l’utilisateur choisit un pays ;
+* le backend récupère les IP disponibles pour ce pays ;
+* le backend affecte automatiquement une IP ;
+* si l’utilisateur possède plusieurs comptes WhatsApp, on essaie de garder ses comptes sur la même IP quand c’est possible ;
+* si le compte est déconnecté, l’IP est libérée ;
+* si l’utilisateur reconnecte son compte, on tente de réutiliser l’ancienne IP si elle est encore disponible.
+
+Point important : il faut clarifier une ambiguïté métier.
+
+Dans la réunion, il est question de “1 ou 2 utilisateurs maximum par IP”, mais aussi de “3 ou 5 comptes par IP”. Ce n’est pas la même unité.
+
+Il faut trancher :
+
+* soit la capacité est calculée par **utilisateur WaChap** ;
+* soit elle est calculée par **compte WhatsApp connecté** ;
+* soit on applique les deux règles : maximum X utilisateurs et maximum Y comptes WhatsApp par IP.
+
+Techniquement, je recommande la troisième option.
+
+---
+
+### 3. Tests avant achat des IP statiques
+
+La bonne stratégie est :
+
+1. tester avec les IP gratuites du provider ;
+2. valider que l’authentification proxy fonctionne côté backend Go / whatsmeow ;
+3. valider la connexion QR/PIN derrière proxy ;
+4. valider l’envoi/réception de messages ;
+5. valider la stabilité après reconnexion ;
+6. seulement ensuite acheter 25 ou 50 IP statiques.
+
+Dans la réunion, il est évoqué environ **196 comptes WaChap connectés**, plus des comptes en attente QR/PIN. Il faut donc faire un audit précis avant de commander les IP. 
+
+---
+
+## Tâches à entreprendre
+
+## Priorité 0 — Audit avant développement lourd
+
+### Backend / DB
+
+Faire une requête ou un script d’audit pour obtenir :
+
+* nombre de comptes WhatsApp réellement connectés ;
+* nombre de comptes en attente QR ;
+* nombre de comptes en attente PIN ;
+* nombre de comptes appartenant à des utilisateurs gratuits ;
+* nombre d’utilisateurs payants actifs ;
+* nombre d’utilisateurs expirés mais avec compte encore connecté ;
+* répartition par plan ;
+* nombre moyen de comptes WhatsApp par utilisateur.
+
+Objectif : savoir s’il faut partir sur 25 IP, 50 IP, ou plus.
+
+### Décision à prendre
+
+Définir officiellement :
+
+```txt
+max_users_per_ip = ?
+max_whatsapp_accounts_per_ip = ?
+```
+
+Ma recommandation initiale :
+
+```txt
+max_users_per_ip = 2
+max_whatsapp_accounts_per_ip = 5
+```
+
+Mais si vous voulez être plus prudents pour protéger les comptes :
+
+```txt
+max_users_per_ip = 1
+max_whatsapp_accounts_per_ip = 3
+```
+
+---
+
+## Priorité 1 — Naturalisation des messages WhatsApp
+
+### Backend Go / whatsmeow
+
+À faire :
+
+* vérifier si la librairie permet :
+
+  * de marquer un message comme lu/reçu ;
+  * d’envoyer un état de présence “composing” ;
+  * d’envoyer un état de présence “recording” ;
+  * de maintenir un état “online” ou équivalent.
+
+### Logique d’envoi recommandée
+
+Pour un message texte automatisé :
+
+```txt
+1. message entrant reçu
+2. marquer comme reçu/lu si possible
+3. attendre un petit délai
+4. envoyer typing/composing
+5. attendre delay configuré
+6. envoyer le message
+7. arrêter typing
+```
+
+Pour un audio :
+
+```txt
+1. envoyer présence recording
+2. attendre delay configuré
+3. envoyer l’audio
+4. arrêter recording
+```
+
+### Frontend
+
+Modifier les paramètres de flow :
+
+Avant :
+
+```txt
+Activer typing : oui/non
+Delay : x secondes
+```
+
+Après :
+
+```txt
+Délai avant réponse : x secondes
+```
+
+Le typing devient implicite.
+
+---
+
+## Priorité 2 — Architecture proxy/IP
+
+### Tables à prévoir
+
+Tu peux modéliser ça proprement comme ceci :
+
+```txt
+proxy_providers
+- id
+- name
+- type
+- base_config
+- is_active
+
+proxy_ips
+- id
+- provider_id
+- ip
+- port
+- username
+- password
+- country_code
+- status: available | assigned | disabled | testing
+- max_users
+- max_accounts
+- current_users_count
+- current_accounts_count
+- last_health_check_at
+- created_at
+- updated_at
+
+whatsapp_session_proxy_assignments
+- id
+- whatsapp_session_id
+- user_id
+- proxy_ip_id
+- country_code
+- assigned_at
+- released_at
+- status: active | released
+```
+
+### Règle d’allocation
+
+Pseudo-logique :
+
+```txt
+Quand un utilisateur connecte un compte WhatsApp :
+
+1. récupérer le pays choisi ;
+2. chercher si l’utilisateur a déjà une IP active dans ce pays ;
+3. si oui, vérifier si cette IP a encore de la capacité ;
+4. si oui, réutiliser cette IP ;
+5. sinon, chercher une nouvelle IP disponible dans ce pays ;
+6. affecter l’IP au compte ;
+7. verrouiller l’affectation pour éviter deux attributions simultanées ;
+8. créer la session WhatsApp avec cette configuration proxy.
+```
+
+Point critique : l’allocation doit être transactionnelle. Sinon, deux connexions simultanées peuvent prendre la même IP alors qu’elle n’a plus de capacité.
+
+---
+
+## Priorité 3 — Frontend : choix du pays à la connexion
+
+### Écran de connexion WhatsApp
+
+Ajouter une étape avant QR/PIN :
+
+```txt
+Choisir le pays de localisation du compte WhatsApp
+```
+
+Le frontend ne doit pas afficher les IP.
+
+Il doit seulement appeler :
+
+```txt
+GET /proxy/countries/available
+```
+
+Réponse possible :
+
+```json
+[
+  {
+    "countryCode": "BJ",
+    "countryName": "Bénin",
+    "available": true
+  },
+  {
+    "countryCode": "FR",
+    "countryName": "France",
+    "available": true
+  }
+]
+```
+
+Puis lors de la connexion :
+
+```txt
+POST /whatsapp-sessions/connect
+```
+
+Avec :
+
+```json
+{
+  "connectionMode": "qr",
+  "countryCode": "BJ"
+}
+```
+
+Le backend choisit l’IP derrière.
+
+---
+
+## Priorité 4 — Expiration d’abonnement et déconnexion
+
+### Notifications à prévoir
+
+Je proposerais ce flow :
+
+```txt
+J-7  : rappel expiration proche
+J-3  : second rappel
+J-1  : dernier rappel avant expiration
+Jour J : abonnement expiré
+Après expiration : dernier email + déconnexion des comptes
+```
+
+Vu que la réunion parle de limiter à environ trois notifications avant expiration, tu peux faire :
+
+```txt
+J-7
+J-2
+J-1
+Jour J après expiration
+```
+
+### À expiration
+
+Le système doit :
+
+1. marquer l’abonnement comme expiré ;
+2. empêcher les nouveaux envois ;
+3. déconnecter les comptes WhatsApp si c’est la règle métier retenue ;
+4. libérer les IP affectées ;
+5. notifier l’utilisateur ;
+6. garder un historique de l’action.
+
+Important : ne pas supprimer les sessions brutalement. Il faut plutôt faire :
+
+```txt
+status = disconnected_due_to_subscription_expired
+```
+
+Comme ça, si l’utilisateur renouvelle, tu peux guider vers une reconnexion propre.
+
+---
+
+## Priorité 5 — Nettoyage des anciens comptes gratuits
+
+À faire :
+
+* récupérer tous les comptes WhatsApp liés à des utilisateurs gratuits ;
+* vérifier lesquels sont encore connectés ;
+* générer une liste d’impact ;
+* décider s’il faut les déconnecter immédiatement ou après notification.
+
+Je recommande une approche progressive :
+
+```txt
+1. audit seulement ;
+2. rapport interne ;
+3. notification aux utilisateurs concernés ;
+4. déconnexion après délai raisonnable.
+```
+
+---
+
+## Ordre de travail recommandé
+
+### Jour 1 — Audit + clarification
+
+* Compter les comptes connectés.
+* Compter les utilisateurs payants actifs.
+* Identifier les anciens comptes gratuits encore connectés.
+* Décider la règle exacte : nombre de comptes/utilisateurs par IP.
+* Vérifier la structure actuelle des sessions WhatsApp.
+
+### Jour 2 — Test proxy WebShare
+
+* Configurer les IP gratuites.
+* Tester QR/PIN derrière proxy.
+* Tester reconnexion.
+* Tester envoi/réception.
+* Tester stabilité après redémarrage backend.
+
+### Jour 3 — Modèle DB + allocation IP
+
+* Créer les tables proxy.
+* Implémenter l’allocation automatique.
+* Ajouter la libération d’IP à la déconnexion.
+* Ajouter les logs.
+
+### Jour 4 — Frontend choix pays
+
+* Ajouter choix du pays.
+* Connecter au backend.
+* Gérer les états : aucun pays disponible, pays indisponible, erreur proxy.
+
+### Jour 5 — Typing + delay global
+
+* Implémenter typing texte.
+* Implémenter recording audio.
+* Appliquer delay global.
+* Adapter les flows.
+
+### Jour 6 — Abonnements
+
+* Ajouter notifications J-7/J-2/J-1/Jour J.
+* Ajouter déconnexion automatique à expiration.
+* Ajouter libération IP.
+* Ajouter historique.
+
+---
+
+## Ce que tu peux envoyer à ton manager
+
+Tu peux lui envoyer ce message :
+
+> Bonjour Monsieur Brice,
+>
+> J’ai repris les points de notre réunion sur WaChap.
+>
+> Les chantiers principaux sont :
+>
+> 1. **Naturalisation des envois WhatsApp** : globaliser le typing, appliquer un délai avant réponse, utiliser “en train d’écrire” pour les textes et “en train d’enregistrer” pour les audios, puis vérifier ce que la librairie permet pour les accusés de réception/lecture avant réponse de l’agent IA.
+>
+> 2. **Gestion des proxys/IP** : tester d’abord les IP gratuites WebShare, valider la connexion QR/PIN et les envois derrière proxy, puis passer aux IP statiques si tout est stable. Côté interface, l’utilisateur choisira seulement le pays ; le backend affectera automatiquement une IP disponible.
+>
+> 3. **Gestion des abonnements expirés** : mettre en place des notifications avant expiration, puis déconnecter les comptes WhatsApp et libérer les IP lorsque l’abonnement est réellement expiré.
+>
+> 4. **Audit préalable** : avant de commander les IP, je vais vérifier le nombre exact de comptes connectés, les comptes en attente QR/PIN, les utilisateurs payants actifs et les éventuels anciens comptes gratuits encore connectés. Cela permettra de savoir s’il faut partir sur 25 ou 50 IP.
+>
+> Je vais d’abord commencer par l’audit et le test proxy, parce que ce sont les deux points qui conditionnent la suite.
+
+## Mon avis technique
+
+Le point le plus sensible n’est pas le frontend, c’est **l’allocation proxy côté backend**.
+
+Il faut éviter une implémentation “rapide” où on choisit une IP au hasard. Il faut une vraie logique :
+
+```txt
+user affinity + country + capacity + health check + transaction lock
+```
+
+Sinon, vous risquez :
+
+* d’affecter trop de comptes à une seule IP ;
+* de perdre la stabilité des sessions ;
+* de ne pas savoir quelle IP libérer ;
+* de compliquer les reconnexions ;
+* d’avoir des bugs quand plusieurs comptes se connectent en même temps.
+
+Donc je te conseille de traiter ça comme une petite brique d’infrastructure interne, pas comme un simple champ ajouté à la session WhatsApp.

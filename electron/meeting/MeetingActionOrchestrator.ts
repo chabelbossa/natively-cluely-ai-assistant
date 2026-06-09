@@ -48,7 +48,7 @@ export class MeetingActionOrchestrator {
       switch (action) {
         case 'WHAT_TO_SAY':
         case 'VIBE_INTERVIEW_SAY_THIS':
-          return 'Return one short phrase the user can say aloud now. Prioritize what the interlocutor just said.';
+          return 'Return a concise but specific response the user can say aloud now. Use one phrase only when the answer is obvious; use two short sentences when needed to preserve meaning.';
         case 'CLARIFY':
           return 'Return one precise clarifying question based on the interlocutor context. Avoid generic questions.';
         case 'FOLLOW_UP_QUESTION':
@@ -69,7 +69,8 @@ Action: ${action}
 - Treat INTERLOCUTOR / Speaker as the source to answer from.
 - If there is no reliable interlocutor context, say so briefly and use the meeting brief only as background.
 - Do not hallucinate names, decisions, requirements, or quotes.
-- Keep output concise and directly usable during a live meeting.
+- Quality is more important than instant generic output: prefer a slightly richer, evidence-grounded response over a vague fast one.
+- Keep output directly usable during a live meeting.
 [/PREMIUM MEETING COPILOT CONTRACT]`;
   }
 }

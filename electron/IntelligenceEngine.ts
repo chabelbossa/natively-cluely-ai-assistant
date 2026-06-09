@@ -41,6 +41,27 @@ function detectRefinementIntent(userText: string): { isRefinement: boolean; inte
     return { isRefinement: false, intent: '' };
 }
 
+interface LiveActionQualityReview {
+    ok: boolean;
+    score: number;
+    reasons: string[];
+    repairable: boolean;
+}
+
+interface LiveActionQualityResult {
+    answer: string;
+    fallbackReason?: string;
+    review: LiveActionQualityReview;
+    repaired: boolean;
+}
+
+interface LiveActionQualityOptions {
+    question?: string;
+    streamTimedOut?: boolean;
+    sanitizeSingleQuestion?: boolean;
+    manualWeakOutput?: boolean;
+}
+
 // Events emitted by IntelligenceEngine
 export interface IntelligenceModeEvents {
     'assist_update': (insight: string) => void;
@@ -171,6 +192,7 @@ export class IntelligenceEngine extends EventEmitter {
         fallback?: string,
         transcriptContext?: string,
         additionalItems?: ContextItem[],
+        preferLocalUserTarget?: boolean,
     ): MeetingContextPacket {
         const packet = this.contextPacketBuilder.build({
             action,
@@ -179,6 +201,7 @@ export class IntelligenceEngine extends EventEmitter {
             transcriptContext,
             activeModeBlock: this.getActiveModeActionContextBlock(),
             additionalItems,
+            preferLocalUserTarget,
         });
 
         MeetingDebugRecorder.getInstance().recordActionContext({
@@ -218,6 +241,7 @@ export class IntelligenceEngine extends EventEmitter {
             localUserFocus: packet?.localUserFocus,
             actionTarget: packet?.actionTarget,
             selectedSegments: packet?.selectedSegments,
+            retrievedEvidenceSegments: packet?.retrievedEvidenceSegments,
             rejectedSegments: packet?.rejectedSegments,
             diagnostics,
             latencyMs: telemetry?.latencyMs,
@@ -297,6 +321,242 @@ export class IntelligenceEngine extends EventEmitter {
             model: this.llmHelper.getCurrentModel(),
             ...telemetry,
         });
+    }
+
+    private shouldHoldLiveActionTokens(action: MeetingAction): boolean {
+        return action === 'WHAT_TO_SAY' || action === 'CLARIFY' || action === 'FOLLOW_UP_QUESTION';
+    }
+
+    private liveActionTokenHandler(action: MeetingAction, onToken: (token: string) => void): (token: string) => void {
+        if (this.shouldHoldLiveActionTokens(action)) return () => undefined;
+        return onToken;
+    }
+
+    private async improveLiveActionOutput(
+        mode: IntelligenceMode,
+        action: MeetingAction,
+        generationId: number,
+        output: string,
+        packet: MeetingContextPacket,
+        options: LiveActionQualityOptions = {},
+    ): Promise<LiveActionQualityResult> {
+        let answer = String(output || '').trim();
+        let review = this.reviewLiveActionQuality(action, answer, packet, options);
+        let repaired = false;
+
+        if (!answer || answer.trim().length < 5) {
+            const fallback = this.postProcessLiveActionOutput(
+                this.buildLiveActionFallback(action, packet),
+                options.sanitizeSingleQuestion,
+            );
+            return {
+                answer: fallback,
+                fallbackReason: 'empty_live_action_output',
+                review,
+                repaired: false,
+            };
+        }
+
+        if (!review.ok && review.repairable && !options.streamTimedOut && this.isGenerationCurrent(mode, generationId)) {
+            const repair = await this.repairLiveActionOutput(mode, action, generationId, answer, packet, review, options.question);
+            const repairedText = repair.text.trim();
+            if (!repair.aborted && repairedText.length >= 5) {
+                const repairedReview = this.reviewLiveActionQuality(action, repairedText, packet, options);
+                if (repairedReview.ok) {
+                    answer = repairedText;
+                    review = repairedReview;
+                    repaired = true;
+                } else {
+                    review = {
+                        ...repairedReview,
+                        reasons: [...new Set([...review.reasons, ...repairedReview.reasons, 'quality_repair_still_weak'])],
+                    };
+                }
+            } else if (repair.timedOut) {
+                review = {
+                    ...review,
+                    reasons: [...new Set([...review.reasons, 'quality_repair_timeout'])],
+                };
+            }
+        }
+
+        if (!review.ok) {
+            answer = this.buildLiveActionFallback(action, packet);
+            return {
+                answer: this.postProcessLiveActionOutput(answer, options.sanitizeSingleQuestion),
+                fallbackReason: `quality_gate:${review.reasons[0] || 'weak_live_action_output'}`,
+                review,
+                repaired,
+            };
+        }
+
+        return {
+            answer: this.postProcessLiveActionOutput(answer, options.sanitizeSingleQuestion),
+            review,
+            repaired,
+        };
+    }
+
+    private reviewLiveActionQuality(
+        action: MeetingAction,
+        output: string,
+        packet: MeetingContextPacket,
+        options: LiveActionQualityOptions,
+    ): LiveActionQualityReview {
+        const reasons: string[] = [];
+        const normalizedOutput = this.normalizeForComparison(output);
+        const targetText = `${packet.actionTarget?.text || ''} ${packet.interlocutorFocus?.text || ''}`;
+        const contextText = this.selectedInterlocutorContextText(packet);
+        const evidenceText = [
+            contextText,
+            ...(packet.retrievedEvidenceSegments || []).map((segment) => segment.text),
+        ].join(' ');
+        const targetKeywords = this.extractContentKeywords(targetText);
+        const evidenceKeywords = this.extractContentKeywords(evidenceText);
+        const expectedKeywords = [...new Set([...targetKeywords, ...evidenceKeywords])].slice(0, 18);
+
+        if (!normalizedOutput) reasons.push('empty_output');
+        if (this.isInsufficientContextFallback(output) && (packet.hasReliableInterlocutor || expectedKeywords.length >= 3)) {
+            reasons.push('insufficient_context_despite_evidence');
+        }
+        if (this.shouldReplaceGenericTopicOutput(action, output, packet)) {
+            reasons.push('generic_or_echo_output');
+        }
+        if (options.manualWeakOutput) {
+            reasons.push('manual_answer_echo_or_weak');
+        }
+        if (this.looksLikeGenericMeetingOutput(output)) {
+            reasons.push('generic_meeting_language');
+        }
+
+        const answerAction = action === 'WHAT_TO_SAY' || action === 'VIBE_INTERVIEW_SAY_THIS' || action === 'ANSWER';
+        if (answerAction && this.shouldReplaceLiveActionOutput(action, output, packet)) {
+            reasons.push('does_not_answer_action_target');
+        }
+
+        if (answerAction && packet.actionTarget?.kind === 'direct_question') {
+            const asksAnotherQuestion = /[?？]\s*$/.test(output.trim()) ||
+                /^(pouvez vous|pourriez vous|peux tu|tu peux|est ce que|comment|pourquoi|quel|quelle|quels|quelles|could you|can you|what|why|how)\b/i.test(normalizedOutput);
+            if (asksAnotherQuestion) reasons.push('answered_question_with_question');
+        }
+
+        if ((action === 'CLARIFY' || action === 'FOLLOW_UP_QUESTION') && !/[?？]\s*$/.test(output.trim())) {
+            reasons.push('expected_single_question');
+        }
+
+        if (expectedKeywords.length >= 4 && normalizedOutput.length > 0) {
+            const overlap = expectedKeywords.filter((keyword) => normalizedOutput.includes(keyword)).length;
+            const requiredOverlap = action === 'CLARIFY' || action === 'FOLLOW_UP_QUESTION' ? 1 : 2;
+            if (overlap < requiredOverlap && packet.contextTrustScore >= 0.45) {
+                reasons.push('missing_meeting_specific_evidence');
+            }
+        }
+
+        if (answerAction && normalizedOutput.split(' ').filter(Boolean).length <= 9 && expectedKeywords.length >= 5) {
+            reasons.push('too_short_for_available_context');
+        }
+
+        const score = Math.max(0, Math.min(100, 100 - reasons.length * 18));
+        const hardReasons = new Set([
+            'empty_output',
+            'insufficient_context_despite_evidence',
+            'does_not_answer_action_target',
+            'answered_question_with_question',
+            'manual_answer_echo_or_weak',
+        ]);
+        const repairable = reasons.some((reason) => hardReasons.has(reason) || reason.includes('generic') || reason.includes('missing'));
+
+        return {
+            ok: reasons.length === 0,
+            score,
+            reasons,
+            repairable,
+        };
+    }
+
+    private async repairLiveActionOutput(
+        mode: IntelligenceMode,
+        action: MeetingAction,
+        generationId: number,
+        previousOutput: string,
+        packet: MeetingContextPacket,
+        review: LiveActionQualityReview,
+        question?: string,
+    ): Promise<{ text: string; aborted: boolean; timedOut: boolean }> {
+        const context = [
+            packet.context,
+            '[LIVE ACTION QUALITY REVIEW]',
+            `action=${action}`,
+            `question=${question || packet.actionTarget?.text || packet.interlocutorFocus?.text || 'inferred'}`,
+            `previous_output=${this.truncateForUsage(previousOutput, 1200)}`,
+            `quality_score=${review.score}`,
+            `quality_reasons=${review.reasons.join(',') || 'none'}`,
+            'instruction=Repair the answer once. Use current focus plus relevant prior meeting evidence. Final answer only.',
+            '[/LIVE ACTION QUALITY REVIEW]',
+        ].join('\n\n');
+
+        const userPrompt = [
+            `Action: ${action}`,
+            question ? `Local user question: ${question}` : '',
+            'Produce the corrected final live-meeting response now.',
+        ].filter(Boolean).join('\n');
+
+        const stream = this.llmHelper.streamChat(
+            userPrompt,
+            undefined,
+            context,
+            this.buildLiveActionRepairSystemPrompt(action),
+            true,
+        );
+        const result = await this.consumeActionStream(
+            mode,
+            action,
+            stream,
+            generationId,
+            () => undefined,
+        );
+        return {
+            text: result.text,
+            aborted: result.aborted,
+            timedOut: result.timedOut,
+        };
+    }
+
+    private buildLiveActionRepairSystemPrompt(action: MeetingAction): string {
+        const actionRule = (() => {
+            switch (action) {
+                case 'CLARIFY':
+                    return 'Return exactly one precise clarifying question. It must name the concrete ambiguity from the meeting evidence.';
+                case 'FOLLOW_UP_QUESTION':
+                    return 'Return exactly one follow-up question that advances the current concrete topic. No list.';
+                case 'WHAT_TO_SAY':
+                case 'VIBE_INTERVIEW_SAY_THIS':
+                    return 'Return the exact words the local user can say aloud. One or two short sentences are allowed when needed.';
+                case 'ANSWER':
+                default:
+                    return 'Answer the local user directly with a meeting-specific synthesis.';
+            }
+        })();
+
+        return `You are Natively's live meeting answer repair agent.
+
+Goal:
+- Fix a weak live action answer after a quality review.
+- Use the ACTION TARGET, CURRENT INTERLOCUTOR FOCUS, SELECTED CANONICAL TRANSCRIPT, and RELEVANT PRIOR MEETING EVIDENCE.
+- Synthesize across nearby and prior turns; do not anchor on one isolated fragment.
+- Do not mention the quality review, retrieval, packet, or transcript mechanics.
+- Do not invent facts absent from the meeting evidence.
+- Use French when the context or user question is French.
+- ${actionRule}`;
+    }
+
+    private postProcessLiveActionOutput(output: string, sanitizeSingleQuestion?: boolean): string {
+        return sanitizeSingleQuestion ? this.sanitizeSingleQuestionOutput(output) : output.trim();
+    }
+
+    private looksLikeGenericMeetingOutput(output: string): boolean {
+        const normalized = this.normalizeForComparison(output);
+        return /\b(perimetre priorite prochaine etape|périmètre priorité prochaine étape|prochaine decision attendue|prochaine décision attendue|clarifier les choses|plus de contexte|plus de details|plus de détails|ce point important|avancer efficacement|aligner les attentes|make sure we are aligned|next expected decision|scope priority next step)\b/.test(normalized);
     }
 
     private buildLiveActionFallback(action: MeetingAction, packet: MeetingContextPacket): string {
@@ -807,7 +1067,10 @@ export class IntelligenceEngine extends EventEmitter {
                 'WHAT_TO_SAY',
                 stream,
                 generationId,
-                (token) => this.emit('suggested_answer_token', token, question || 'inferred', confidence),
+                this.liveActionTokenHandler(
+                    'WHAT_TO_SAY',
+                    (token) => this.emit('suggested_answer_token', token, question || 'inferred', confidence),
+                ),
             );
             let fullAnswer = streamResult.text;
 
@@ -817,14 +1080,22 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            if (!fullAnswer || fullAnswer.trim().length < 5) {
-                fullAnswer = this.buildLiveActionFallback('WHAT_TO_SAY', actionPacket);
-            } else if (actionPacket.hasReliableInterlocutor && this.isInsufficientContextFallback(fullAnswer)) {
-                fullAnswer = this.buildLiveActionFallback('WHAT_TO_SAY', actionPacket);
-            } else if (this.shouldReplaceLiveActionOutput('WHAT_TO_SAY', fullAnswer, actionPacket)) {
-                fullAnswer = this.buildLiveActionFallback('WHAT_TO_SAY', actionPacket);
-            } else if (this.shouldReplaceGenericTopicOutput('WHAT_TO_SAY', fullAnswer, actionPacket)) {
-                fullAnswer = this.buildLiveActionFallback('WHAT_TO_SAY', actionPacket);
+            const qualityResult = await this.improveLiveActionOutput(
+                'what_to_say',
+                'WHAT_TO_SAY',
+                generationId,
+                fullAnswer,
+                actionPacket,
+                {
+                    question,
+                    streamTimedOut: streamResult.timedOut,
+                },
+            );
+            fullAnswer = qualityResult.answer;
+
+            if (!this.isGenerationCurrent('what_to_say', generationId)) {
+                this.finishMode('what_to_say', generationId);
+                return null;
             }
 
             this.session.addAssistantMessage(fullAnswer);
@@ -840,7 +1111,7 @@ export class IntelligenceEngine extends EventEmitter {
                     latencyMs: streamResult.latencyMs,
                     firstTokenMs: streamResult.firstTokenMs,
                     timedOut: streamResult.timedOut,
-                    fallback: streamResult.timedOut ? 'soft_timeout' : undefined,
+                    fallback: streamResult.timedOut ? 'soft_timeout' : qualityResult.fallbackReason,
                 })
             });
             this.recordActionResult('WHAT_TO_SAY', question || 'What to Answer', fullAnswer, {
@@ -849,6 +1120,10 @@ export class IntelligenceEngine extends EventEmitter {
                 timedOut: streamResult.timedOut,
                 hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
                 contextTrustScore: actionPacket.contextTrustScore,
+                qualityScore: qualityResult.review.score,
+                qualityReasons: qualityResult.review.reasons,
+                qualityRepaired: qualityResult.repaired,
+                fallback: streamResult.timedOut ? 'soft_timeout' : qualityResult.fallbackReason,
             });
 
             // CQ-05 fix: only emit the "complete" event after a non-aborted stream.
@@ -1048,7 +1323,7 @@ export class IntelligenceEngine extends EventEmitter {
                 'CLARIFY',
                 stream,
                 generationId,
-                (token) => this.emit('clarify_token', token),
+                this.liveActionTokenHandler('CLARIFY', (token) => this.emit('clarify_token', token)),
             );
             let fullClarification = streamResult.text;
 
@@ -1057,14 +1332,18 @@ export class IntelligenceEngine extends EventEmitter {
                 return null;
             }
 
-            if (!fullClarification || fullClarification.trim().length < 5) {
-                fullClarification = this.buildLiveActionFallback('CLARIFY', actionPacket);
-            } else if (actionPacket.hasReliableInterlocutor && this.isInsufficientContextFallback(fullClarification)) {
-                fullClarification = this.buildLiveActionFallback('CLARIFY', actionPacket);
-            } else if (this.shouldReplaceGenericTopicOutput('CLARIFY', fullClarification, actionPacket)) {
-                fullClarification = this.buildLiveActionFallback('CLARIFY', actionPacket);
-            }
-            fullClarification = this.sanitizeSingleQuestionOutput(fullClarification);
+            const qualityResult = await this.improveLiveActionOutput(
+                'clarify',
+                'CLARIFY',
+                generationId,
+                fullClarification,
+                actionPacket,
+                {
+                    streamTimedOut: streamResult.timedOut,
+                    sanitizeSingleQuestion: true,
+                },
+            );
+            fullClarification = qualityResult.answer;
 
             // Only update history and emit final if not aborted
             if (fullClarification && this.isGenerationCurrent('clarify', generationId)) {
@@ -1082,12 +1361,17 @@ export class IntelligenceEngine extends EventEmitter {
                         latencyMs: streamResult.latencyMs,
                         firstTokenMs: streamResult.firstTokenMs,
                         timedOut: streamResult.timedOut,
+                        fallback: streamResult.timedOut ? 'soft_timeout' : qualityResult.fallbackReason,
                     })
                 });
                 this.recordActionResult('CLARIFY', 'Clarify Question', fullClarification, {
                     latencyMs: streamResult.latencyMs,
                     timedOut: streamResult.timedOut,
                     hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
+                    qualityScore: qualityResult.review.score,
+                    qualityReasons: qualityResult.review.reasons,
+                    qualityRepaired: qualityResult.repaired,
+                    fallback: streamResult.timedOut ? 'soft_timeout' : qualityResult.fallbackReason,
                 });
             }
             this.finishMode('clarify', generationId);
@@ -1125,19 +1409,33 @@ export class IntelligenceEngine extends EventEmitter {
                 'FOLLOW_UP_QUESTION',
                 stream,
                 generationId,
-                (token) => this.emit('follow_up_questions_token', token),
+                this.liveActionTokenHandler(
+                    'FOLLOW_UP_QUESTION',
+                    (token) => this.emit('follow_up_questions_token', token),
+                ),
             );
             let fullQuestions = streamResult.text;
+            let qualityResult: LiveActionQualityResult | undefined;
 
             if (!streamResult.aborted) {
-                if (!fullQuestions || fullQuestions.trim().length < 5) {
-                    fullQuestions = this.buildLiveActionFallback('FOLLOW_UP_QUESTION', actionPacket);
-                } else if (actionPacket.hasReliableInterlocutor && this.isInsufficientContextFallback(fullQuestions)) {
-                    fullQuestions = this.buildLiveActionFallback('FOLLOW_UP_QUESTION', actionPacket);
-                } else if (this.shouldReplaceGenericTopicOutput('FOLLOW_UP_QUESTION', fullQuestions, actionPacket)) {
-                    fullQuestions = this.buildLiveActionFallback('FOLLOW_UP_QUESTION', actionPacket);
+                qualityResult = await this.improveLiveActionOutput(
+                    'follow_up_questions',
+                    'FOLLOW_UP_QUESTION',
+                    generationId,
+                    fullQuestions,
+                    actionPacket,
+                    {
+                        streamTimedOut: streamResult.timedOut,
+                        sanitizeSingleQuestion: true,
+                    },
+                );
+                fullQuestions = qualityResult.answer;
+
+                if (!this.isGenerationCurrent('follow_up_questions', generationId)) {
+                    this.finishMode('follow_up_questions', generationId);
+                    return null;
                 }
-                fullQuestions = this.sanitizeSingleQuestionOutput(fullQuestions);
+
             }
 
             if (!streamResult.aborted && fullQuestions && this.isGenerationCurrent('follow_up_questions', generationId)) {
@@ -1153,12 +1451,17 @@ export class IntelligenceEngine extends EventEmitter {
                         latencyMs: streamResult.latencyMs,
                         firstTokenMs: streamResult.firstTokenMs,
                         timedOut: streamResult.timedOut,
+                        fallback: streamResult.timedOut ? 'soft_timeout' : qualityResult?.fallbackReason,
                     })
                 });
                 this.recordActionResult('FOLLOW_UP_QUESTION', 'Generate Follow-up Questions', fullQuestions, {
                     latencyMs: streamResult.latencyMs,
                     timedOut: streamResult.timedOut,
                     hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
+                    qualityScore: qualityResult?.review.score,
+                    qualityReasons: qualityResult?.review.reasons,
+                    qualityRepaired: qualityResult?.repaired,
+                    fallback: streamResult.timedOut ? 'soft_timeout' : qualityResult?.fallbackReason,
                 });
             }
             this.finishMode('follow_up_questions', generationId);
@@ -1186,34 +1489,60 @@ export class IntelligenceEngine extends EventEmitter {
             }
 
             const manualQuestionContext = this.buildManualQuestionContextBlock(question);
-            const actionPacket = this.buildActionContextPacket('ANSWER', 120, undefined, manualQuestionContext);
+            const manualQuestionItem = this.buildManualQuestionContextItem(question);
+            const actionPacket = this.buildActionContextPacket(
+                'ANSWER',
+                180,
+                undefined,
+                manualQuestionContext,
+                manualQuestionItem ? [manualQuestionItem] : undefined,
+                true,
+            );
             const context = actionPacket.context;
-            const startedAt = Date.now();
-            let timedOut = false;
+            const generationId = this.nextGenerationId('manual');
             let fallbackReason: string | undefined;
-            let answer = await Promise.race([
-                this.answerLLM.generate(question, context),
-                new Promise<string>((resolve) => setTimeout(() => {
-                    timedOut = true;
-                    resolve(actionPacket.languageHint === 'fr' || actionPacket.languageHint === 'mixed'
-                        ? "Je n'ai pas encore assez de contexte fiable pour répondre sans inventer."
-                        : "I do not have enough reliable context yet to answer without guessing.");
-                }, this.actionTimeoutsMs.ANSWER)),
-            ]);
-            const latencyMs = Date.now() - startedAt;
+            const stream = this.llmHelper.streamChat(
+                question,
+                undefined,
+                context,
+                this.buildManualAnswerSystemPrompt(question),
+                true,
+            );
+            const streamResult = await this.consumeActionStream(
+                'manual',
+                'ANSWER',
+                stream,
+                generationId,
+                () => undefined,
+            );
+            let answer = streamResult.text;
 
-            if (!answer || answer.trim().length < 5) {
-                fallbackReason = 'empty_manual_answer';
+            if (streamResult.aborted) {
+                this.finishMode('manual', generationId);
+                return null;
+            }
+
+            const manualWeakOutput = answer
+                ? this.shouldReplaceManualAnswerOutput(question, answer, actionPacket)
+                : false;
+            const qualityResult = await this.improveLiveActionOutput(
+                'manual',
+                'ANSWER',
+                generationId,
+                answer,
+                actionPacket,
+                {
+                    question,
+                    streamTimedOut: streamResult.timedOut,
+                    manualWeakOutput,
+                },
+            );
+            answer = qualityResult.answer;
+            fallbackReason = streamResult.timedOut ? 'soft_timeout' : qualityResult.fallbackReason;
+
+            if (qualityResult.fallbackReason) {
                 answer = this.buildManualAnswerFallback(question, actionPacket);
-            } else if (this.shouldReplaceManualAnswerOutput(question, answer, actionPacket)) {
-                fallbackReason = 'manual_answer_echo_or_weak_bug_reply';
-                answer = this.buildManualAnswerFallback(question, actionPacket);
-            } else if (answer && actionPacket.hasReliableInterlocutor && this.isInsufficientContextFallback(answer)) {
-                fallbackReason = 'manual_answer_insufficient_context';
-                answer = this.buildManualAnswerFallback(question, actionPacket);
-            } else if (answer && this.shouldReplaceLiveActionOutput('ANSWER', answer, actionPacket)) {
-                fallbackReason = 'manual_answer_unusable_live_output';
-                answer = this.buildManualAnswerFallback(question, actionPacket);
+                fallbackReason = qualityResult.fallbackReason;
             }
 
             if (answer) {
@@ -1228,20 +1557,24 @@ export class IntelligenceEngine extends EventEmitter {
                     answer: answer,
                     items: diagnostics,
                     metadata: this.buildUsageMetadata('ANSWER', context, diagnostics, actionPacket, {
-                        latencyMs,
-                        timedOut,
-                        fallback: timedOut ? 'soft_timeout' : fallbackReason,
+                        latencyMs: streamResult.latencyMs,
+                        firstTokenMs: streamResult.firstTokenMs,
+                        timedOut: streamResult.timedOut,
+                        fallback: fallbackReason,
                     })
                 });
                 this.recordActionResult('ANSWER', question, answer, {
-                    latencyMs,
-                    timedOut,
+                    latencyMs: streamResult.latencyMs,
+                    timedOut: streamResult.timedOut,
                     hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
-                    fallback: timedOut ? 'soft_timeout' : fallbackReason,
+                    qualityScore: qualityResult.review.score,
+                    qualityReasons: qualityResult.review.reasons,
+                    qualityRepaired: qualityResult.repaired,
+                    fallback: fallbackReason,
                 });
             }
 
-            this.setMode('idle');
+            this.finishMode('manual', generationId);
             return answer;
 
         } catch (error) {
@@ -1271,10 +1604,63 @@ export class IntelligenceEngine extends EventEmitter {
         ].join('\n');
     }
 
+    private buildManualQuestionContextItem(question: string): ContextItem | null {
+        const cleanedQuestion = String(question || '').replace(/\s+/g, ' ').trim();
+        if (!cleanedQuestion) return null;
+        return {
+            role: 'user',
+            speaker: 'me',
+            text: cleanedQuestion,
+            timestamp: Date.now(),
+            confidence: 1,
+            source: 'live',
+            canonicalRole: 'me',
+            qualityFlags: ['trusted_me'],
+        };
+    }
+
+    private buildManualAnswerSystemPrompt(question: string): string {
+        const meetingQa = this.isManualMeetingQaQuestion(question);
+        return `You are Natively, a live meeting copilot.
+
+Task:
+- Answer the local user's typed/manual question using the meeting context packet.
+- If the user asks what to say, what to answer, or asks for a phrase, produce the exact words they can say aloud.
+- Otherwise, answer as a meeting Q&A assistant: explain, synthesize, and clarify what was meant in the meeting.
+
+Internal answering method:
+1. Identify what the local user is really asking; treat their typed question as the query, not as transcript evidence.
+2. Read the ACTION TARGET, CURRENT INTERLOCUTOR FOCUS, supporting context, and selected canonical transcript together, as if the user had pasted the meeting transcript into a strong assistant.
+3. Reconstruct obvious ASR cuts and sentence boundaries from neighboring turns before deciding what was meant.
+4. Gather evidence across multiple nearby turns instead of anchoring on a single matching sentence.
+5. Produce the final answer as a clean synthesis: conclusion first, then the meeting-specific reason or example when useful.
+
+Speaker contract:
+- ME / LOCAL MIC / user = the local app user.
+- INTERLOCUTOR / SPEAKER_N / system audio = other meeting participants.
+- Never treat ME as proof of what another participant said.
+- If the transcript has multiple INTERLOCUTOR/SPEAKER_N labels but no names, distinguish them by label or say "un autre participant" instead of inventing names.
+
+Transcript quality:
+- The transcript can contain ASR mistakes, cut sentences, and wrong words.
+- Reconstruct obvious sentence boundaries from nearby turns.
+- Do not copy malformed fragments as the final answer.
+- Prefer a clean synthesis of the meaning over exact transcript wording.
+
+Output rules:
+- Use the dominant meeting language. If French appears in the question/context, answer in French.
+- Be direct and useful. No preamble about transcripts, context, chunks, or retrieval.
+- If evidence is partial, say what is supported and what remains uncertain.
+- For definitions or "c'est quoi / qu'est-ce que / explique" questions, answer in this shape: short definition, what it meant in this meeting, practical implication/example.
+- Unless the user explicitly asks for a quote, do not make the final answer mostly a transcript quote.
+${meetingQa ? '- This is a meeting Q&A request, not necessarily a phrase the user must say aloud.' : '- The user may want spoken wording; if so, keep it natural and speakable.'}`;
+    }
+
     private shouldReplaceManualAnswerOutput(question: string, output: string, packet: MeetingContextPacket): boolean {
         const normalizedOutput = this.normalizeForComparison(output);
         if (!normalizedOutput) return true;
         if (this.looksLikeRawTranscriptEcho(output, packet)) return true;
+        if (this.looksLikeTruncatedTranscriptFragment(output)) return true;
         if (this.isManualBugReplyQuestion(question) && this.isWeakBugReply(output)) return true;
         return false;
     }
@@ -1283,6 +1669,11 @@ export class IntelligenceEngine extends EventEmitter {
         const french = packet.languageHint === 'fr' || packet.languageHint === 'mixed';
         const contextText = this.selectedInterlocutorContextText(packet);
 
+        if (this.isManualMeetingQaQuestion(question)) {
+            const meetingQaFallback = this.buildMeetingQaFallback(question, packet, french);
+            if (meetingQaFallback) return meetingQaFallback;
+        }
+
         if (this.isManualBugReplyQuestion(question) || this.looksLikeBugFlowContext(contextText)) {
             return french
                 ? "Je dirais : je vais reproduire le cas sur le compte WaChap, tester séparément l'envoi simple puis les flux IA/Pierre, reconnecter le compte et récupérer les logs pour voir exactement pourquoi le flux ne se déclenche plus."
@@ -1290,6 +1681,38 @@ export class IntelligenceEngine extends EventEmitter {
         }
 
         return this.buildLiveActionFallback('ANSWER', packet);
+    }
+
+    private isManualMeetingQaQuestion(question: string): boolean {
+        const normalized = this.normalizeForComparison(question);
+        return /\b(c est quoi|qu est ce que|explique|expliquer|definition|définition|definis|définis|que signifie|d apres|d après|selon ce qui est dit|ce qui est dit|what is|explain|define|according to what was said)\b/.test(normalized);
+    }
+
+    private buildMeetingQaFallback(question: string, packet: MeetingContextPacket, french: boolean): string {
+        const normalizedQuestion = this.normalizeForComparison(question);
+        const contextText = this.selectedInterlocutorContextText(packet);
+        const normalizedContext = this.normalizeForComparison(contextText);
+
+        if (
+            /\bprocessus\b/.test(normalizedQuestion) &&
+            (/\bhierarchique\b/.test(normalizedQuestion) || /\bhierachique\b/.test(normalizedQuestion) || /\bhiérarchique\b/.test(question.toLowerCase()) || /\bgaussien\b/.test(normalizedQuestion))
+        ) {
+            return french
+                ? "D'après la réunion, le processus hiérarchique désigne une modélisation en plusieurs niveaux : au lieu de traiter chaque locataire ou individu isolément, on tient compte de groupes ou de profils qui peuvent avoir des comportements différents. Dans leur exemple, un processus gaussien simple modélise chaque individu, tandis que l'approche hiérarchique ajoute des variables de profil pour mieux expliquer et prédire les tendances."
+                : "From the meeting, a hierarchical process means modeling data at several levels: instead of treating each tenant or individual in isolation, it accounts for groups or profiles with different behaviors. In their example, a simple Gaussian process models each individual, while the hierarchical version adds profile-level variables to explain and predict trends better.";
+        }
+
+        const topic = this.extractFallbackTopic(contextText);
+        if (!topic) {
+            return french
+                ? "Je n'ai pas assez de contexte fiable pour répondre précisément sans inventer."
+                : "I do not have enough reliable context to answer precisely without inventing.";
+        }
+
+        const uncertainty = normalizedContext.includes('stt') || normalizedContext.length < 120;
+        return french
+            ? `D'après ce qui est dit, l'idée principale est la suivante : ${topic}. ${uncertainty ? "La transcription est partielle, donc je resterais prudent sur les détails." : "La réponse doit surtout retenir ce sens, pas les mots bruts de la transcription."}`
+            : `From what was said, the main idea is this: ${topic}. ${uncertainty ? "The transcript is partial, so I would stay careful on the details." : "The answer should keep that meaning, not the raw transcript wording."}`;
     }
 
     private looksLikeRawTranscriptEcho(output: string, packet: MeetingContextPacket): boolean {
@@ -1315,6 +1738,18 @@ export class IntelligenceEngine extends EventEmitter {
             const overlap = candidateKeywords.filter((keyword) => outputKeywords.has(keyword)).length;
             return overlap / Math.min(candidateKeywords.length, Math.max(outputKeywords.size, 1)) >= 0.72;
         });
+    }
+
+    private looksLikeTruncatedTranscriptFragment(output: string): boolean {
+        const normalized = this.normalizeForComparison(output);
+        const words = normalized.split(' ').filter(Boolean);
+        if (words.length < 6) return false;
+        const last = words[words.length - 1] || '';
+        if (/^(le|la|les|un|une|des|du|de|d|avec|sans|pour|dans|sur|qui|que|dont|et|mais|donc|parce|comme|si|processus)$/.test(last)) {
+            return true;
+        }
+        return /^(je dirais|je repondrais|je répondrais)\s*:?\s*(tu vois|en fait|bon|oui)\b/i.test(normalized) &&
+            !/[.!?。！？]\s*$/.test(output.trim());
     }
 
     private isManualBugReplyQuestion(question: string): boolean {

@@ -89,6 +89,7 @@ export class TranscriptRouter {
     const isLongOverlap = systemRecentlyActive && originalMicText.length >= LONG_OVERLAP_MIC_CHARS;
     const isStrongLocalIntervention = localIntent >= MIC_LOCAL_INTENT_WHILE_SYSTEM_ACTIVE_THRESHOLD ||
       this.hasStrongLocalInterventionPhrase(text);
+    const systemAudioUnavailable = this.isSystemAudioUnavailable(raw, systemRecentlyActive);
     const micSpeakerFallback = this.shouldRouteMicAsSpeakerFallback(raw, text, localIntent, systemRecentlyActive);
 
     if (echo && !trimmedOverlapEcho && localIntent < MIC_LOCAL_INTENT_WHILE_SYSTEM_ACTIVE_THRESHOLD) {
@@ -129,6 +130,7 @@ export class TranscriptRouter {
 
     const flags: TranscriptQualityFlag[] = [];
     if (raw.confidence !== undefined && raw.confidence < 0.72) flags.push('low_confidence');
+    if (systemAudioUnavailable) flags.push('system_audio_unavailable');
     if (systemRecentlyActive) flags.push('possible_overlap');
     if (raw.micGateActive) flags.push('mic_gate_held');
     if (isLikelyLocalIntervention) flags.push('mic_intervention');
@@ -394,6 +396,13 @@ export class TranscriptRouter {
     localIntent: number,
     systemRecentlyActive: boolean,
   ): boolean {
+    // The production speaker contract is channel-first:
+    // mic is always the local user, system audio is always the other participants.
+    // The old heuristic relabeled "speaker-like" mic text as interlocutor when
+    // system audio looked unavailable, which made noisy long mic flushes poison
+    // live answers. Keep the legacy behavior behind an explicit diagnostic flag
+    // only so replay/debug experiments can still compare it.
+    if (process.env.NATIVELY_ALLOW_MIC_SPEAKER_FALLBACK !== '1') return false;
     if (!this.isSystemAudioUnavailable(raw, systemRecentlyActive)) return false;
     if (this.hasStrongLocalInterventionPhrase(text) || this.looksLikeLocalComplaint(text)) return false;
     if (this.looksLikeAssistantCommand(text) || this.looksLikeQuotedAnswerRequest(text)) return false;

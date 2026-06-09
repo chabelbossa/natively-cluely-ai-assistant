@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
-import { ArrowLeft, Search, Mail, Link, ChevronDown, Play, Copy, Check, MoreHorizontal, Settings, ArrowRight, Cpu } from 'lucide-react';
+import { ArrowLeft, Search, Mail, Link, ChevronDown, Play, Copy, Check, MoreHorizontal, Settings, ArrowRight, Cpu, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import MeetingChatOverlay from './MeetingChatOverlay';
 import EditableTextBlock from './EditableTextBlock';
@@ -50,6 +50,12 @@ interface Meeting {
         actionItemsTitle?: string;
         keyPointsTitle?: string;
         sections?: Array<{ title: string; bullets: string[] }>;
+        quality?: {
+            score: number;
+            checks: string[];
+            sourcesUsed: string[];
+            needsReview: boolean;
+        };
     };
     transcript?: Array<{
         speaker: string;
@@ -84,6 +90,7 @@ const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting: initialMeeting
     const [meeting, setMeeting] = useState<Meeting>(initialMeeting);
     const [activeTab, setActiveTab] = useState<'summary' | 'transcript' | 'usage'>('summary');
     const [isCopied, setIsCopied] = useState(false);
+    const [isRegenerating, setIsRegenerating] = useState(false);
 
     const copyTextToClipboard = async (text: string) => {
         try {
@@ -208,6 +215,27 @@ ${customSections ? `\n\n${customSections}` : ''}
         }
     };
 
+    const handleRegenerateSummary = async () => {
+        if (!window.electronAPI?.regenerateMeetingSummary || isRegenerating) return;
+        setIsRegenerating(true);
+        try {
+            const result = await window.electronAPI.regenerateMeetingSummary(meeting.id);
+            if (result.success && result.detailedSummary) {
+                setMeeting(prev => ({
+                    ...prev,
+                    detailedSummary: result.detailedSummary
+                }));
+                setActiveTab('summary');
+            } else if (result.error) {
+                console.error('Failed to regenerate summary:', result.error);
+            }
+        } catch (error) {
+            console.error('Failed to regenerate summary:', error);
+        } finally {
+            setIsRegenerating(false);
+        }
+    };
+
 
     return (
         <div className="h-full w-full flex flex-col bg-bg-secondary text-text-secondary font-sans overflow-hidden">
@@ -267,14 +295,26 @@ ${customSections ? `\n\n${customSections}` : ''}
                             ))}
                         </div>
 
-                        {/* Copy Button - Inline with Tabs (Always visible) */}
-                        <button
-                            onClick={handleCopy}
-                            className="flex items-center gap-2 text-xs font-medium text-text-secondary hover:text-text-primary transition-colors"
-                        >
-                            {isCopied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
-                            {isCopied ? 'Copied' : activeTab === 'summary' ? 'Copy full summary' : activeTab === 'transcript' ? 'Copy full transcript' : 'Copy usage'}
-                        </button>
+                        <div className="flex items-center gap-3">
+                            {activeTab === 'summary' && (
+                                <button
+                                    onClick={handleRegenerateSummary}
+                                    disabled={isRegenerating}
+                                    className="flex items-center gap-2 text-xs font-medium text-text-secondary hover:text-text-primary disabled:opacity-50 disabled:hover:text-text-secondary transition-colors"
+                                    title="Regenerate summary"
+                                >
+                                    <RefreshCw size={14} className={isRegenerating ? 'animate-spin' : ''} />
+                                    {isRegenerating ? 'Regenerating' : 'Regenerate'}
+                                </button>
+                            )}
+                            <button
+                                onClick={handleCopy}
+                                className="flex items-center gap-2 text-xs font-medium text-text-secondary hover:text-text-primary transition-colors"
+                            >
+                                {isCopied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
+                                {isCopied ? 'Copied' : activeTab === 'summary' ? 'Copy full summary' : activeTab === 'transcript' ? 'Copy full transcript' : 'Copy usage'}
+                            </button>
+                        </div>
                     </div>
 
                     <MeetingChatOverlay
@@ -317,6 +357,29 @@ ${customSections ? `\n\n${customSections}` : ''}
                                         {meeting.detailedSummary?.overview || ''}
                                     </ReactMarkdown>
                                 </div>
+                                )}
+
+                                {meeting.detailedSummary?.quality && (
+                                    <div className="mb-6 pb-6 border-b border-border-subtle">
+                                        <div className="flex flex-wrap items-center gap-3 text-xs text-text-tertiary">
+                                            <span className="font-medium text-text-secondary">
+                                                Quality {meeting.detailedSummary.quality.score}/100
+                                            </span>
+                                            <span>
+                                                Sources: {meeting.detailedSummary.quality.sourcesUsed.join(', ') || 'summary'}
+                                            </span>
+                                            {meeting.detailedSummary.quality.needsReview && (
+                                                <span className="text-amber-500">
+                                                    Needs review
+                                                </span>
+                                            )}
+                                        </div>
+                                        {meeting.detailedSummary.quality.checks.length > 0 && (
+                                            <p className="mt-2 text-xs text-text-tertiary">
+                                                {meeting.detailedSummary.quality.checks.join(', ')}
+                                            </p>
+                                        )}
+                                    </div>
                                 )}
 
                                 {/* Action Items - Only show if there are items */}

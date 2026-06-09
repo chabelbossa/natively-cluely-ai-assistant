@@ -212,7 +212,8 @@ interface ElectronAPI {
   getRecentMeetings: () => Promise<Array<{ id: string; title: string; date: string; duration: string; summary: string }>>
   getMeetingDetails: (id: string) => Promise<any>
   updateMeetingTitle: (id: string, title: string) => Promise<boolean>
-  updateMeetingSummary: (id: string, updates: { overview?: string, actionItems?: string[], keyPoints?: string[], actionItemsTitle?: string, keyPointsTitle?: string }) => Promise<boolean>
+  updateMeetingSummary: (id: string, updates: { overview?: string, actionItems?: string[], keyPoints?: string[], actionItemsTitle?: string, keyPointsTitle?: string, sections?: Array<{ title: string; bullets: string[] }>, quality?: any }) => Promise<boolean>
+  regenerateMeetingSummary: (id: string, options?: { useAudioReplay?: boolean }) => Promise<{ success: boolean; detailedSummary?: any; error?: string }>
   onMeetingsUpdated: (callback: () => void) => () => void
 
   // Intelligence Mode Events
@@ -860,6 +861,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getMeetingDetails: (id: string) => ipcRenderer.invoke("get-meeting-details", id),
   updateMeetingTitle: (id: string, title: string) => ipcRenderer.invoke("update-meeting-title", { id, title }),
   updateMeetingSummary: (id: string, updates: any) => ipcRenderer.invoke("update-meeting-summary", { id, updates }),
+  regenerateMeetingSummary: (id: string, options?: { useAudioReplay?: boolean }) => ipcRenderer.invoke("regenerate-meeting-summary", { id, options }),
   deleteMeeting: (id: string) => ipcRenderer.invoke("delete-meeting", id),
 
   onMeetingsUpdated: (callback: () => void) => {

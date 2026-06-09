@@ -218,6 +218,34 @@ export class VectorStore {
     }
 
     /**
+     * Get neighboring chunks around semantic hits so meeting Q&A has enough
+     * conversational context to synthesize instead of quoting isolated fragments.
+     */
+    getNeighborChunks(meetingId: string, chunkIndices: number[], windowSize: number = 1): StoredChunk[] {
+        const indices = new Set<number>();
+        for (const index of chunkIndices) {
+            if (!Number.isFinite(index)) continue;
+            const base = Math.floor(index);
+            for (let offset = -windowSize; offset <= windowSize; offset++) {
+                if (base + offset >= 0) indices.add(base + offset);
+            }
+        }
+
+        if (indices.size === 0) return [];
+
+        const placeholders = [...indices].map(() => '?').join(',');
+        const rows = this.db.prepare(`
+            SELECT *
+            FROM chunks
+            WHERE meeting_id = ?
+              AND chunk_index IN (${placeholders})
+            ORDER BY chunk_index ASC
+        `).all(meetingId, ...indices) as any[];
+
+        return rows.map(r => this.rowToChunk(r));
+    }
+
+    /**
      * Search for similar chunks using native sqlite-vec or JS fallback (worker thread)
      */
     async searchSimilar(

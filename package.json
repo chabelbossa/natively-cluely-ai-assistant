@@ -26,6 +26,8 @@
     "meeting:layout:dom": "node scripts/check-overlay-dom-stress.js",
     "meeting:model-selector:guard": "node scripts/check-model-selector-visibility.js",
     "meeting:action:guard": "node scripts/check-meeting-action-reliability.js",
+    "meeting:runtime:guard": "node scripts/check-meeting-runtime-quality.js",
+    "meeting:summary:guard": "node scripts/check-meeting-summary-quality.js",
     "meeting:repair:db": "node scripts/check-meeting-repair-against-db.js",
     "meeting:repair:live": "node scripts/check-meeting-repair-against-db.js --require-post-install",
     "meeting:parakeet:diarization:guard": "node scripts/check-parakeet-live-diarization.js",

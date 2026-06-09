@@ -3017,6 +3017,13 @@ export function initializeIpcHandlers(appState: AppState): void {
     },
   );
 
+  safeHandle(
+    "regenerate-meeting-summary",
+    async (_, { id, options }: { id: string; options?: { useAudioReplay?: boolean } }) => {
+      return appState.regenerateMeetingSummary(id, options || {});
+    },
+  );
+
   safeHandle("seed-demo", async () => {
     DatabaseManager.getInstance().seedDemoMeeting();
 
