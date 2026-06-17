@@ -32,6 +32,16 @@ export interface MeetingContextPacket {
     qualityFlags?: string[];
     score: number;
   }>;
+  questionCandidates: Array<{
+    rank: number;
+    source: 'interlocutor';
+    text: string;
+    timestamp: number;
+    confidence: number;
+    score: number;
+    reason: string;
+    speaker?: string;
+  }>;
   rejectedSegments: Array<{
     role: string;
     speaker?: string;
@@ -103,7 +113,8 @@ export class MeetingContextPacketBuilder {
     const reliableInterlocutorItems = actionItems.filter((item) => this.isReliableInterlocutorItem(item));
     const hasReliableInterlocutor = reliableInterlocutorItems.length > 0;
     const contextTrustScore = this.computeContextTrustScore(actionItems, reliableInterlocutorItems);
-    const interlocutorFocus = this.deriveInterlocutorFocus(reliableInterlocutorItems);
+    const questionCandidates = this.collectInterlocutorQuestionCandidates(reliableInterlocutorItems);
+    const interlocutorFocus = this.deriveInterlocutorFocus(reliableInterlocutorItems, questionCandidates);
     const localUserFocus = this.deriveLocalUserFocus(actionItems);
     const actionTarget = this.pickActionTarget(
       hasReliableInterlocutor,
@@ -147,6 +158,7 @@ export class MeetingContextPacketBuilder {
       this.buildTranscriptRepairBlock(repairResult),
       this.buildInterlocutorFocusBlock(interlocutorFocus),
       this.buildLocalUserFocusBlock(localUserFocus),
+      this.buildQuestionCandidatesBlock(questionCandidates),
       this.buildActionTargetBlock(input.action, actionTarget, supportingInterlocutorItems),
       this.buildRelevantEvidenceBlock(retrievedEvidenceItems, actionTarget),
       this.buildQualityBlock(hasReliableInterlocutor, languageHint, actionItems, rejectedSegments, interlocutorFocus, actionTarget),
@@ -173,6 +185,7 @@ export class MeetingContextPacketBuilder {
       `packet_target_kind=${actionTarget.kind}`,
       `packet_target_confidence=${actionTarget.confidence.toFixed(2)}`,
       `packet_target_text=${this.truncate(actionTarget.text, 220) || 'none'}`,
+      `packet_question_candidates=${questionCandidates.length}`,
       `packet_supporting_interlocutor_segments=${supportingInterlocutorItems.length}`,
       `packet_retrieved_evidence_segments=${retrievedEvidenceSegments.length}`,
       `packet_retrieved_evidence_terms=${this.extractEvidenceKeywords(`${actionTarget.text} ${interlocutorFocus.text} ${localUserFocus.text}`).slice(0, 12).join(',') || 'none'}`,
@@ -198,6 +211,7 @@ export class MeetingContextPacketBuilder {
       diagnostics,
       selectedSegments,
       retrievedEvidenceSegments,
+      questionCandidates,
       rejectedSegments,
     };
   }
@@ -238,7 +252,7 @@ export class MeetingContextPacketBuilder {
       switch (action) {
         case 'WHAT_TO_SAY':
         case 'VIBE_INTERVIEW_SAY_THIS':
-          return 'Output exactly one short phrase the user can say aloud now. If CURRENT INTERLOCUTOR FOCUS is a direct_question, answer that exact question. If it is an implicit_request, acknowledge it and propose the next concrete step. No preamble.';
+          return 'Output the exact words the user can say aloud now. If CURRENT INTERLOCUTOR FOCUS is a direct_question, answer that exact question with enough substance for the selected prompt profile and live setting. Use 2-3 sentences for simple questions and 4-7 strong spoken sentences for technical, behavioral, architectural, evidence-rich, or profile-critical questions. If it is an implicit_request, acknowledge it and propose the next concrete step. No preamble.';
         case 'CLARIFY':
           return 'Output exactly one precise clarifying question about the CURRENT INTERLOCUTOR FOCUS. It must clarify a concrete ambiguity, not ask a generic context question.';
         case 'FOLLOW_UP_QUESTION':
@@ -266,6 +280,9 @@ Action target: ${actionTarget.kind} (${actionTarget.confidence.toFixed(2)}) ${ac
 - ${languageRule}
 - The ACTION TARGET is the target for this action. Do not answer a random older topic if a target is present.
 - If focus=direct_question, answer the interlocutor's latest question directly, in first person when appropriate.
+- If [RECENT QUESTION CANDIDATES] is present, compare the candidates before answering. Prefer candidate_1, but choose candidate_2 or candidate_3 when candidate_1 is clearly a fragment, echo, or continuation.
+- Follow [PROMPT PROFILE] when present. It defines the selected user mode, persona, response shape, action policy, evidence policy, and quality checks for this turn.
+- The selected prompt profile wins over generic live-meeting defaults. Do not import behavior from another mode when the active profile is meeting, project, client, learning, recruiting, or interview.
 - If focus=implicit_request, respond with confirmation plus the next practical step.
 - If focus=topic, produce a useful bridge or question about that topic, not a broad generic fallback.
 - INTERLOCUTOR/SPEAKER is the other person, professor, client, manager, or system audio.
@@ -273,13 +290,14 @@ Action target: ${actionTarget.kind} (${actionTarget.confidence.toFixed(2)}) ${ac
 - If Action target source=local_user, answer the local user's mic question directly and explicitly avoid relabeling it as Speaker.
 - Meeting brief is background only; never claim it was said in the meeting unless it appears in transcript.
 - Before answering, first use the repaired transcript and reconstructed sentence boundaries. Do not answer from raw cut fragments when a repaired version is available.
+- For profile-specific direct answers, identify the best live question from the latest three plausible interlocutor questions, then answer that selected question according to the selected profile.
 - Use RELEVANT PRIOR MEETING EVIDENCE as supporting memory when the latest fragment refers back to an earlier topic, number, account, tool, proxy, subscription, bug, or decision.
 - Prefer a synthesis across current focus + prior evidence over an answer based on one isolated transcript slice.
 - If ASR visibly split a sentence, infer only missing connective grammar from nearby words; never invent new facts that are absent from the repaired transcript.
 - If reliable interlocutor context is missing, say that briefly and do not invent facts.
 - If reliable context exists but is noisy, use the strongest concrete interlocutor facts and ask/answer around the next practical step.
 - Never output a generic "not enough context" fallback when the selected transcript contains concrete interlocutor facts.
-- Keep live answers concise, natural, and directly usable.
+- Keep live answers natural and directly usable; concise for simple moments, but complete enough for profile-grade technical, behavioral, architectural, operational, or context-rich questions.
 [/PREMIUM MEETING CONTEXT PACKET]`;
   }
 
@@ -544,6 +562,26 @@ instruction=This came from ME/LOCAL MIC. It is allowed as a direct user request,
 [/LOCAL USER QUESTION]`;
   }
 
+  private buildQuestionCandidatesBlock(candidates: MeetingContextPacket['questionCandidates']): string {
+    if (candidates.length === 0) {
+      return `[RECENT QUESTION CANDIDATES]
+count=0
+instruction=No reliable question shortlist is available. Use ACTION TARGET and CURRENT INTERLOCUTOR FOCUS only.
+[/RECENT QUESTION CANDIDATES]`;
+    }
+
+    return [
+      '[RECENT QUESTION CANDIDATES]',
+      `count=${candidates.length}`,
+      'selection_policy=These are the last plausible questions from INTERLOCUTOR audio after transcript repair. candidate_1 is the best current guess, but candidate_2/candidate_3 may be the real target when the newest transcript is fragmented or mixed.',
+      'instruction=Before answering, silently choose the best candidate. Answer that selected question directly; do not output the selection process.',
+      ...candidates.map((candidate) =>
+        `candidate_${candidate.rank} score=${candidate.score.toFixed(2)} confidence=${candidate.confidence.toFixed(2)} speaker=${candidate.speaker || 'unknown'} reason=${candidate.reason}: ${candidate.text}`,
+      ),
+      '[/RECENT QUESTION CANDIDATES]',
+    ].join('\n');
+  }
+
   private buildActionTargetBlock(action: MeetingAction, focus: MeetingActionTarget, supportingItems: ContextItem[]): string {
     const actionContract = (() => {
       switch (action) {
@@ -791,13 +829,27 @@ instruction=This came from ME/LOCAL MIC. It is allowed as a direct user request,
     }];
   }
 
-  private deriveInterlocutorFocus(reliableItems: ContextItem[]): InterlocutorFocus {
+  private deriveInterlocutorFocus(
+    reliableItems: ContextItem[],
+    questionCandidates: MeetingContextPacket['questionCandidates'] = [],
+  ): InterlocutorFocus {
     if (reliableItems.length === 0) {
       return {
         kind: 'none',
         text: '',
         confidence: 0,
         reason: 'no_reliable_interlocutor_segment',
+      };
+    }
+
+    const bestQuestion = questionCandidates[0];
+    if (bestQuestion) {
+      return {
+        kind: 'direct_question',
+        text: this.truncate(bestQuestion.text, 420),
+        confidence: bestQuestion.confidence,
+        timestamp: bestQuestion.timestamp,
+        reason: `ranked_question_candidate:${bestQuestion.reason}`,
       };
     }
 
@@ -905,6 +957,68 @@ instruction=This came from ME/LOCAL MIC. It is allowed as a direct user request,
     const start = Math.max(0, focusIndex - 4);
     const end = Math.min(reliableItems.length, focusIndex + 2);
     return reliableItems.slice(start, end);
+  }
+
+  private collectInterlocutorQuestionCandidates(reliableItems: ContextItem[]): MeetingContextPacket['questionCandidates'] {
+    const recent = reliableItems.slice(-20);
+    const candidates = recent
+      .map((item, index) => {
+        const question = this.extractBestQuestion(item.text);
+        if (!question) return null;
+        const enrichedQuestion = this.enrichQuestionWithNeighborContext(
+          question,
+          recent.slice(Math.max(0, index - 3), index),
+        );
+        const confidence = /[?？]\s*$/.test(question) ? 0.92 : 0.82;
+        const score = this.scoreQuestionCandidate(enrichedQuestion, item, index, recent.length);
+        const candidate: MeetingContextPacket['questionCandidates'][number] = {
+          rank: 0,
+          source: 'interlocutor' as const,
+          text: this.truncate(enrichedQuestion, 520),
+          timestamp: item.timestamp,
+          confidence,
+          score,
+          reason: this.questionCandidateReason(enrichedQuestion, item),
+        };
+        if (item.speaker) candidate.speaker = item.speaker;
+        return candidate;
+      })
+      .filter((candidate): candidate is MeetingContextPacket['questionCandidates'][number] => Boolean(candidate));
+
+    return candidates
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, 3)
+      .sort((a, b) => b.score - a.score || b.timestamp - a.timestamp)
+      .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
+  }
+
+  private scoreQuestionCandidate(question: string, item: ContextItem, index: number, total: number): number {
+    const normalized = this.normalize(question);
+    const words = normalized.split(' ').filter(Boolean);
+    const flags = new Set(item.qualityFlags || []);
+    let score = 1;
+
+    score += index / Math.max(1, total) * 0.45;
+    if (/[?？]\s*$/.test(question.trim())) score += 0.35;
+    if (this.isStandaloneQuestion(question)) score += 0.3;
+    if (words.length >= 8 && words.length <= 55) score += 0.25;
+    if (this.isComprehensionCheckQuestion(question)) score += 0.18;
+    if (/\b(explique|expliquer|pourquoi|comment|architecture|experience|expérience|projet|react|next|api|system design|algorithm|algorithme)\b/i.test(normalized)) {
+      score += 0.22;
+    }
+    if (item.confidence !== undefined) score += Math.max(-0.25, Math.min(0.25, item.confidence - 0.75));
+    if (flags.has('possible_overlap') || flags.has('echo_suspect')) score -= 0.25;
+    if (flags.has('stt_low_quality')) score -= 0.18;
+    if (flags.has('unstable_fragment')) score -= 0.4;
+
+    return Math.max(0, score);
+  }
+
+  private questionCandidateReason(question: string, item: ContextItem): string {
+    const flags = item.qualityFlags?.length ? `flags=${item.qualityFlags.join(',')}` : 'clean_or_repaired';
+    if (this.isComprehensionCheckQuestion(question)) return `comprehension_check:${flags}`;
+    if (this.isStandaloneQuestion(question)) return `standalone_question:${flags}`;
+    return `question_with_neighbor_context:${flags}`;
   }
 
   private extractBestQuestion(text: string): string | null {

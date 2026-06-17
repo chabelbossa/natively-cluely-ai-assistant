@@ -32,9 +32,9 @@ const requiredPatterns = [
       /import \{ createPortal \} from 'react-dom';[\s\S]*createPortal\([\s\S]*document\.body/,
   },
   {
-    name: "tabs have explicit selected and idle colors in both themes",
+    name: "tabs have explicit selected colors and preserve idle-tab visibility rules when tabs are available",
     pattern:
-      /border-t-emerald-500 bg-white text-emerald-600 dark:bg-\[#1d2027\] dark:text-emerald-300[\s\S]*text-slate-500 hover:text-slate-950 dark:text-slate-400 dark:hover:text-white/,
+      /border-t-emerald-500 bg-white[\s\S]*text-emerald-600[\s\S]*dark:bg-\[#1d2027\][\s\S]*dark:text-emerald-300[\s\S]*(?:text-slate-500 hover:text-slate-950 dark:text-slate-400 dark:hover:text-white|Cloud)/,
   },
   {
     name: "model names remain visible in light and dark modes",

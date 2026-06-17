@@ -37,6 +37,19 @@ export function initializeIpcHandlers(appState: AppState): void {
     ipcMain.handle(channel, listener);
   };
 
+  const resolveSupportedDefaultModel = (cm: any, requestedModel?: string): string => {
+    const normalized = String(requestedModel || "").trim();
+    const codexPreferredModel = cm.getCodexPreferredModel?.() || "codex:gpt-5.5";
+    const isSupported =
+      normalized.startsWith("codex:") ||
+      normalized.startsWith("gemini-") ||
+      normalized.startsWith("models/");
+
+    if (!normalized) return codexPreferredModel;
+    if (!isSupported) return codexPreferredModel;
+    return normalized;
+  };
+
   /**
    * Returns true if the user has an active premium license OR an unexpired free trial.
    * Used to gate profile intelligence features (resume upload, JD upload, company research, etc.).
@@ -1219,7 +1232,11 @@ export function initializeIpcHandlers(appState: AppState): void {
       llmHelper.setNativelyKey(apiKey || null);
 
       // Sync the model into LLMHelper and notify the UI whenever the effective default changed
-      const defaultModel = cm.getDefaultModel();
+      const storedDefaultModel = cm.getDefaultModel();
+      const defaultModel = resolveSupportedDefaultModel(cm, storedDefaultModel);
+      if (storedDefaultModel !== defaultModel) {
+        cm.setDefaultModel(defaultModel);
+      }
       const providers = [
         ...(cm.getCurlProviders() || []),
         ...(cm.getCustomProviders() || []),
@@ -1933,6 +1950,7 @@ export function initializeIpcHandlers(appState: AppState): void {
               { id: "codex:gpt-5.4", label: "GPT 5.4 Codex" },
               { id: "codex:gpt-5.4-mini", label: "GPT 5.4 Mini Codex" },
               { id: "codex:gpt-5.3", label: "GPT 5.3 Codex" },
+              { id: "codex:gpt-5.3-codex-spark", label: "GPT 5.3 Codex Spark" },
               { id: "codex:gpt-5.2", label: "GPT 5.2 Codex" },
               { id: "codex:gpt-5.1", label: "GPT 5.1 Codex" },
               { id: "codex:gpt-5", label: "GPT 5 Codex" },
@@ -2849,7 +2867,8 @@ export function initializeIpcHandlers(appState: AppState): void {
       const legacyProviders = cm.getCustomProviders() || [];
       const allProviders = [...curlProviders, ...legacyProviders];
 
-      llmHelper.setModel(modelId, allProviders);
+      const supportedModelId = resolveSupportedDefaultModel(cm, modelId);
+      llmHelper.setModel(supportedModelId, allProviders);
 
       // Close the selector window if open
       appState.modelSelectorWindowHelper.hideWindow();
@@ -2857,7 +2876,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       // Broadcast to all windows so NativelyInterface can update its selector (session-only update)
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) {
-          win.webContents.send("model-changed", modelId);
+          win.webContents.send("model-changed", supportedModelId);
         }
       });
 
@@ -2873,14 +2892,15 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const { CredentialsManager } = require("./services/CredentialsManager");
       const cm = CredentialsManager.getInstance();
-      cm.setDefaultModel(modelId);
+      const supportedModelId = resolveSupportedDefaultModel(cm, modelId);
+      cm.setDefaultModel(supportedModelId);
 
       // Also update the runtime model
       const llmHelper = appState.processingHelper.getLLMHelper();
       const curlProviders = cm.getCurlProviders();
       const legacyProviders = cm.getCustomProviders() || [];
       const allProviders = [...curlProviders, ...legacyProviders];
-      llmHelper.setModel(modelId, allProviders);
+      llmHelper.setModel(supportedModelId, allProviders);
 
       // Close the selector window if open
       appState.modelSelectorWindowHelper.hideWindow();
@@ -2888,7 +2908,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       // Broadcast to all windows so NativelyInterface can update its selector
       BrowserWindow.getAllWindows().forEach((win) => {
         if (!win.isDestroyed()) {
-          win.webContents.send("model-changed", modelId);
+          win.webContents.send("model-changed", supportedModelId);
         }
       });
 
@@ -2904,10 +2924,10 @@ export function initializeIpcHandlers(appState: AppState): void {
     try {
       const { CredentialsManager } = require("./services/CredentialsManager");
       const cm = CredentialsManager.getInstance();
-      return { model: cm.getDefaultModel() };
+      return { model: resolveSupportedDefaultModel(cm, cm.getDefaultModel()) };
     } catch (error: any) {
       console.error("Error getting default model:", error);
-      return { model: "gemini-3.1-flash-lite-preview" };
+      return { model: "codex:gpt-5.5" };
     }
   });
 

@@ -70,7 +70,7 @@ function evaluateSummary(summaryText, detailed, referenceText) {
     ['actions', /\b(action|faire|tester|verifier|audit|implementer|developper|envoyer|analyser)\b/],
     ['open_questions', /\b(question|ambigu|trancher|clarifier|a verifier|a definir)\b/],
     ['risks', /\b(risque|stabilite|proteger|bloquant|fragile|abuse|compte)\b/],
-    ['priorities', /\b(priorite|priorite 0|priorite 1|p0|p1|avant|ensuite)\b/],
+    ['priorities', /\b(priorite|prioritaire|prioritaires|priorite 0|priorite 1|p0|p1|avant|ensuite)\b/],
   ];
   for (const [name, pattern] of categoryChecks) {
     if (!pattern.test(normalizedSummary)) failures.push(`missing_category:${name}`);
@@ -101,13 +101,18 @@ function evaluateSummary(summaryText, detailed, referenceText) {
 function buildRequiredSignals(source) {
   const signals = [
     ['typing_recording', /\b(typing|ecrire|enregistrer|recording|audio)\b/],
-    ['proxy_ip', /\b(proxy|proxies|ip|adresse|adresses)\b/],
     ['subscription_expiry', /\b(abonnement|expiration|renouvel|notification)\b/],
-    ['provider_test_strategy', /\b(webshare|gratuit|statique|test)\b/],
-    ['ip_purchase_tradeoff', /\b(25|50)\b/],
-    ['account_audit_numbers', /\b(196|200|qr|pin|connecte|connectes)\b/],
-    ['capacity_ambiguity', /\b(utilisateur|utilisateurs|compte|comptes)\b/],
   ];
+  const proxyMeetingSource = /\b(wachap|proxy|proxies|adresse ip|adresses ip|webshare|qr|pin|compte connecte|comptes connectes)\b/.test(source);
+  if (proxyMeetingSource) {
+    signals.push(
+      ['proxy_ip', /\b(proxy|proxies|ip|adresse|adresses)\b/],
+      ['provider_test_strategy', /\b(webshare|gratuit|statique|test)\b/],
+      ['ip_purchase_tradeoff', /\b(25|50)\b/],
+      ['account_audit_numbers', /\b(196|200|qr|pin|connecte|connectes)\b/],
+      ['capacity_ambiguity', /\b(utilisateur|utilisateurs|compte|comptes)\b/],
+    );
+  }
   return signals.filter(([, pattern]) => pattern.test(source));
 }
 

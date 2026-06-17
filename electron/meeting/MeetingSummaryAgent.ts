@@ -156,6 +156,15 @@ QUALITY BAR:
 - Do not copy raw transcript lines. Synthesize clean meaning.
 - Avoid filler such as "the meeting covered".
 
+SECTION RULES:
+- "Décisions": each bullet must state an explicit decision, orientation retenue, or arbitrage.
+- "Plan d'action": each bullet must describe a concrete next step, owner-free if necessary, but operational.
+- "Questions ouvertes": each bullet must preserve a real ambiguity, pending confirmation, or unresolved tradeoff.
+- "Risques": each bullet must state a concrete failure mode, stability concern, or business risk.
+- "Points à vérifier": each bullet must name a validation, measurement, or follow-up check.
+- Use explicit wording such as "Décision retenue :", "Action :", "Question ouverte :", "Risque :", and "À vérifier :" when it fits naturally.
+- Mention priorities or sequencing when the evidence implies them ("priorité immédiate", "avant", "ensuite", "d'abord").
+
 ${briefBlock ? `MEETING BRIEF:\n${briefBlock}\n` : ''}
 ${previous ? `PREVIOUS SUMMARY TO IMPROVE:\n${previous}\n` : ''}
 
@@ -243,7 +252,10 @@ ${sectionShape}
     for (const section of sections || []) {
       const title = String(section.title || '').trim();
       if (!title) continue;
-      byTitle.set(this.normalize(title), Array.isArray(section.bullets) ? section.bullets.filter(Boolean) : []);
+      byTitle.set(
+        this.normalize(title),
+        this.formatSectionBullets(title, Array.isArray(section.bullets) ? section.bullets.filter(Boolean) : []),
+      );
     }
 
     return AGENT_SECTION_TITLES.map((title) => {
@@ -504,17 +516,32 @@ ${sectionShape}
 
     const signalChecks: Array<[RegExp, RegExp, string]> = [
       [/\b(typing|en train d ecrire|en train d enregistrer|recording)\b/, /\b(typing|ecrire|enregistrer|recording|audio)\b/, 'missing_typing_recording'],
-      [/\b(proxy|proxies|adresse ip|adresses ip|webshare)\b/, /\b(proxy|proxies|ip|webshare|adresse)\b/, 'missing_proxy_ip'],
       [/\b(abonnement|expiration|expire|renouvel)\b/, /\b(abonnement|expiration|renouvel|notification)\b/, 'missing_subscription_expiry'],
-      [/\b(webshare|gratuit|gratuits|statique|statiques)\b/, /\b(webshare|gratuit|statique|test)\b/, 'missing_provider_test_strategy'],
-      [/\b(25|50)\b/, /\b(25|50)\b/, 'missing_25_50_tradeoff'],
-      [/\b(196|200|qr|pin)\b/, /\b(196|200|qr|pin|connect)\b/, 'missing_account_audit_numbers'],
+    ];
+    const proxyMeetingEvidence = /\b(wachap|proxy|proxies|adresse ip|adresses ip|webshare|qr|pin|compte connecte|comptes connectes)\b/.test(evidenceText);
+    if (proxyMeetingEvidence) {
+      signalChecks.push(
+        [/\b(proxy|proxies|adresse ip|adresses ip|webshare)\b/, /\b(proxy|proxies|ip|webshare|adresse)\b/, 'missing_proxy_ip'],
+        [/\b(webshare|gratuit|gratuits|statique|statiques)\b/, /\b(webshare|gratuit|statique|test)\b/, 'missing_provider_test_strategy'],
+        [/\b(25|50)\b.*\b(ip|proxy|proxies|adresse|adresses|webshare|compte|comptes)\b|\b(ip|proxy|proxies|adresse|adresses|webshare|compte|comptes)\b.*\b(25|50)\b/, /\b(25|50)\b/, 'missing_25_50_tradeoff'],
+        [/\b(196|200|qr|pin)\b/, /\b(196|200|qr|pin|connect)\b/, 'missing_account_audit_numbers'],
+      );
+    }
+    const categoryChecks: Array<[RegExp, string]> = [
+      [/\b(decision|decide|retenu|orientation|trancher|arbitrage)\b/, 'missing_decision_language'],
+      [/\b(action|faire|tester|verifier|audit|implementer|developper|envoyer|analyser)\b/, 'missing_action_language'],
+      [/\b(question|ambigu|clarifier|a verifier|a definir)\b/, 'missing_open_question_language'],
+      [/\b(risque|stabilite|bloquant|fragile|compte)\b/, 'missing_risk_language'],
+      [/\b(priorite|prioritaire|prioritaires|avant|ensuite|d abord)\b/, 'missing_priority_language'],
     ];
 
     for (const [sourcePattern, summaryPattern, check] of signalChecks) {
       if (sourcePattern.test(evidenceText) && !summaryPattern.test(summaryText)) {
         checks.push(check);
       }
+    }
+    for (const [pattern, check] of categoryChecks) {
+      if (!pattern.test(summaryText)) checks.push(check);
     }
 
     let score = 100;
@@ -602,6 +629,42 @@ ${sectionShape}
 
   private cleanText(text: string): string {
     return String(text || '').replace(/\s+/g, ' ').trim();
+  }
+
+  private formatSectionBullets(title: string, bullets: string[]): string[] {
+    const normalizedTitle = this.normalize(title);
+    return (bullets || [])
+      .map((bullet) => this.cleanText(bullet))
+      .filter(Boolean)
+      .map((bullet) => {
+        if (normalizedTitle.includes('decisions')) {
+          return this.prefixBullet(bullet, 'Décision retenue');
+        }
+        if (normalizedTitle.includes('plan d action')) {
+          return this.prefixBullet(bullet, 'Action');
+        }
+        if (normalizedTitle.includes('questions ouvertes')) {
+          return this.prefixBullet(bullet, 'Question ouverte');
+        }
+        if (normalizedTitle.includes('risques')) {
+          return this.prefixBullet(bullet, 'Risque');
+        }
+        if (normalizedTitle.includes('points a verifier')) {
+          return this.prefixBullet(bullet, 'À vérifier');
+        }
+        return bullet;
+      });
+  }
+
+  private prefixBullet(bullet: string, label: string): string {
+    const clean = this.cleanText(bullet);
+    if (!clean) return '';
+    const normalizedBullet = this.normalize(clean);
+    const normalizedLabel = this.normalize(label);
+    if (normalizedBullet.startsWith(`${normalizedLabel} `) || normalizedBullet.startsWith(`${normalizedLabel} :`)) {
+      return clean;
+    }
+    return `${label} : ${clean}`;
   }
 
   private normalize(text: string): string {

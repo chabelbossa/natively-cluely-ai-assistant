@@ -9,6 +9,7 @@ import { ModesManager } from './services/ModesManager';
 import { MeetingAction, MeetingActionOrchestrator } from './meeting/MeetingActionOrchestrator';
 import { MeetingContextPacket, MeetingContextPacketBuilder } from './meeting/MeetingContextPacketBuilder';
 import { MeetingDebugRecorder } from './diagnostics/MeetingDebugRecorder';
+import { buildPromptProfileBlockForMode } from './llm/PromptProfileRegistry';
 import {
     AnswerLLM, AssistLLM, BrainstormLLM, ClarifyLLM, CodeHintLLM, FollowUpLLM, RecapLLM,
     FollowUpQuestionsLLM, WhatToAnswerLLM,
@@ -123,12 +124,12 @@ export class IntelligenceEngine extends EventEmitter {
     private readonly triggerCooldown: number = 3000; // 3 seconds
     private readonly activeModeContextMaxChars: number = 12_000;
     private readonly actionTimeoutsMs: Record<MeetingAction, number> = {
-        WHAT_TO_SAY: 7_500,
-        CLARIFY: 6_500,
-        FOLLOW_UP_QUESTION: 7_000,
-        ANSWER: 9_000,
+        WHAT_TO_SAY: 16_000,
+        CLARIFY: 12_000,
+        FOLLOW_UP_QUESTION: 12_000,
+        ANSWER: 18_000,
         RECAP: 18_000,
-        VIBE_INTERVIEW_SAY_THIS: 6_500,
+        VIBE_INTERVIEW_SAY_THIS: 14_000,
     };
     private actionOrchestrator: MeetingActionOrchestrator;
     private contextPacketBuilder: MeetingContextPacketBuilder;
@@ -155,8 +156,9 @@ export class IntelligenceEngine extends EventEmitter {
             const modesManager = ModesManager.getInstance();
             const mode = modesManager.getActiveMode();
             const contextBlock = modesManager.buildActiveModeContextBlock().trim();
-
-            if (!mode && !contextBlock) return '';
+            const promptProfileBlock = buildPromptProfileBlockForMode(mode
+                ? { name: mode.name, templateType: mode.templateType }
+                : null);
 
             const modeHeader = mode
                 ? `<active_mode name="${mode.name}" template="${mode.templateType}" />`
@@ -164,13 +166,19 @@ export class IntelligenceEngine extends EventEmitter {
             const cappedContext = contextBlock.length > this.activeModeContextMaxChars
                 ? `${contextBlock.slice(0, this.activeModeContextMaxChars)}\n[...active mode context truncated]`
                 : contextBlock;
+            const modeContextBlock = (mode || cappedContext)
+                ? [
+                    `[PRE-MEETING / MODE CONTEXT]`,
+                    modeHeader,
+                    cappedContext,
+                    `[/PRE-MEETING / MODE CONTEXT]`,
+                    `Use this as background memory only. The live transcript remains the source of truth for what is being discussed right now.`,
+                ].filter(Boolean).join('\n')
+                : '';
 
             return [
-                `[PRE-MEETING / MODE CONTEXT]`,
-                modeHeader,
-                cappedContext,
-                `[/PRE-MEETING / MODE CONTEXT]`,
-                `Use this as background memory only. The live transcript remains the source of truth for what is being discussed right now.`,
+                promptProfileBlock,
+                modeContextBlock,
             ].filter(Boolean).join('\n');
         } catch (error: any) {
             console.warn('[IntelligenceEngine] Failed to load active mode context:', error?.message || error);
@@ -414,6 +422,12 @@ export class IntelligenceEngine extends EventEmitter {
         const targetKeywords = this.extractContentKeywords(targetText);
         const evidenceKeywords = this.extractContentKeywords(evidenceText);
         const expectedKeywords = [...new Set([...targetKeywords, ...evidenceKeywords])].slice(0, 18);
+        const outputWords = normalizedOutput.split(' ').filter(Boolean).length;
+        const answerAction = action === 'WHAT_TO_SAY' || action === 'VIBE_INTERVIEW_SAY_THIS' || action === 'ANSWER';
+        const directQuestionWithEvidence =
+            answerAction &&
+            packet.actionTarget?.kind === 'direct_question' &&
+            (expectedKeywords.length >= 5 || packet.contextTrustScore >= 0.55 || (packet.questionCandidates?.length || 0) >= 2);
 
         if (!normalizedOutput) reasons.push('empty_output');
         if (this.isInsufficientContextFallback(output) && (packet.hasReliableInterlocutor || expectedKeywords.length >= 3)) {
@@ -429,7 +443,6 @@ export class IntelligenceEngine extends EventEmitter {
             reasons.push('generic_meeting_language');
         }
 
-        const answerAction = action === 'WHAT_TO_SAY' || action === 'VIBE_INTERVIEW_SAY_THIS' || action === 'ANSWER';
         if (answerAction && this.shouldReplaceLiveActionOutput(action, output, packet)) {
             reasons.push('does_not_answer_action_target');
         }
@@ -452,8 +465,11 @@ export class IntelligenceEngine extends EventEmitter {
             }
         }
 
-        if (answerAction && normalizedOutput.split(' ').filter(Boolean).length <= 9 && expectedKeywords.length >= 5) {
+        if (answerAction && outputWords <= 9 && expectedKeywords.length >= 5) {
             reasons.push('too_short_for_available_context');
+        }
+        if (directQuestionWithEvidence && outputWords < 35) {
+            reasons.push('underdeveloped_interview_answer');
         }
 
         const score = Math.max(0, Math.min(100, 100 - reasons.length * 18));
@@ -463,8 +479,16 @@ export class IntelligenceEngine extends EventEmitter {
             'does_not_answer_action_target',
             'answered_question_with_question',
             'manual_answer_echo_or_weak',
+            'too_short_for_available_context',
+            'underdeveloped_interview_answer',
         ]);
-        const repairable = reasons.some((reason) => hardReasons.has(reason) || reason.includes('generic') || reason.includes('missing'));
+        const repairable = reasons.some((reason) =>
+            hardReasons.has(reason) ||
+            reason.includes('generic') ||
+            reason.includes('missing') ||
+            reason.includes('short') ||
+            reason.includes('underdeveloped')
+        );
 
         return {
             ok: reasons.length === 0,
@@ -531,10 +555,10 @@ export class IntelligenceEngine extends EventEmitter {
                     return 'Return exactly one follow-up question that advances the current concrete topic. No list.';
                 case 'WHAT_TO_SAY':
                 case 'VIBE_INTERVIEW_SAY_THIS':
-                    return 'Return the exact words the local user can say aloud. One or two short sentences are allowed when needed.';
+                    return 'Return the exact words the local user can say aloud. Use 3-6 strong sentences when the selected question is technical, behavioral, architectural, or context-rich; do not collapse it into a phrase.';
                 case 'ANSWER':
                 default:
-                    return 'Answer the local user directly with a meeting-specific synthesis.';
+                    return 'Answer the local user directly with a meeting-specific synthesis. Use enough detail to be professionally useful, not a fragment.';
             }
         })();
 
@@ -667,6 +691,9 @@ Goal:
         const normalized = this.normalizeForComparison(question || '');
         if (!normalized) return '';
 
+        const technicalFallback = this.buildTechnicalInterviewFallbackAnswer(normalized, french);
+        if (technicalFallback) return technicalFallback;
+
         if (/\bpourquoi\b/.test(normalized) && /\bconserver\b/.test(normalized) && /\bandroid\b/.test(normalized)) {
             return french
                 ? "Je veux conserver Android parce que le problème concerne seulement WaChap : je veux nettoyer les données inutiles de WaChap sans réinitialiser le téléphone ni perdre mes autres applications, réglages ou fichiers."
@@ -677,6 +704,64 @@ Goal:
             return french
                 ? "Je veux le conserver parce que la suppression doit viser uniquement l'élément problématique, pas les données utiles ni l'environnement complet."
                 : "I want to keep it because the cleanup should target only the problematic item, not the useful data or the whole environment.";
+        }
+
+        return '';
+    }
+
+    private buildTechnicalInterviewFallbackAnswer(normalizedQuestion: string, french: boolean): string {
+        if (/\barchitecture\b/.test(normalizedQuestion) && /\bcomplexe\b/.test(normalizedQuestion) && /\b(defis|surmont)\b/.test(normalizedQuestion)) {
+            return french
+                ? "Je prendrais un exemple d'architecture backend avec plusieurs services qui doivent partager l'authentification, les droits d'accès et des données sensibles. Le premier défi était d'éviter un couplage trop fort entre les services, donc j'ai clarifié les frontières métier et gardé des contrats d'API simples et documentés. Le deuxième défi était la sécurité : j'ai centralisé l'identité avec OAuth2/OIDC, ajouté une validation stricte côté backend et protégé les accès aux données par rôle. Le troisième défi était l'observabilité, parce qu'une architecture distribuée devient vite difficile à déboguer sans logs corrélés, métriques et traces. Ce que j'ai appris, c'est qu'une architecture complexe doit rester explicable, mesurable et alignée sur le besoin métier, sinon elle devient une dette technique."
+                : "I would use an example of a backend architecture with several services sharing authentication, permissions, and sensitive data. The first challenge was avoiding tight coupling, so I clarified domain boundaries and kept API contracts simple and documented. The second challenge was security: I centralized identity with OAuth2/OIDC, added strict backend validation, and protected data access by role. The third challenge was observability, because distributed systems become hard to debug without correlated logs, metrics, and traces. What I learned is that a complex architecture must remain explainable, measurable, and aligned with business needs, otherwise it becomes technical debt.";
+        }
+
+        if (/\b(monolith|monolithe|monolithique)\b/.test(normalizedQuestion) && /\bmicro(service|services|finance|finances)\b/.test(normalizedQuestion)) {
+            return french
+                ? "Le premier piège est de découper trop tôt, avant d'avoir bien identifié les frontières métier. On risque alors de transformer un monolithe simple en système distribué plus difficile à tester, déployer et observer. Je préfère commencer par mesurer les vrais points de friction, isoler progressivement les domaines qui changent indépendamment, puis extraire un service seulement quand le gain est clair. Il faut aussi anticiper la cohérence des données, les transactions distribuées, la latence réseau et l'observabilité. Pour moi, les microservices ne sont pas un objectif en soi : c'est une solution à utiliser quand l'organisation, le produit et l'exploitation sont assez matures."
+                : "The first trap is splitting too early, before the domain boundaries are clear. That can turn a simple monolith into a distributed system that is harder to test, deploy, and observe. I prefer measuring the real friction points, isolating domains that evolve independently, and extracting a service only when the benefit is clear. You also have to anticipate data consistency, distributed transactions, network latency, and observability. For me, microservices are not a goal by themselves; they are a solution to use when the organization, product, and operations are mature enough.";
+        }
+
+        if (/\b(goulot|latence|etranglement|performance|production)\b/.test(normalizedQuestion)) {
+            return french
+                ? "Je commence par mesurer avant de modifier quoi que ce soit. Je regarde les métriques applicatives, les logs, le profiling et les requêtes SQL pour identifier si la latence vient du code, de la base de données, du réseau ou d'une ressource saturée. Ensuite, je reproduis le problème dans un environnement contrôlé pour confirmer l'hypothèse. Je corrige de façon ciblée : index, optimisation de requête, cache, réduction d'un traitement coûteux ou meilleure parallélisation selon le cas. Enfin, je valide avec des tests de charge et je surveille les métriques après déploiement pour vérifier qu'on a vraiment supprimé le goulot sans créer un nouvel effet de bord."
+                : "I start by measuring before changing anything. I look at application metrics, logs, profiling, and SQL queries to identify whether the latency comes from code, the database, the network, or a saturated resource. Then I reproduce the issue in a controlled environment to validate the hypothesis. I apply a targeted fix: indexing, query optimization, caching, reducing an expensive computation, or improving parallelism depending on the case. Finally, I validate with load tests and monitor metrics after deployment to make sure the bottleneck is really gone without creating a new side effect.";
+        }
+
+        if (/\b(docker|kubernetes|cicd|ci cd|pipeline|infrastructure)\b/.test(normalizedQuestion)) {
+            return french
+                ? "Selon moi, un développeur backend moderne doit comprendre l'infrastructure parce que le code et son environnement d'exécution sont liés. Je ne remplace pas forcément le DevOps, mais je dois produire des services faciles à conteneuriser, configurer et déployer. Concrètement, cela veut dire écrire des Dockerfiles propres, exposer des health checks, gérer correctement les variables d'environnement et participer aux pipelines CI/CD. Avec Kubernetes, je dois aussi comprendre les notions de ressources, scaling, logs et readiness pour éviter de livrer une application fragile en production. Cette culture me permet de livrer du code qui fonctionne réellement dans les conditions de production, pas seulement en local."
+                : "In my view, a modern backend developer must understand infrastructure because code and its runtime environment are connected. I do not necessarily replace DevOps, but I must build services that are easy to containerize, configure, and deploy. Concretely, that means writing clean Dockerfiles, exposing health checks, handling environment variables properly, and contributing to CI/CD pipelines. With Kubernetes, I also need to understand resources, scaling, logs, and readiness so I do not ship fragile production services. This mindset helps me deliver code that works in production conditions, not only locally.";
+        }
+
+        if (/\b(code review|revue de code|desaccord|desaccord profond|junior|ego)\b/.test(normalizedQuestion)) {
+            return french
+                ? "Je réagis d'abord en cherchant à comprendre le raisonnement de l'autre développeur. Je pose des questions précises plutôt que de rejeter directement l'approche, parce qu'il peut y avoir une contrainte que je n'ai pas vue. Ensuite, j'argumente avec des critères objectifs : maintenabilité, sécurité, performance, cohérence avec les standards de l'équipe et coût futur. Si le désaccord reste important, je propose une discussion courte ou un test comparatif pour trancher sur des faits. L'objectif n'est pas d'avoir raison, mais de protéger la qualité du projet tout en gardant une relation saine dans l'équipe."
+                : "I first try to understand the other developer's reasoning. I ask precise questions instead of rejecting the approach immediately, because there may be a constraint I have not seen. Then I argue with objective criteria: maintainability, security, performance, consistency with team standards, and future cost. If the disagreement remains important, I suggest a short discussion or a comparison test to decide based on facts. The goal is not to be right; it is to protect project quality while keeping a healthy team relationship.";
+        }
+
+        if (/\b(echec|echoue|appris|rectifi|decision technique)\b/.test(normalizedQuestion)) {
+            return french
+                ? "Un bon exemple serait une décision où j'ai choisi une solution plus complexe que nécessaire, par exemple une abstraction ou un découpage trop ambitieux pour le besoin réel. Sur le moment, l'idée semblait préparer la scalabilité, mais elle a rendu le code plus difficile à comprendre, à tester et à maintenir. J'ai rectifié en revenant à une approche plus simple, mieux documentée, et en impliquant l'équipe dans le refactoring pour éviter de déplacer le problème. Ce que j'ai appris, c'est qu'une bonne décision technique ne se mesure pas seulement à son élégance, mais à sa lisibilité, son coût de maintenance et sa valeur métier réelle."
+                : "A good example would be a decision where I chose a solution that was more complex than necessary, such as an abstraction or split that was too ambitious for the real need. At the time, it seemed useful for scalability, but it made the code harder to understand, test, and maintain. I corrected it by returning to a simpler, better documented approach and involving the team in the refactoring so we did not just move the problem elsewhere. What I learned is that a good technical decision is not only about elegance; it is about readability, maintenance cost, and real business value.";
+        }
+
+        if (/\b(dette technique|refactor|refactoriser|product owner|direction)\b/.test(normalizedQuestion)) {
+            return french
+                ? "Je présente la dette technique comme un risque produit, pas seulement comme une préférence de développeur. J'explique son impact concret : ralentissement des livraisons, bugs plus fréquents, coût de maintenance plus élevé ou risque opérationnel. Ensuite, je propose un arbitrage raisonnable, par exemple réserver 15 à 20 % du sprint à la refactorisation ou traiter la dette en même temps que les fonctionnalités concernées. L'objectif est de montrer que nettoyer le code protège la vélocité future et réduit le risque business. Avec cette approche, le Product Owner comprend mieux que la refactorisation peut être une décision de livraison, pas une pause dans la livraison."
+                : "I present technical debt as a product risk, not just a developer preference. I explain its concrete impact: slower delivery, more frequent bugs, higher maintenance cost, or operational risk. Then I propose a reasonable tradeoff, for example reserving 15 to 20 percent of the sprint for refactoring or addressing debt alongside related features. The goal is to show that cleaning the code protects future velocity and reduces business risk. With this approach, the Product Owner can see refactoring as a delivery decision, not a pause in delivery.";
+        }
+
+        if (/\b(pic|trafic|vote|vente flash|serveurs|tombent|absorber)\b/.test(normalizedQuestion)) {
+            return french
+                ? "Pour absorber un pic massif, je commence par éviter que tout arrive en synchrone sur le backend. J'utilise du cache pour les lectures fréquentes, des files de messages pour lisser les écritures ou traitements lourds, et du scaling horizontal pour augmenter la capacité des services stateless. Je protège aussi la base de données avec des limites de débit, de bons index et éventuellement des lectures répliquées. Ensuite, je mets en place des métriques, alertes et tests de charge pour connaître le seuil réel du système avant l'événement. L'idée est de concevoir une architecture qui dégrade proprement si nécessaire, au lieu de tomber brutalement."
+                : "To absorb a major traffic spike, I first avoid sending everything synchronously to the backend. I use caching for frequent reads, message queues to smooth writes or heavy processing, and horizontal scaling to increase stateless service capacity. I also protect the database with rate limits, proper indexes, and possibly read replicas. Then I set up metrics, alerts, and load tests to know the system's real limit before the event. The idea is to design an architecture that degrades gracefully if needed instead of failing suddenly.";
+        }
+
+        if (/\b(secur|security|api|rest|graphql|base|donnees|database)\b/.test(normalizedQuestion)) {
+            return french
+                ? "Je commence par sécuriser l'accès avec une authentification solide et une autorisation claire, par exemple OAuth2/OIDC ou JWT bien configuré selon le contexte. Ensuite, je valide toutes les entrées côté serveur pour éviter les injections, et j'utilise des requêtes préparées ou un ORM correctement maîtrisé pour protéger la base de données. Je chiffre les échanges avec TLS et je protège les secrets avec un gestionnaire adapté, jamais en dur dans le code. Pour GraphQL, j'ajoute aussi des limites de profondeur et de complexité, et je contrôle l'accès au niveau des champs sensibles. Enfin, je complète avec du rate limiting, des logs de sécurité et une surveillance des comportements anormaux."
+                : "I start by securing access with strong authentication and clear authorization, for example OAuth2/OIDC or properly configured JWT depending on the context. Then I validate all inputs server-side to prevent injections, and I use prepared statements or a well-controlled ORM to protect the database. I encrypt traffic with TLS and protect secrets with a proper secret manager, never hardcoded in the codebase. For GraphQL, I also add depth and complexity limits, and I control access at the sensitive-field level. Finally, I add rate limiting, security logs, and monitoring for abnormal behavior.";
         }
 
         return '';
@@ -738,6 +823,9 @@ Goal:
             normalized.includes("don't have enough reliable") ||
             normalized.includes("didn't catch that") ||
             normalized.includes("did not catch that") ||
+            normalized.includes("could you repeat") ||
+            normalized.includes("repeat that") ||
+            normalized.includes("address your question properly") ||
             normalized.includes("transcript doesn't mention") ||
             normalized.includes("transcript does not mention") ||
             normalized.includes("current context is insufficient");

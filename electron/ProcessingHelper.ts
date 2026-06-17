@@ -139,9 +139,13 @@ export class ProcessingHelper {
     });
 
     // NEW: Load Default Model Config
-    const defaultModel = credManager.getDefaultModel();
+    const storedDefaultModel = credManager.getDefaultModel();
+    const defaultModel = this.resolveStartupDefaultModel(storedDefaultModel, credManager);
+    if (storedDefaultModel !== defaultModel) {
+      credManager.setDefaultModel(defaultModel);
+    }
     if (defaultModel) {
-      console.log(`[ProcessingHelper] Loading stored Default Model: ${defaultModel}`);
+      console.log(`[ProcessingHelper] Loading startup Default Model: ${defaultModel}`);
       const customProviders = credManager.getCustomProviders();
       const curlProviders = credManager.getCurlProviders();
       const allProviders = [...(customProviders || []), ...(curlProviders || [])];
@@ -159,6 +163,14 @@ export class ProcessingHelper {
     if (aiResponseLanguage) {
       this.llmHelper.setAiResponseLanguage(aiResponseLanguage);
     }
+  }
+
+  private resolveStartupDefaultModel(defaultModel: string, credManager: CredentialsManager): string {
+    const codexPreferredModel = credManager.getCodexPreferredModel() || 'codex:gpt-5.5';
+    const normalized = String(defaultModel || '').trim();
+    const isSupported = normalized.startsWith('codex:') || normalized.startsWith('gemini-') || normalized.startsWith('models/');
+
+    return isSupported ? normalized : codexPreferredModel;
   }
 
   public async processScreenshots(): Promise<void> {

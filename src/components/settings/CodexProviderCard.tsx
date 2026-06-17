@@ -28,6 +28,7 @@ export const CodexProviderCard: React.FC<CodexProviderCardProps> = ({
         { id: 'codex:gpt-5.4', label: 'GPT 5.4 Codex' },
         { id: 'codex:gpt-5.4-mini', label: 'GPT 5.4 Mini Codex' },
         { id: 'codex:gpt-5.3', label: 'GPT 5.3 Codex' },
+        { id: 'codex:gpt-5.3-codex-spark', label: 'GPT 5.3 Codex Spark' },
         { id: 'codex:gpt-5.2', label: 'GPT 5.2 Codex' },
         { id: 'codex:gpt-5.1', label: 'GPT 5.1 Codex' },
         { id: 'codex:gpt-5', label: 'GPT 5 Codex' },

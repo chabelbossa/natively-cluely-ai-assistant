@@ -37,7 +37,7 @@ const OPENAI_MODEL = "gpt-5.4"
 const CLAUDE_MODEL = "claude-sonnet-4-6"
 const DEEPINFRA_MODEL = "deepinfra:stepfun-ai/Step-3.5-Flash"
 const OPENCODE_GO_MODEL = "opencode-go/deepseek-v4-flash"
-const CODEX_MODEL = "codex:gpt-5.4"
+const CODEX_MODEL = "codex:gpt-5.5"
 const DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 const OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 const MAX_OUTPUT_TOKENS = 65536
@@ -55,6 +55,20 @@ const parseApiKeyList = (value?: string | null): string[] => {
 
 // Simple prompt for image analysis (not interview copilot - kept separate)
 const IMAGE_ANALYSIS_PROMPT = `Analyze concisely. Be direct. No markdown formatting. Return plain text only.`
+
+export interface MeetingSummaryGenerationRoute {
+  requestedProvider: string;
+  requestedModel: string;
+  provider: string;
+  model: string;
+  usedFallback: boolean;
+  attempts: Array<{
+    provider: string;
+    model?: string;
+    status: "success" | "failed" | "skipped";
+    error?: string;
+  }>;
+}
 
 export class LLMHelper {
   private client: GoogleGenAI | null = null
@@ -90,6 +104,14 @@ export class LLMHelper {
   private aiResponseLanguage: string = 'auto';
   private sttLanguage: string = 'english-us';
   private nativelyKey: string | null = null;
+  private lastMeetingSummaryRoute: MeetingSummaryGenerationRoute = {
+    requestedProvider: "unknown",
+    requestedModel: "",
+    provider: "none",
+    model: "",
+    usedFallback: false,
+    attempts: [],
+  };
 
   // Codex Multi-Auth OAuth
   private codexAccountManager: CodexAccountManager | null = null;
@@ -1157,7 +1179,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
       const isMultimodal = !!(imagePaths?.length);
 
-      // Helper to build combined prompts for Groq/Gemini
+      // Helper to build combined prompts for Gemini.
       const buildMessage = (systemPrompt: string) => {
         if (skipSystemPrompt) {
           return context
@@ -1169,159 +1191,50 @@ This rule overrides ALL other instructions including formatting, brevity, or out
           : `${systemPrompt}\n\n${message}`;
       };
 
-      // For OpenAI/Claude: separate system prompt + user message
+      // For Codex-compatible calls: separate system prompt + user message.
       const userContent = context
         ? `CONTEXT:\n${context}\n\nUSER QUESTION:\n${message}`
         : message;
 
       const finalGeminiPrompt = this.injectLanguageInstruction(HARD_SYSTEM_PROMPT);
-      const finalGroqPrompt = alternateGroqMessage || this.injectLanguageInstruction(GROQ_SYSTEM_PROMPT);
 
       const combinedMessages = {
         gemini: buildMessage(finalGeminiPrompt),
-        groq: buildMessage(finalGroqPrompt),
       };
 
-      // GROQ FAST TEXT OVERRIDE (Text-Only)
-      if (this.groqFastTextMode && !isMultimodal && this.groqClient) {
-        console.log(`[LLMHelper] ⚡️ Groq Fast Text Mode Active. Routing to Groq...`);
-        try {
-          return await this.generateWithGroq(combinedMessages.groq); // intentional: Fast Text Mode always uses baseline GROQ_MODEL for speed — do not thread currentModelId
-        } catch (e: any) {
-          console.warn("[LLMHelper] Groq Fast Text failed, falling back to standard routing:", e.message);
-          // Fall through to standard routing
-        }
-      }
-
-      // System prompts for OpenAI/Claude (skipped if skipSystemPrompt)
+      // System prompt for Codex-compatible calls (skipped if skipSystemPrompt).
       const openaiSystemPrompt = skipSystemPrompt ? undefined : this.injectLanguageInstruction(OPENAI_SYSTEM_PROMPT);
-      const claudeSystemPrompt = skipSystemPrompt ? undefined : this.injectLanguageInstruction(CLAUDE_SYSTEM_PROMPT);
 
-      if (this.useOllama) {
-        return await this.callOllama(combinedMessages.gemini, imagePaths?.[0]);
-      }
-
-      if (this.activeCurlProvider) {
-        return await this.chatWithCurl(message, skipSystemPrompt ? undefined : this.injectLanguageInstruction(CUSTOM_SYSTEM_PROMPT), imagePaths?.[0]);
-      }
-
-      if (this.customProvider) {
-        console.log(`[LLMHelper] Using Custom Provider: ${this.customProvider.name}`);
-        // For non-streaming call — use rich CUSTOM prompts since custom providers can be cloud models
-        const customSystemPrompt = skipSystemPrompt ? "" : this.injectLanguageInstruction(CUSTOM_SYSTEM_PROMPT);
-        const response = await this.executeCustomProvider(
-          this.customProvider.curlCommand,
-          combinedMessages.gemini,
-          customSystemPrompt,
-          message,
-          context || "",
-          imagePaths?.[0]
-        );
-        return this.processResponse(response);
-      }
-
-      // --- Direct Routing based on Selected Model ---
-      if (this.currentModelId === 'natively') {
-        const { CredentialsManager } = require('./services/CredentialsManager');
-        const nativelyKey = CredentialsManager.getInstance().getNativelyApiKey();
-        if (nativelyKey) {
-          try {
-            return await this.generateWithNatively(userContent, openaiSystemPrompt, imagePaths);
-          } catch (err: any) {
-            console.warn('[LLMHelper] Natively API failed in chatWithGemini, falling back to Gemini:', err.message);
-            // Fall through to smart dynamic fallback below
-          }
-        }
-        // No key or call failed — fall through to default routing
-      }
       if (this.isCodexModel(this.currentModelId) && this.codexClient) {
         return await this.generateWithCodex(userContent, openaiSystemPrompt);
       }
-      if (this.isOpenAiModel(this.currentModelId) && this.openaiClient) {
-        return await this.generateWithOpenai(userContent, openaiSystemPrompt, imagePaths);
-      }
-      const compatibleRoute = this.resolveOpenAICompatibleRoute(this.currentModelId);
-      if (compatibleRoute?.client && !isMultimodal) {
-        return await this.generateWithOpenAICompatible(compatibleRoute, userContent, openaiSystemPrompt);
-      }
-      if (this.isClaudeModel(this.currentModelId) && this.claudeClient) {
-        return await this.generateWithClaude(userContent, claudeSystemPrompt, imagePaths);
-      }
-      if (this.isGroqModel(this.currentModelId) && this.groqClient) {
-        if (isMultimodal && imagePaths) {
-          return await this.generateWithGroqMultimodal(userContent, imagePaths, openaiSystemPrompt);
-        }
-        return await this.generateWithGroq(combinedMessages.groq, this.currentModelId);
-      }
-
-      // Fallback (Gemini) - logic handled below by SMART DYNAMIC FALLBACK list
-
-      // ============================================================
-      // SMART DYNAMIC FALLBACK (Non-Streaming)
-      // Multimodal: Gemini Flash → OpenAI → Claude → Gemini Pro (Groq excluded)
-      // Text-only:  Gemini Flash → Gemini Pro → Groq → OpenAI → Claude
-      // OpenAI/Claude use proper system+user message separation
-      // ============================================================
+      // Interview lock: automatic generation is intentionally restricted to Codex + Gemini.
+      // Other configured providers remain stored, but are not used in fallback routing.
       type ProviderAttempt = { name: string; execute: () => Promise<string> };
       const providers: ProviderAttempt[] = [];
 
-      // Get auto-discovered text model IDs from ModelVersionManager
-      const textOpenAI = this.modelVersionManager.getTextTieredModels(TextModelFamily.OPENAI).tier1;
       const textGeminiFlash = this.modelVersionManager.getTextTieredModels(TextModelFamily.GEMINI_FLASH).tier1;
       const textGeminiPro = this.modelVersionManager.getTextTieredModels(TextModelFamily.GEMINI_PRO).tier1;
-      const textClaude = this.modelVersionManager.getTextTieredModels(TextModelFamily.CLAUDE).tier1;
-      const textGroq = this.modelVersionManager.getTextTieredModels(TextModelFamily.GROQ).tier1;
 
       if (isMultimodal) {
-        // MULTIMODAL PROVIDER ORDER: [Natively] -> Codex -> OpenAI -> Gemini Flash -> Claude -> Gemini Pro -> Groq -> Custom/Ollama
-        if (this.hasNatively()) {
-          providers.push({ name: 'Natively API', execute: () => this.generateWithNatively(userContent, openaiSystemPrompt, imagePaths) });
-        }
         if (this.codexClient) {
-          providers.push({ name: `Codex (${this.currentModelId})`, execute: () => this.generateWithCodex(userContent, openaiSystemPrompt) });
-        }
-        if (this.openaiClient) {
-          providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.generateWithOpenai(userContent, openaiSystemPrompt, imagePaths, textOpenAI) });
+          const codexModel = this.isCodexModel(this.currentModelId) ? this.currentModelId : CODEX_MODEL;
+          providers.push({ name: `Codex (${codexModel})`, execute: () => this.generateWithCodex(userContent, openaiSystemPrompt, codexModel) });
         }
         if (this.client) {
           providers.push({
             name: `Gemini Flash (${textGeminiFlash})`,
             execute: () => this.tryGenerateResponse(combinedMessages.gemini, imagePaths, textGeminiFlash)
           });
-        }
-        if (this.claudeClient) {
-          providers.push({ name: `Claude (${textClaude})`, execute: () => this.generateWithClaude(userContent, claudeSystemPrompt, imagePaths, textClaude) });
-        }
-        if (this.client) {
           providers.push({
             name: `Gemini Pro (${textGeminiPro})`,
             execute: () => this.tryGenerateResponse(combinedMessages.gemini, imagePaths, textGeminiPro)
           });
         }
-        if (this.groqClient) {
-          providers.push({
-            name: `Groq (meta-llama/llama-4-scout-17b-16e-instruct)`,
-            execute: () => this.generateWithGroqMultimodal(userContent, imagePaths!, openaiSystemPrompt)
-          });
-        }
       } else {
-        // TEXT-ONLY: [Natively] -> Codex -> Groq -> Gemini Flash -> Gemini Pro -> OpenAI -> Claude
-        if (this.hasNatively()) {
-          providers.push({ name: 'Natively API', execute: () => this.generateWithNatively(userContent, openaiSystemPrompt) });
-        }
         if (this.codexClient) {
-          providers.push({ name: `Codex (${this.currentModelId})`, execute: () => this.generateWithCodex(userContent, openaiSystemPrompt) });
-        }
-        if (this.groqClient) {
-          providers.push({ name: `Groq (${textGroq})`, execute: () => this.generateWithGroq(combinedMessages.groq, textGroq) });
-        }
-        if (this.deepInfraClient) {
-          const route = this.resolveOpenAICompatibleRoute(DEEPINFRA_MODEL)!;
-          providers.push({ name: `DeepInfra (${route.model})`, execute: () => this.generateWithOpenAICompatible(route, userContent, openaiSystemPrompt) });
-        }
-        if (this.openCodeGoClient) {
-          const route = this.resolveOpenAICompatibleRoute(OPENCODE_GO_MODEL)!;
-          providers.push({ name: `OpenCode Go (${route.model})`, execute: () => this.generateWithOpenAICompatible(route, userContent, openaiSystemPrompt) });
+          const codexModel = this.isCodexModel(this.currentModelId) ? this.currentModelId : CODEX_MODEL;
+          providers.push({ name: `Codex (${codexModel})`, execute: () => this.generateWithCodex(userContent, openaiSystemPrompt, codexModel) });
         }
         if (this.client) {
           providers.push({
@@ -1333,16 +1246,10 @@ This rule overrides ALL other instructions including formatting, brevity, or out
             execute: () => this.tryGenerateResponse(combinedMessages.gemini, undefined, textGeminiPro)
           });
         }
-        if (this.openaiClient) {
-          providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.generateWithOpenai(userContent, openaiSystemPrompt, undefined, textOpenAI) });
-        }
-        if (this.claudeClient) {
-          providers.push({ name: `Claude (${textClaude})`, execute: () => this.generateWithClaude(userContent, claudeSystemPrompt, undefined, textClaude) });
-        }
       }
 
       if (providers.length === 0) {
-        return "No AI providers configured. Please add at least one API key in Settings.";
+        return "No Codex or Gemini provider is configured. Please connect Codex or add a Gemini API key in Settings.";
       }
 
       // ============================================================
@@ -2257,23 +2164,16 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
 
   /**
-   * Stream chat response with Groq-first fallback chain for text-only,
-   * and Gemini-only for multimodal (images)
-   * 
-   * TEXT-ONLY FALLBACK CHAIN:
-   * 1. Groq (llama-3.3-70b-versatile) - Primary
-   * 2. Gemini Flash - 1st fallback
-   * 3. Gemini Flash + Pro parallel - 2nd fallback
-   * 4. Gemini Flash retries (max 3) - Last resort
-   * 
-   * MULTIMODAL: Gemini-only (existing logic)
+   * Stream chat response with a temporary Codex-first provider lock.
+   * OpenCode Go and other stored providers can stay saved, but this
+   * fallback chain only uses Codex, then Gemini Flash/Pro.
    */
   public async * streamChatWithGemini(message: string, imagePaths?: string[], context?: string, skipSystemPrompt: boolean = false): AsyncGenerator<string, void, unknown> {
     console.log(`[LLMHelper] streamChatWithGemini called with message:`, message.substring(0, 50));
 
     const isMultimodal = !!(imagePaths?.length);
 
-    // Build single-string messages for Groq/Gemini (which use combined prompts)
+    // Build single-string messages for Gemini.
     const buildCombinedMessage = (systemPrompt: string) => {
       const finalPrompt = skipSystemPrompt ? systemPrompt : this.injectLanguageInstruction(systemPrompt);
       if (skipSystemPrompt) {
@@ -2286,90 +2186,38 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         : `${finalPrompt}\n\n${message}`;
     };
 
-    // For OpenAI/Claude: separate system prompt + user message (proper API pattern)
+    // For Codex-compatible calls: separate system prompt + user message.
     const userContent = context
       ? `CONTEXT:\n${context}\n\nUSER QUESTION:\n${message}`
       : message;
 
     const combinedMessages = {
       gemini: buildCombinedMessage(HARD_SYSTEM_PROMPT),
-      groq: buildCombinedMessage(GROQ_SYSTEM_PROMPT),
     };
 
-    if (this.useOllama) {
-      const response = await this.callOllama(combinedMessages.gemini, imagePaths?.[0]);
-      yield response;
-      return;
-    }
-
-    // ============================================================
-    // SMART DYNAMIC FALLBACK: Build provider list using auto-discovered
-    // text models from ModelVersionManager.
-    // Multimodal requests EXCLUDE Groq (no vision support)
-    // Text-only requests can use ALL providers
-    // OpenAI/Claude use proper system+user message separation for quality
-    // ============================================================
+    // Codex-first temporary lock: OpenCode Go and other stored providers remain
+    // in credentials, but are not used as automatic fallbacks.
     type ProviderAttempt = { name: string; execute: () => AsyncGenerator<string, void, unknown> };
     const providers: ProviderAttempt[] = [];
 
-    // System prompts for OpenAI/Claude (skipped if skipSystemPrompt)
     const openaiSystemPrompt = skipSystemPrompt ? undefined : this.injectLanguageInstruction(OPENAI_SYSTEM_PROMPT);
-    const claudeSystemPrompt = skipSystemPrompt ? undefined : this.injectLanguageInstruction(CLAUDE_SYSTEM_PROMPT);
 
-    // Get auto-discovered text model IDs from ModelVersionManager
-    const textOpenAI = this.modelVersionManager.getTextTieredModels(TextModelFamily.OPENAI).tier1;
     const textGeminiFlash = this.modelVersionManager.getTextTieredModels(TextModelFamily.GEMINI_FLASH).tier1;
     const textGeminiPro = this.modelVersionManager.getTextTieredModels(TextModelFamily.GEMINI_PRO).tier1;
-    const textClaude = this.modelVersionManager.getTextTieredModels(TextModelFamily.CLAUDE).tier1;
-    const textGroq = this.modelVersionManager.getTextTieredModels(TextModelFamily.GROQ).tier1;
 
     if (isMultimodal) {
-      // MULTIMODAL PROVIDER ORDER: [Natively] -> Codex -> OpenAI -> Gemini Flash -> Claude -> Gemini Pro -> Groq Scout 4
-      if (this.hasNatively()) {
-        providers.push({ name: 'Natively API', execute: () => this.streamWithNatively(userContent, openaiSystemPrompt, imagePaths) });
-      }
       if (this.codexClient) {
-        providers.push({ name: `Codex (${this.currentModelId})`, execute: () => this.streamWithCodex(userContent, openaiSystemPrompt) });
-      }
-      if (this.openaiClient) {
-        providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenaiMultimodal(userContent, imagePaths!, openaiSystemPrompt, textOpenAI) });
+        const codexModel = this.isCodexModel(this.currentModelId) ? this.currentModelId : CODEX_MODEL;
+        providers.push({ name: `Codex (${codexModel})`, execute: () => this.streamWithCodex(userContent, openaiSystemPrompt, codexModel) });
       }
       if (this.client) {
         providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(combinedMessages.gemini, textGeminiFlash, imagePaths) });
-      }
-      if (this.claudeClient) {
-        providers.push({ name: `Claude (${textClaude})`, execute: () => this.streamWithClaudeMultimodal(userContent, imagePaths!, claudeSystemPrompt, textClaude) });
-      }
-      if (this.client) {
         providers.push({ name: `Gemini Pro (${textGeminiPro})`, execute: () => this.streamWithGeminiModel(combinedMessages.gemini, textGeminiPro, imagePaths) });
       }
-      if (this.groqClient) {
-        providers.push({ name: `Groq (meta-llama/llama-4-scout-17b-16e-instruct)`, execute: () => this.streamWithGroqMultimodal(userContent, imagePaths!, openaiSystemPrompt) });
-      }
     } else {
-      // TEXT-ONLY PROVIDER ORDER: [Natively] → Groq → OpenAI → Claude → Gemini Flash → Gemini Pro
-      if (this.hasNatively()) {
-        providers.push({ name: 'Natively API', execute: () => this.streamWithNatively(userContent, openaiSystemPrompt) });
-      }
       if (this.codexClient) {
-        providers.push({ name: `Codex (${this.currentModelId})`, execute: () => this.streamWithCodex(userContent, openaiSystemPrompt) });
-      }
-      if (this.groqClient) {
-        providers.push({ name: `Groq (${textGroq})`, execute: () => this.streamWithGroq(combinedMessages.groq, textGroq) });
-      }
-      if (this.deepInfraClient) {
-        const route = this.resolveOpenAICompatibleRoute(DEEPINFRA_MODEL)!;
-        providers.push({ name: `DeepInfra (${route.model})`, execute: () => this.streamWithOpenAICompatible(route, userContent, openaiSystemPrompt) });
-      }
-      if (this.openCodeGoClient) {
-        const route = this.resolveOpenAICompatibleRoute(OPENCODE_GO_MODEL)!;
-        providers.push({ name: `OpenCode Go (${route.model})`, execute: () => this.streamWithOpenAICompatible(route, userContent, openaiSystemPrompt) });
-      }
-      if (this.openaiClient) {
-        providers.push({ name: `OpenAI (${textOpenAI})`, execute: () => this.streamWithOpenai(userContent, openaiSystemPrompt, textOpenAI) });
-      }
-      if (this.claudeClient) {
-        providers.push({ name: `Claude (${textClaude})`, execute: () => this.streamWithClaude(userContent, claudeSystemPrompt, textClaude) });
+        const codexModel = this.isCodexModel(this.currentModelId) ? this.currentModelId : CODEX_MODEL;
+        providers.push({ name: `Codex (${codexModel})`, execute: () => this.streamWithCodex(userContent, openaiSystemPrompt, codexModel) });
       }
       if (this.client) {
         providers.push({ name: `Gemini Flash (${textGeminiFlash})`, execute: () => this.streamWithGeminiModel(combinedMessages.gemini, textGeminiFlash) });
@@ -2378,7 +2226,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
 
     if (providers.length === 0) {
-      yield "No AI providers configured. Please add at least one API key in Settings.";
+      yield "No Codex or Gemini provider configured. Please connect Codex or add a Gemini API key in Settings.";
       return;
     }
 
@@ -2395,16 +2243,6 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         if (!a.name.startsWith(currentFamilyLabel) && b.name.startsWith(currentFamilyLabel)) return 1;
         return 0;
       });
-    }
-
-    // Natively is always first when configured, regardless of which model is selected.
-    // The sort above may have displaced it — restore it to position 0.
-    if (this.hasNatively() && providers[0]?.name !== 'Natively API') {
-      const idx = providers.findIndex(p => p.name === 'Natively API');
-      if (idx > 0) {
-        const [entry] = providers.splice(idx, 1);
-        providers.unshift(entry);
-      }
     }
 
     // ============================================================
@@ -2559,62 +2397,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       ? `CONTEXT:\n${context}\n\nUSER QUESTION:\n${message}`
       : message;
 
-    // GROQ FAST TEXT OVERRIDE (Text-Only)
-    // Two paths: local Groq key → call Groq directly; Natively API only → send fast_mode:true
-    // to the server so it routes to its internal Groq pool (llama-3.3-70b-versatile).
-    if (this.groqFastTextMode && !isMultimodal) {
-      if (this.groqClient) {
-        console.log(`[LLMHelper] ⚡️ Groq Fast Text Mode Active (Streaming). Routing to local Groq...`);
-        try {
-          const groqSystem = systemPromptOverride || GROQ_SYSTEM_PROMPT;
-          const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
-          const groqFullMessage = `${finalGroqSystem}\n\n${userContent}`;
-          yield* this.streamWithGroq(groqFullMessage, GROQ_MODEL);
-          return;
-        } catch (e: any) {
-          console.warn("[LLMHelper] Groq Fast Text streaming failed, falling back:", e.message);
-        }
-        // Local Groq failed — fall through to Natively if available
-      }
-      if (this.hasNatively()) {
-        // streamWithNatively → generateWithNatively → sends fast_mode:true → server Groq pool
-        console.log(`[LLMHelper] ⚡️ Groq Fast Text Mode Active (Streaming). Routing to Natively server Groq pool...`);
-        try {
-          yield* this.streamWithNatively(userContent, finalSystemPrompt);
-          return;
-        } catch (e: any) {
-          console.warn("[LLMHelper] Natively fast-mode failed, falling back:", e.message);
-        }
-      }
-    }
-
-    // 1. Ollama Streaming
-    if (this.useOllama) {
-      yield* this.streamWithOllama(message, context, finalSystemPrompt, imagePaths);
-      return;
-    }
-
-    // 2a. CustomProvider (switchToCustom path) — full SSE-capable streaming
-    if (this.customProvider) {
-      yield* this.streamWithCustom(message, context, imagePaths, finalSystemPrompt);
-      return;
-    }
-
-    // 2b. Custom Provider Streaming (via cURL - Non-streaming fallback for now)
-    if (this.activeCurlProvider) {
-      const response = await this.executeCustomProvider(
-        this.activeCurlProvider.curlCommand,
-        userContent,
-        finalSystemPrompt,
-        message,
-        context || "",
-        imagePaths?.[0]
-      );
-      yield response;
-      return;
-    }
-
-    // 3. Cloud Provider Routing
+    // Interview lock: stream routing is intentionally restricted to Codex + Gemini.
 
     // Codex (OAuth ChatGPT)
     if (this.isCodexModel(this.currentModelId) && this.codexClient) {
@@ -2624,90 +2407,14 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       return;
     }
 
-    // OpenAI
-    if (this.isOpenAiModel(this.currentModelId) && this.openaiClient) {
+    if (this.codexClient && !this.isGeminiModel(this.currentModelId)) {
       const openAiSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
       const finalOpenAiSystem = this.injectLanguageInstruction(openAiSystem);
-      if (isMultimodal && imagePaths) {
-        yield* this.streamWithOpenaiMultimodal(userContent, imagePaths, finalOpenAiSystem);
-      } else {
-        yield* this.streamWithOpenai(userContent, finalOpenAiSystem);
-      }
+      yield* this.streamWithCodex(userContent, finalOpenAiSystem, CODEX_MODEL);
       return;
     }
 
-    const compatibleRoute = this.resolveOpenAICompatibleRoute(this.currentModelId);
-    if (compatibleRoute?.client && !isMultimodal) {
-      const openAiSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
-      const finalOpenAiSystem = this.injectLanguageInstruction(openAiSystem);
-      yield* this.streamWithOpenAICompatible(compatibleRoute, userContent, finalOpenAiSystem);
-      return;
-    }
-
-    // Claude
-    if (this.isClaudeModel(this.currentModelId) && this.claudeClient) {
-      const claudeSystem = systemPromptOverride || CLAUDE_SYSTEM_PROMPT;
-      const finalClaudeSystem = this.injectLanguageInstruction(claudeSystem);
-      if (isMultimodal && imagePaths) {
-        yield* this.streamWithClaudeMultimodal(userContent, imagePaths, finalClaudeSystem);
-      } else {
-        yield* this.streamWithClaude(userContent, finalClaudeSystem);
-      }
-      return;
-    }
-
-    // Groq (Text + Multimodal)
-    if (this.isGroqModel(this.currentModelId) && this.groqClient) {
-      if (isMultimodal && imagePaths) {
-        // Route multimodal to Groq Llama 4 Scout (vision-capable)
-        const groqSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
-        const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
-        yield* this.streamWithGroqMultimodal(userContent, imagePaths, finalGroqSystem);
-        return;
-      }
-      // Text-only Groq
-      const groqSystem = systemPromptOverride ? baseSystemPrompt : GROQ_SYSTEM_PROMPT;
-      const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
-      const groqFullMessage = `${finalGroqSystem}\n\n${userContent}`;
-      yield* this.streamWithGroq(groqFullMessage, this.currentModelId);
-      return;
-    }
-
-    // 3b. Natively API
-    if (this.currentModelId === 'natively') {
-      const { CredentialsManager } = require('./services/CredentialsManager');
-      const nativelyKey = CredentialsManager.getInstance().getNativelyApiKey();
-      if (nativelyKey) {
-        try {
-          const response = await this.generateWithNatively(userContent, finalSystemPrompt, imagePaths);
-          yield response;
-          return;
-        } catch (err: any) {
-          console.warn('[LLMHelper] Natively API failed in streamChat, trying Groq fallback:', err.message);
-          // Try Groq before Gemini — Groq key is more commonly available
-          if (this.groqClient) {
-            try {
-              if (isMultimodal && imagePaths) {
-                const groqSystem = systemPromptOverride || OPENAI_SYSTEM_PROMPT;
-                const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
-                yield* this.streamWithGroqMultimodal(userContent, imagePaths, finalGroqSystem);
-              } else {
-                const groqSystem = systemPromptOverride ? baseSystemPrompt : GROQ_SYSTEM_PROMPT;
-                const finalGroqSystem = this.injectLanguageInstruction(groqSystem);
-                yield* this.streamWithGroq(`${finalGroqSystem}\n\n${userContent}`); // intentional: emergency fallback waterfall — use stable GROQ_MODEL baseline, not currentModelId
-              }
-              return;
-            } catch (groqErr: any) {
-              console.warn('[LLMHelper] Groq fallback also failed, trying Gemini:', groqErr.message);
-            }
-          }
-          // Fall through to Gemini
-        }
-      }
-      // No key or all fallbacks failed — fall through to Gemini
-    }
-
-    // 4. Gemini Routing & Fallback
+    // Gemini Routing & Fallback
     if (this.client) {
       // Direct model use if specified
       if (this.isGeminiModel(this.currentModelId)) {
@@ -2722,17 +2429,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       return;
     }
 
-    // 5. Last-resort: Natively API (if user has a key but no cloud provider configured)
-    if (this.hasNatively()) {
-      try {
-        yield* this.streamWithNatively(userContent, finalSystemPrompt, imagePaths);
-        return;
-      } catch (e: any) {
-        console.warn('[LLMHelper] Natively last-resort fallback failed:', e.message);
-      }
-    }
-
-    throw new Error("No AI provider configured. Please add at least one API key in Settings.");
+    throw new Error("No Codex or Gemini provider configured. Please connect Codex or add a Gemini API key in Settings.");
   }
 
   /**
@@ -3550,6 +3247,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     return this.useOllama ? this.ollamaModel : this.currentModelId;
   }
 
+  public getLastMeetingSummaryRoute(): MeetingSummaryGenerationRoute {
+    return {
+      ...this.lastMeetingSummaryRoute,
+      attempts: this.lastMeetingSummaryRoute.attempts.map((attempt) => ({ ...attempt })),
+    };
+  }
+
   /**
    * Get the Gemini client for mode-specific LLMs
    * Used by AnswerLLM, AssistLLM, FollowUpLLM, RecapLLM
@@ -3787,13 +3491,40 @@ This rule overrides ALL other instructions including formatting, brevity, or out
    * Robust Meeting Summary Generation
    * Strategy:
    * 0. Custom / cURL Provider (if user selected one — always takes priority)
-   * 1. Natively API (if configured)
-   * 2. Groq (if context text < 100k tokens approx)
-   * 3. Gemini Flash (Retry 2x)
-   * 4. Gemini Pro (Retry 5x)
+   * 1. Codex (if the selected/default model is Codex)
+   * 2. Natively API (if configured)
+   * 3. Groq (if context text < 100k tokens approx)
+   * 4. Gemini Flash (Retry 2x)
+   * 5. Gemini Pro (Retry 5x)
    */
   public async generateMeetingSummary(systemPrompt: string, context: string, groqSystemPrompt?: string): Promise<string> {
     console.log(`[LLMHelper] generateMeetingSummary called. Context length: ${context.length}`);
+    const route: MeetingSummaryGenerationRoute = {
+      requestedProvider: this.getCurrentProvider(),
+      requestedModel: this.getCurrentModel(),
+      provider: "none",
+      model: "",
+      usedFallback: false,
+      attempts: [],
+    };
+    this.lastMeetingSummaryRoute = route;
+    const markSuccess = (provider: string, model: string) => {
+      route.provider = provider;
+      route.model = model;
+      route.usedFallback = provider !== route.requestedProvider || model !== route.requestedModel;
+      route.attempts.push({ provider, model, status: "success" });
+    };
+    const markFailure = (provider: string, model: string, error: any) => {
+      route.attempts.push({
+        provider,
+        model,
+        status: "failed",
+        error: String(error?.message || error || "unknown error").slice(0, 500),
+      });
+    };
+    const markSkipped = (provider: string, model: string, error: string) => {
+      route.attempts.push({ provider, model, status: "skipped", error });
+    };
 
     // Helper: Estimate tokens (crude approximation: 4 chars = 1 token)
     const estimateTokens = (text: string) => Math.ceil(text.length / 4);
@@ -3817,14 +3548,38 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         const text = await this.withTimeout(collectChunks(), 60000, 'Custom Provider Summary');
         if (text.trim().length > 0) {
           console.log(`[LLMHelper] ✅ Custom provider summary generated successfully.`);
+          markSuccess("custom", this.getCurrentModel());
           return this.processResponse(text);
         }
       } catch (e: any) {
+        markFailure("custom", this.getCurrentModel(), e);
         console.warn(`[LLMHelper] ⚠️ Custom provider summary failed: ${e.message}. Falling back...`);
       }
     }
 
-    // ATTEMPT 1: Natively API (if configured — first in chain)
+    // ATTEMPT 1: Codex (honor the selected/default Codex model before legacy fallbacks)
+    if (this.isCodexModel(this.currentModelId) && this.codexClient) {
+      try {
+        console.log(`[LLMHelper] Attempting Codex (${this.currentModelId}) for summary...`);
+        const text = await this.withTimeout(
+          this.generateWithCodex(`Context:\n${context}`, systemPrompt, this.currentModelId),
+          90000,
+          `Codex Summary (${this.currentModelId})`
+        );
+        if (text.trim().length > 0) {
+          console.log(`[LLMHelper] ✅ Codex summary generated successfully.`);
+          markSuccess("codex", this.currentModelId);
+          return this.processResponse(text);
+        }
+      } catch (e: any) {
+        markFailure("codex", this.currentModelId, e);
+        console.warn(`[LLMHelper] ⚠️ Codex summary failed: ${e.message}. Falling back...`);
+      }
+    } else if (this.isCodexModel(this.currentModelId)) {
+      markSkipped("codex", this.currentModelId, "Codex client not initialized");
+    }
+
+    // ATTEMPT 2: Natively API
     if (this.hasNatively()) {
       try {
         console.log(`[LLMHelper] Attempting Natively API for summary...`);
@@ -3835,13 +3590,16 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         );
         if (text.trim().length > 0) {
           console.log(`[LLMHelper] ✅ Natively API summary generated successfully.`);
+          markSuccess("natively", "natively");
           return this.processResponse(text);
         }
       } catch (e: any) {
+        markFailure("natively", "natively", e);
         console.warn(`[LLMHelper] ⚠️ Natively API summary failed: ${e.message}. Falling back...`);
       }
     }
 
+    // ATTEMPT 3: Groq
     if (this.groqClient && tokenCount < 100000) {
       console.log(`[LLMHelper] Attempting Groq for summary...`);
       try {
@@ -3864,18 +3622,21 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         const text = response.choices[0]?.message?.content || "";
         if (text.trim().length > 0) {
           console.log(`[LLMHelper] ✅ Groq summary generated successfully.`);
+          markSuccess("groq", GROQ_MODEL);
           return this.processResponse(text);
         }
       } catch (e: any) {
+        markFailure("groq", GROQ_MODEL, e);
         console.warn(`[LLMHelper] ⚠️ Groq summary failed: ${e.message}. Falling back to Gemini...`);
       }
     } else {
       if (tokenCount >= 100000) {
+        markSkipped("groq", GROQ_MODEL, `Context too large for Groq (${tokenCount} tokens)`);
         console.log(`[LLMHelper] Context too large for Groq (${tokenCount} tokens). Skipping straight to Gemini.`);
       }
     }
 
-    // ATTEMPT 3: Gemini Flash (with 2 retries = 3 attempts total)
+    // ATTEMPT 4: Gemini Flash (with 2 retries = 3 attempts total)
     console.log(`[LLMHelper] Attempting Gemini Flash for summary...`);
     const contents = [{ text: `${systemPrompt}\n\nCONTEXT:\n${context}` }];
 
@@ -3888,9 +3649,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
         );
         if (text.trim().length > 0) {
           console.log(`[LLMHelper] ✅ Gemini Flash summary generated successfully (Attempt ${attempt}).`);
+          markSuccess("gemini", GEMINI_FLASH_MODEL);
           return this.processResponse(text);
         }
       } catch (e: any) {
+        markFailure("gemini", GEMINI_FLASH_MODEL, e);
         console.warn(`[LLMHelper] ⚠️ Gemini Flash attempt ${attempt}/3 failed: ${e.message}`);
         if (attempt < 3) {
           await new Promise(r => setTimeout(r, 1000 * attempt)); // Linear backoff
@@ -3898,7 +3661,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       }
     }
 
-    // ATTEMPT 4: Gemini Pro
+    // ATTEMPT 5: Gemini Pro
     console.log(`[LLMHelper] ⚠️ Flash exhausted. Switching to Gemini Pro for robust retry...`);
     const maxProRetries = 5;
 
@@ -3923,9 +3686,11 @@ This rule overrides ALL other instructions including formatting, brevity, or out
 
           if (text.trim().length > 0) {
             console.log(`[LLMHelper] ✅ Gemini Pro summary generated successfully.`);
+            markSuccess("gemini", GEMINI_PRO_MODEL);
             return this.processResponse(text);
           }
         } catch (e: any) {
+          markFailure("gemini", GEMINI_PRO_MODEL, e);
           console.warn(`[LLMHelper] ⚠️ Gemini Pro attempt ${attempt} failed: ${e.message}`);
           // Aggressive backoff for Pro: 2s, 4s, 8s, 16s, 32s
           const backoff = 2000 * Math.pow(2, attempt - 1);
@@ -4025,7 +3790,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   // Codex Multi-Auth (ChatGPT OAuth)
   // =========================================================================
 
-  private async generateWithCodex(userMessage: string, systemPrompt?: string): Promise<string> {
+  private async generateWithCodex(userMessage: string, systemPrompt?: string, modelId: string = this.currentModelId): Promise<string> {
     if (!this.codexClient) {
       throw new Error("Codex client not initialized");
     }
@@ -4035,13 +3800,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
     input.push({ role: "user", content: userMessage });
     return this.codexClient.generateResponse({
-      model: this.resolveCodexModel(),
+      model: this.resolveCodexModel(modelId),
       input,
       store: false,
     });
   }
 
-  private async *streamWithCodex(userMessage: string, systemPrompt?: string): AsyncGenerator<string> {
+  private async *streamWithCodex(userMessage: string, systemPrompt?: string, modelId: string = this.currentModelId): AsyncGenerator<string> {
     if (!this.codexClient) {
       throw new Error("Codex client not initialized");
     }
@@ -4051,7 +3816,7 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     }
     input.push({ role: "user", content: userMessage });
     yield* this.codexClient.streamResponse({
-      model: this.resolveCodexModel(),
+      model: this.resolveCodexModel(modelId),
       input,
       stream: true,
       store: false,

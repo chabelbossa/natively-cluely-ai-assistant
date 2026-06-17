@@ -85,7 +85,6 @@ export const AIProvidersSettings: React.FC = () => {
     const [apiKey, setApiKey] = useState('');
     const [groqApiKey, setGroqApiKey] = useState('');
     const [deepInfraApiKey, setDeepInfraApiKey] = useState('');
-    const [openCodeGoApiKey, setOpenCodeGoApiKey] = useState('');
     const [openaiApiKey, setOpenaiApiKey] = useState('');
     const [claudeApiKey, setClaudeApiKey] = useState('');
 
@@ -100,7 +99,6 @@ export const AIProvidersSettings: React.FC = () => {
     const [testStatus, setTestStatus] = useState<Record<string, 'idle' | 'testing' | 'success' | 'error'>>({});
     const [testError, setTestError] = useState<Record<string, string>>({});
 
-    // --- Custom Providers ---
     const [customProviders, setCustomProviders] = useState<CustomProvider[]>([]);
     const [isEditingCustom, setIsEditingCustom] = useState(false);
     const [editingProvider, setEditingProvider] = useState<CustomProvider | null>(null);
@@ -116,7 +114,7 @@ export const AIProvidersSettings: React.FC = () => {
     const [isRefreshingOllama, setIsRefreshingOllama] = useState(false);
 
     // --- Default Model ---
-    const [defaultModel, setDefaultModel] = useState<string>('gemini-3.1-flash-lite-preview');
+    const [defaultModel, setDefaultModel] = useState<string>('codex:gpt-5.5');
     const [fastResponseMode, setFastResponseMode] = useState(false);
     const [credentialsLoaded, setCredentialsLoaded] = useState(false);
 
@@ -138,7 +136,6 @@ export const AIProvidersSettings: React.FC = () => {
                         gemini: creds.hasGeminiKey,
                         groq: creds.hasGroqKey,
                         deepinfra: !!creds.hasDeepInfraKey,
-                        opencode_go: !!creds.hasOpenCodeGoKey,
                         openai: creds.hasOpenaiKey,
                         claude: creds.hasClaudeKey,
                         natively: creds.hasNativelyKey || false,
@@ -159,27 +156,14 @@ export const AIProvidersSettings: React.FC = () => {
                     if (creds.geminiPreferredModel) pm.gemini = creds.geminiPreferredModel;
                     if (creds.groqPreferredModel) pm.groq = creds.groqPreferredModel;
                     if (creds.deepinfraPreferredModel) pm.deepinfra = creds.deepinfraPreferredModel;
-                    if (creds.openCodeGoPreferredModel) pm.opencode_go = creds.openCodeGoPreferredModel;
                     if (creds.openaiPreferredModel) pm.openai = creds.openaiPreferredModel;
                     if (creds.claudePreferredModel) pm.claude = creds.claudePreferredModel;
                     if (creds.codexPreferredModel) pm.codex = creds.codexPreferredModel;
                     setPreferredModels(pm);
                 }
 
-                // Now it's safe to read fast mode — hasStoredKey is already set so
-                // canUseFastMode will be correct when the enforcement effect runs.
-                // @ts-ignore
-                const fastMode = await window.electronAPI?.getGroqFastTextMode();
-                if (fastMode) setFastResponseMode(fastMode.enabled);
-
-                // Mark credentials as fully loaded so the enforcement effect can fire
+                // Mark credentials as fully loaded after the supported provider state is ready.
                 setCredentialsLoaded(true);
-
-                // @ts-ignore
-                const custom = await window.electronAPI?.getCustomProviders();
-                if (custom) {
-                    setCustomProviders(custom);
-                }
 
                 // Load persisted default model
                 // @ts-ignore
@@ -188,50 +172,12 @@ export const AIProvidersSettings: React.FC = () => {
                     setDefaultModel(result.model);
                 }
 
-                // Check Ollama
-                checkOllama();
-
             } catch (e) {
                 console.error("Failed to load settings:", e);
                 setCredentialsLoaded(true); // Unblock even on error
             }
         };
         loadCredentials();
-
-        // Listen for changes from other windows (2-way sync)
-        if (window.electronAPI?.onGroqFastTextChanged) {
-            // @ts-ignore
-            const unsubscribe = window.electronAPI.onGroqFastTextChanged((enabled: boolean) => {
-                setFastResponseMode(enabled);
-                localStorage.setItem('natively_groq_fast_text', String(enabled));
-            });
-            return () => unsubscribe();
-        }
-    }, []);
-
-    // Effect to enforce fast mode disabled if neither Groq key nor Natively API is configured.
-    // Guard with credentialsLoaded so this never fires during the initial async load phase
-    // (when hasStoredKey is still empty and canUseFastMode is incorrectly false).
-    useEffect(() => {
-        if (!credentialsLoaded) return;
-        if (!canUseFastMode && fastResponseMode) {
-            setFastResponseMode(false);
-            localStorage.setItem('natively_groq_fast_text', 'false');
-            // @ts-ignore
-            window.electronAPI?.setGroqFastTextMode(false);
-        }
-    }, [credentialsLoaded, canUseFastMode, fastResponseMode]);
-
-    // Poll for Ollama status every 3 seconds requesting smart start on mount
-    useEffect(() => {
-        // Immediate "Smart Start" check
-        ensureOllamaStartup();
-
-        // Background polling for maintenance
-        const interval = setInterval(() => {
-            checkOllama(false);
-        }, 3000);
-        return () => clearInterval(interval);
     }, []);
 
     const ensureOllamaStartup = async () => {
@@ -306,8 +252,6 @@ export const AIProvidersSettings: React.FC = () => {
             // @ts-ignore
             if (provider === 'deepinfra') result = await window.electronAPI.setDeepInfraApiKey(key);
             // @ts-ignore
-            if (provider === 'opencode_go') result = await window.electronAPI.setOpenCodeGoApiKey(key);
-            // @ts-ignore
             if (provider === 'openai') result = await window.electronAPI.setOpenaiApiKey(key);
             // @ts-ignore
             if (provider === 'claude') result = await window.electronAPI.setClaudeApiKey(key);
@@ -336,8 +280,6 @@ export const AIProvidersSettings: React.FC = () => {
             if (provider === 'groq') result = await window.electronAPI.setGroqApiKey('');
             // @ts-ignore
             if (provider === 'deepinfra') result = await window.electronAPI.setDeepInfraApiKey('');
-            // @ts-ignore
-            if (provider === 'opencode_go') result = await window.electronAPI.setOpenCodeGoApiKey('');
             // @ts-ignore
             if (provider === 'openai') result = await window.electronAPI.setOpenaiApiKey('');
             // @ts-ignore
@@ -382,7 +324,6 @@ export const AIProvidersSettings: React.FC = () => {
             gemini: 'https://aistudio.google.com/app/apikey',
             groq: 'https://console.groq.com/keys',
             deepinfra: 'https://deepinfra.com/dash/api_keys',
-            opencode_go: 'https://opencode.ai/docs/go/',
             openai: 'https://platform.openai.com/api-keys',
             claude: 'https://console.anthropic.com/settings/keys'
         };
@@ -525,10 +466,6 @@ export const AIProvidersSettings: React.FC = () => {
                         options={(() => {
                             const opts: { id: string; name: string }[] = [];
 
-                            if (hasStoredKey.natively) {
-                                opts.push({ id: 'natively', name: 'Natively API' });
-                            }
-
                             for (const [prov, cfg] of Object.entries(STANDARD_CLOUD_MODELS)) {
                                 if (!hasStoredKey[prov as keyof typeof hasStoredKey]) continue;
                                 cfg.ids.forEach((id, i) => opts.push({ id, name: cfg.names[i] }));
@@ -537,11 +474,9 @@ export const AIProvidersSettings: React.FC = () => {
                                     opts.push({ id: pm, name: prettifyModelId(pm) });
                                 }
                             }
-                            customProviders.forEach(p => opts.push({ id: p.id, name: p.name }));
-                            ollamaModels.forEach(m => opts.push({ id: `ollama-${m}`, name: `${m} (Local)` }));
-                            
                             if (defaultModel && !opts.find(o => o.id === defaultModel)) {
-                                opts.unshift({ id: defaultModel, name: prettifyModelId(defaultModel) });
+                                const supportedDefault = defaultModel.startsWith('codex:') || defaultModel.startsWith('gemini-') || defaultModel.startsWith('models/');
+                                if (supportedDefault) opts.unshift({ id: defaultModel, name: prettifyModelId(defaultModel) });
                             }
                             return opts;
                         })()}
@@ -553,38 +488,6 @@ export const AIProvidersSettings: React.FC = () => {
                     />
                 </div>
 
-                {/* Fast Response Mode */}
-                <div
-                    className={`bg-bg-item-surface rounded-xl p-5 border border-border-subtle flex items-center justify-between ${!canUseFastMode ? 'opacity-50 grayscale' : ''}`}
-                    title={!canUseFastMode ? "Requires a Groq API Key or Natively API to be configured" : ""}
-                >
-                    <div>
-                        <div className="flex items-center gap-2">
-                            <label className="block text-xs font-medium text-text-primary uppercase tracking-wide mb-0">Fast Response Mode</label>
-                            <span className="bg-orange-500/10 text-orange-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-orange-500/20">NEW</span>
-                        </div>
-                        <p className="text-[10px] text-text-secondary mt-0.5">Super fast responses using Groq Llama 3 for text. Multimodal requests still use your Default Model.</p>
-                        {!canUseFastMode && (
-                            <p className="text-[10px] text-orange-500 mt-0.5 font-medium">Requires a Groq API Key or Natively API to be configured.</p>
-                        )}
-                    </div>
-                    <div
-                        onClick={async () => {
-                            if (!canUseFastMode) {
-                                alert("Please configure a Groq API Key or Natively API first to enable Fast Response Mode.");
-                                return;
-                            }
-                            const newState = !fastResponseMode;
-                            setFastResponseMode(newState);
-                            localStorage.setItem('natively_groq_fast_text', String(newState));
-                            // @ts-ignore
-                            await window.electronAPI?.setGroqFastTextMode(newState);
-                        }}
-                        className={`w-11 h-6 rounded-full relative transition-colors ${!canUseFastMode ? 'cursor-not-allowed bg-bg-toggle-switch' : fastResponseMode ? 'bg-orange-500' : 'bg-bg-toggle-switch border border-border-muted'}`}
-                    >
-                        <div className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow-sm transition-transform ${fastResponseMode ? 'translate-x-5' : 'translate-x-0'}`} />
-                    </div>
-                </div>
             </div>
 
             {/* Cloud Providers */}
@@ -618,126 +521,6 @@ export const AIProvidersSettings: React.FC = () => {
                         keyPlaceholder="AIzaSy..."
                         keyUrl="https://aistudio.google.com/app/apikey"
                         onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, gemini: model }))}
-                    />
-
-                    {/* Groq */}
-                    <ProviderCard
-                        providerId="groq"
-                        providerName="Groq"
-                        apiKey={groqApiKey}
-                        preferredModel={preferredModels.groq}
-                        hasStoredKey={!!hasStoredKey.groq}
-                        maskedKeys={maskedKeys.groq || []}
-                        keyCount={keyCounts.groq || 0}
-                        onKeyChange={setGroqApiKey}
-                        onSaveKey={async () => { await handleSaveKey('groq', groqApiKey, setGroqApiKey); }}
-                        onRemoveKey={() => handleRemoveKey('groq', setGroqApiKey)}
-                        onAddKey={(key) => handleAddKey('groq', key)}
-                        onRemoveKeyByIndex={(index) => handleRemoveKeyByIndex('groq', index)}
-                        onTestConnection={() => handleTestConnection('groq', groqApiKey)}
-                        testStatus={testStatus.groq || 'idle'}
-                        testError={testError.groq}
-                        savingStatus={!!savingStatus.groq}
-                        savedStatus={!!savedStatus.groq}
-                        keyPlaceholder="gsk_..."
-                        keyUrl="https://console.groq.com/keys"
-                        onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, groq: model }))}
-                    />
-
-                    {/* DeepInfra */}
-                    <ProviderCard
-                        providerId="deepinfra"
-                        providerName="DeepInfra"
-                        apiKey={deepInfraApiKey}
-                        preferredModel={preferredModels.deepinfra}
-                        hasStoredKey={!!hasStoredKey.deepinfra}
-                        maskedKeys={maskedKeys.deepinfra || []}
-                        keyCount={keyCounts.deepinfra || 0}
-                        onKeyChange={setDeepInfraApiKey}
-                        onSaveKey={async () => { await handleSaveKey('deepinfra', deepInfraApiKey, setDeepInfraApiKey); }}
-                        onRemoveKey={() => handleRemoveKey('deepinfra', setDeepInfraApiKey)}
-                        onAddKey={(key) => handleAddKey('deepinfra', key)}
-                        onRemoveKeyByIndex={(index) => handleRemoveKeyByIndex('deepinfra', index)}
-                        onTestConnection={() => handleTestConnection('deepinfra', deepInfraApiKey)}
-                        testStatus={testStatus.deepinfra || 'idle'}
-                        testError={testError.deepinfra}
-                        savingStatus={!!savingStatus.deepinfra}
-                        savedStatus={!!savedStatus.deepinfra}
-                        keyPlaceholder="DeepInfra API key"
-                        keyUrl="https://deepinfra.com/dash/api_keys"
-                        onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, deepinfra: model }))}
-                    />
-
-                    {/* OpenCode Go */}
-                    <ProviderCard
-                        providerId="opencode_go"
-                        providerName="OpenCode Go"
-                        apiKey={openCodeGoApiKey}
-                        preferredModel={preferredModels.opencode_go}
-                        hasStoredKey={!!hasStoredKey.opencode_go}
-                        maskedKeys={maskedKeys.opencode_go || []}
-                        keyCount={keyCounts.opencode_go || 0}
-                        onKeyChange={setOpenCodeGoApiKey}
-                        onSaveKey={async () => { await handleSaveKey('opencode_go', openCodeGoApiKey, setOpenCodeGoApiKey); }}
-                        onRemoveKey={() => handleRemoveKey('opencode_go', setOpenCodeGoApiKey)}
-                        onAddKey={(key) => handleAddKey('opencode_go', key)}
-                        onRemoveKeyByIndex={(index) => handleRemoveKeyByIndex('opencode_go', index)}
-                        onTestConnection={() => handleTestConnection('opencode_go', openCodeGoApiKey)}
-                        testStatus={testStatus.opencode_go || 'idle'}
-                        testError={testError.opencode_go}
-                        savingStatus={!!savingStatus.opencode_go}
-                        savedStatus={!!savedStatus.opencode_go}
-                        keyPlaceholder="OpenCode Go API key"
-                        keyUrl="https://opencode.ai/docs/go/"
-                        onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, opencode_go: model }))}
-                    />
-
-                    {/* OpenAI */}
-                    <ProviderCard
-                        providerId="openai"
-                        providerName="OpenAI"
-                        apiKey={openaiApiKey}
-                        preferredModel={preferredModels.openai}
-                        hasStoredKey={!!hasStoredKey.openai}
-                        maskedKeys={maskedKeys.openai || []}
-                        keyCount={keyCounts.openai || 0}
-                        onKeyChange={setOpenaiApiKey}
-                        onSaveKey={async () => { await handleSaveKey('openai', openaiApiKey, setOpenaiApiKey); }}
-                        onRemoveKey={() => handleRemoveKey('openai', setOpenaiApiKey)}
-                        onAddKey={(key) => handleAddKey('openai', key)}
-                        onRemoveKeyByIndex={(index) => handleRemoveKeyByIndex('openai', index)}
-                        onTestConnection={() => handleTestConnection('openai', openaiApiKey)}
-                        testStatus={testStatus.openai || 'idle'}
-                        testError={testError.openai}
-                        savingStatus={!!savingStatus.openai}
-                        savedStatus={!!savedStatus.openai}
-                        keyPlaceholder="sk-..."
-                        keyUrl="https://platform.openai.com/api-keys"
-                        onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, openai: model }))}
-                    />
-
-                    {/* Claude */}
-                    <ProviderCard
-                        providerId="claude"
-                        providerName="Claude"
-                        apiKey={claudeApiKey}
-                        preferredModel={preferredModels.claude}
-                        hasStoredKey={!!hasStoredKey.claude}
-                        maskedKeys={maskedKeys.claude || []}
-                        keyCount={keyCounts.claude || 0}
-                        onKeyChange={setClaudeApiKey}
-                        onSaveKey={async () => { await handleSaveKey('claude', claudeApiKey, setClaudeApiKey); }}
-                        onRemoveKey={() => handleRemoveKey('claude', setClaudeApiKey)}
-                        onAddKey={(key) => handleAddKey('claude', key)}
-                        onRemoveKeyByIndex={(index) => handleRemoveKeyByIndex('claude', index)}
-                        onTestConnection={() => handleTestConnection('claude', claudeApiKey)}
-                        testStatus={testStatus.claude || 'idle'}
-                        testError={testError.claude}
-                        savingStatus={!!savingStatus.claude}
-                        savedStatus={!!savedStatus.claude}
-                        keyPlaceholder="sk-ant-..."
-                        keyUrl="https://console.anthropic.com/settings/keys"
-                        onPreferredModelChange={(model) => setPreferredModels(prev => ({ ...prev, claude: model }))}
                     />
 
                     {/* Codex (ChatGPT OAuth) */}
@@ -776,279 +559,6 @@ export const AIProvidersSettings: React.FC = () => {
                 </div>
             </div>
 
-            {/* Local (Ollama) Providers */}
-            <div className="space-y-5">
-                <div className="flex items-center justify-between mb-2">
-                    <div>
-                        <h3 className="text-sm font-bold text-text-primary mb-1">Local Models (Ollama)</h3>
-                        <p className="text-xs text-text-secondary">Run open-source models locally.</p>
-                    </div>
-                    <button
-                        onClick={async () => {
-                            setIsRefreshingOllama(true);
-                            await checkOllama(false);
-                            // Add a small delay for visual feedback if the check is too fast
-                            setTimeout(() => setIsRefreshingOllama(false), 500);
-                        }}
-                        className="p-2 rounded-lg text-text-secondary hover:text-text-primary hover:bg-bg-input transition-colors"
-                        title="Refresh Ollama"
-                        disabled={isRefreshingOllama}
-                    >
-                        <RefreshCw size={18} className={isRefreshingOllama ? "animate-spin" : ""} />
-                    </button>
-                </div>
-
-                <div className="bg-bg-item-surface rounded-xl p-5 border border-border-subtle">
-                    {ollamaStatus === 'checking' && (
-                        <div className="flex items-center gap-2 text-xs text-text-secondary">
-                            <span className="animate-spin">⏳</span> Checking for Ollama...
-                        </div>
-                    )}
-
-                    {ollamaStatus === 'fixing' && (
-                        <div className="flex items-center gap-2 text-xs text-text-secondary">
-                            <span className="animate-spin">🔧</span> Attempting to auto-fix connection...
-                        </div>
-                    )}
-
-                    {ollamaStatus === 'not-found' && (
-                        <div className="flex flex-col gap-2">
-                            <div className="flex items-center gap-2 text-xs text-red-400">
-                                <AlertCircle size={14} />
-                                <span>Ollama not detected</span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <p className="text-xs text-text-secondary">
-                                    Ensure Ollama is running (`ollama serve`).
-                                </p>
-                                <button
-                                    onClick={handleFixOllama}
-                                    className="text-[10px] bg-bg-elevated hover:bg-bg-input px-2 py-1 rounded border border-border-subtle"
-                                >
-                                    Auto-Fix Connection
-                                </button>
-                            </div>
-                        </div>
-                    )}
-
-                    {ollamaStatus === 'detected' && ollamaModels.length > 0 && (
-                        <div className="space-y-3">
-                            <div className="flex items-center gap-2 text-xs text-green-400 mb-3">
-                                <CheckCircle size={14} />
-                                <span>Ollama connected</span>
-                            </div>
-
-                            <div className="grid grid-cols-1 gap-2">
-                                {ollamaModels.map(model => (
-                                    <div key={model} className="flex items-center justify-between p-2 bg-bg-input rounded-lg border border-border-subtle">
-                                        <span className="text-xs text-text-primary font-mono">{model}</span>
-                                        <span className="text-[10px] text-bg-elevated bg-text-secondary px-1.5 py-0.5 rounded-full font-bold">LOCAL</span>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                    {ollamaStatus === 'detected' && ollamaModels.length === 0 && (
-                        <div className="text-xs text-text-secondary">
-                            Ollama is running but no models found. Run `ollama pull llama3` to get started.
-                        </div>
-                    )}
-                </div>
-            </div>
-
-            {/* Custom Providers */}
-            <div className="space-y-5">
-                <div className="flex items-center justify-between mb-2">
-                    <div>
-                        <div className="flex items-center gap-2 mb-1">
-                            <h3 className="text-sm font-bold text-text-primary">Custom Providers</h3>
-                            <span className="px-1.5 py-0 rounded-full text-[7px] font-bold bg-yellow-500/10 text-yellow-500 uppercase tracking-widest border border-yellow-500/20 leading-loose mt-0.5">Experimental</span>
-                        </div>
-                        <p className="text-xs text-text-secondary">Add your own AI endpoints via cURL.</p>
-                    </div>
-                    {!isEditingCustom && (
-                        <button
-                            onClick={handleNewProvider}
-                            className="flex items-center gap-2 px-3 py-1.5 bg-bg-input hover:bg-bg-elevated border border-border-subtle rounded-lg text-xs font-medium text-text-primary transition-colors"
-                        >
-                            <Plus size={14} /> Add Provider
-                        </button>
-                    )}
-                </div>
-
-                {isEditingCustom ? (
-                    <div className="bg-bg-item-surface rounded-xl p-5 border border-border-subtle animated fadeIn">
-                        <h4 className="text-sm font-bold text-text-primary mb-4">{editingProvider ? 'Edit Provider' : 'New Provider'}</h4>
-
-                        <div className="space-y-4">
-                            <div>
-                                <label className="block text-xs font-medium text-text-primary uppercase tracking-wide mb-1">Provider Name</label>
-                                <input
-                                    type="text"
-                                    value={customName}
-                                    onChange={(e) => setCustomName(e.target.value)}
-                                    placeholder="My Custom LLM"
-                                    className="w-full bg-bg-input border border-border-subtle rounded-lg px-4 py-2.5 text-xs text-text-primary focus:outline-none focus:border-accent-primary transition-colors"
-                                />
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-medium text-text-primary uppercase tracking-wide mb-1">cURL Command</label>
-                                <div className="relative">
-                                    <textarea
-                                        value={customCurl}
-                                        onChange={(e) => setCustomCurl(e.target.value)}
-                                        placeholder={`curl https://api.openai.com/v1/chat/completions ... "content": "{{TEXT}}"`}
-                                        className="w-full h-32 bg-bg-input border border-border-subtle rounded-lg p-4 text-xs font-mono text-text-primary focus:outline-none focus:border-accent-primary transition-colors resize-none leading-relaxed"
-                                    />
-                                </div>
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-medium text-text-primary uppercase tracking-wide mb-1">
-                                    Response JSON Path <span className="text-text-tertiary normal-case font-normal">(Optional)</span>
-                                </label>
-                                <input
-                                    type="text"
-                                    value={customResponsePath}
-                                    onChange={(e) => setCustomResponsePath(e.target.value)}
-                                    placeholder="e.g. choices[0].message.content"
-                                    className="w-full bg-bg-input border border-border-subtle rounded-lg px-4 py-2.5 text-xs text-text-primary focus:outline-none focus:border-accent-primary transition-colors font-mono"
-                                />
-                                <p className="text-[10px] text-text-secondary mt-1">
-                                    Dot notation path to the answer text in the JSON response. If empty, the full JSON is returned.
-                                </p>
-                            </div>
-
-                            <div className="bg-bg-elevated/30 rounded-lg overflow-hidden border border-border-subtle mt-4">
-                                <div className="px-4 py-3 bg-bg-elevated/50 border-b border-border-subtle flex items-center justify-between">
-                                    <h5 className="block text-xs font-medium text-text-primary uppercase tracking-wide">
-                                        Configuration Guide
-                                    </h5>
-                                </div>
-
-                                <div className="p-4 space-y-4">
-                                    <div>
-                                        <p className="text-xs text-text-secondary mb-2 font-medium">Available Variables</p>
-                                        <div className="grid grid-cols-1 gap-2">
-                                            <div className="flex items-center gap-2 text-xs">
-                                                <code className="bg-bg-input px-1.5 py-0.5 rounded text-text-primary font-mono border border-border-subtle">{"{{TEXT}}"}</code>
-                                                <span className="text-text-tertiary">Combined System + Context + Message (Recommended)</span>
-                                            </div>
-                                            <div className="flex items-center gap-2 text-xs">
-                                                <code className="bg-bg-input px-1.5 py-0.5 rounded text-text-primary font-mono border border-border-subtle">{"{{IMAGE_BASE64}}"}</code>
-                                                <span className="text-text-tertiary">Screenshot data (if available)</span>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <div>
-                                        <p className="text-xs text-text-secondary mb-2 font-medium">Examples</p>
-                                        <div className="space-y-3">
-                                            {/* Ollama Example */}
-                                            <div>
-                                                <div className="text-[10px] uppercase tracking-wider text-text-tertiary mb-1.5">Local (Ollama)</div>
-                                                <div className="bg-bg-input p-2.5 rounded-lg border border-border-subtle overflow-x-auto group relative">
-                                                    <code className="font-mono text-[10px] text-text-primary whitespace-pre block">
-                                                        curl http://localhost:11434/api/generate -d '{"{"}"model": "llama3", "prompt": "{`{{TEXT}}`}"{"}"}'
-                                                    </code>
-                                                </div>
-                                            </div>
-
-                                            {/* OpenAI Example */}
-                                            <div>
-                                                <div className="text-[10px] uppercase tracking-wider text-text-tertiary mb-1.5">OpenAI Compatible</div>
-                                                <div className="bg-bg-input p-2.5 rounded-lg border border-border-subtle overflow-x-auto">
-                                                    <code className="font-mono text-[10px] text-text-primary whitespace-pre block">
-                                                        {`curl https://api.openai.com/v1/chat/completions \\
-  -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer YOUR_API_KEY" \\
-  -d '{
-    "model": "gpt-4o-mini",
-    "messages": [
-      {"role": "system", "content": "You are a helpful assistant."},
-      {"role": "user", "content": "{{TEXT}}"}
-    ],
-    "temperature": 0.7
-  }'`}
-                                                    </code>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {curlError && (
-                                <div className="flex items-start gap-2 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-400 text-xs">
-                                    <AlertCircle size={14} className="shrink-0 mt-0.5" />
-                                    <span>{curlError}</span>
-                                </div>
-                            )}
-
-                            <div className="flex justify-end gap-3 pt-2">
-                                <button
-                                    onClick={() => setIsEditingCustom(false)}
-                                    className="px-4 py-2 rounded-lg text-xs font-medium text-text-secondary hover:text-text-primary hover:bg-bg-input transition-colors"
-                                >
-                                    Cancel
-                                </button>
-                                <button
-                                    onClick={handleSaveCustom}
-                                    className="px-4 py-2 rounded-lg text-xs font-medium bg-accent-primary text-white hover:bg-accent-secondary transition-colors flex items-center gap-2"
-                                >
-                                    <Save size={14} /> Save Provider
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                ) : (
-                    <div className="space-y-3">
-                        {customProviders.length === 0 ? (
-                            <div className="text-center py-8 bg-bg-item-surface rounded-xl border border-border-subtle border-dashed">
-                                <p className="text-xs text-text-tertiary">No custom providers added yet.</p>
-                            </div>
-                        ) : (
-                            customProviders.map((provider) => (
-                                <div key={provider.id} className="bg-bg-item-surface rounded-xl p-4 border border-border-subtle flex items-center justify-between group">
-                                    <div className="flex items-center gap-3">
-                                        <div className="w-8 h-8 rounded-lg bg-bg-input flex items-center justify-center text-text-secondary font-mono text-xs font-bold">
-                                            {provider.name.substring(0, 2).toUpperCase()}
-                                        </div>
-                                        <div>
-                                            <h4 className="text-sm font-medium text-text-primary">{provider.name}</h4>
-                                            <p className="text-[10px] text-text-tertiary font-mono truncate max-w-[200px] opacity-60">
-                                                {provider.curlCommand.substring(0, 30)}...
-                                            </p>
-                                            {provider.responsePath && (
-                                                <p className="text-[9px] text-text-tertiary font-mono opacity-40 mt-0.5">
-                                                    path: {provider.responsePath}
-                                                </p>
-                                            )}
-                                        </div>
-                                    </div>
-                                    <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                        <button
-                                            onClick={() => handleEditProvider(provider)}
-                                            className="p-1.5 rounded-lg text-text-secondary hover:text-text-primary hover:bg-bg-elevated transition-colors"
-                                            title="Edit"
-                                        >
-                                            <Edit2 size={14} />
-                                        </button>
-                                        <button
-                                            onClick={() => handleDeleteCustom(provider.id)}
-                                            className="p-1.5 rounded-lg text-text-secondary hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                                            title="Delete"
-                                        >
-                                            <Trash2 size={14} />
-                                        </button>
-                                    </div>
-                                </div>
-                            ))
-                        )}
-                    </div>
-                )}
-            </div>
         </div>
     );
 };

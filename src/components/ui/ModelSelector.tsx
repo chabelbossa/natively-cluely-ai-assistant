@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, Check, Cloud, Terminal, Monitor, Server, Plus } from 'lucide-react';
+import { ChevronDown, Check, Cloud, Monitor } from 'lucide-react';
 import { STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
 
 interface ModelSelectorProps {
@@ -9,17 +9,8 @@ interface ModelSelectorProps {
     placement?: 'top' | 'bottom';
 }
 
-interface CustomProvider {
-    id: string;
-    name: string;
-    curlCommand: string;
-}
-
 export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSelectModel, placement = 'top' }) => {
     const [isOpen, setIsOpen] = useState(false);
-    const [activeTab, setActiveTab] = useState<'cloud' | 'custom' | 'local'>('cloud');
-    const [ollamaModels, setOllamaModels] = useState<string[]>([]);
-    const [customProviders, setCustomProviders] = useState<CustomProvider[]>([]);
     const [cloudModels, setCloudModels] = useState<{ id: string; name: string; desc: string; provider: string }[]>([]);
     const dropdownRef = useRef<HTMLDivElement>(null);
     const buttonRef = useRef<HTMLButtonElement>(null);
@@ -46,22 +37,11 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
 
         const loadData = async () => {
             try {
-                // Load Custom
-                const custom = await window.electronAPI?.getCustomProviders() as CustomProvider[];
-                if (custom) setCustomProviders(custom);
-
-                // Load Ollama
-                const local = await window.electronAPI?.getAvailableOllamaModels() as string[];
-                if (local) setOllamaModels(local);
-
                 // Build dynamic cloud models from credentials
                 // @ts-ignore
                 const creds = await window.electronAPI?.getStoredCredentials?.();
                 const cModels: { id: string; name: string; desc: string; provider: string }[] = [];
 
-                if (creds?.hasNativelyKey) {
-                    cModels.push({ id: 'natively', name: 'Natively API', desc: 'Managed AI • Fast execution', provider: 'natively' });
-                }
                 for (const [prov, cfg] of Object.entries(STANDARD_CLOUD_MODELS)) {
                     if (!cfg.hasKeyCheck(creds)) continue;
                     cfg.ids.forEach((id, i) => cModels.push({ id, name: cfg.names[i], desc: cfg.descs[i], provider: prov }));
@@ -125,6 +105,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
 
     const getModelDisplayName = (model: string) => {
         if (model.startsWith('ollama-')) return model.replace('ollama-', '');
+        if (model === 'gemini-3.5-flash') return 'Gemini 3.5 Flash';
         if (model === 'gemini-3.1-flash-lite-preview') return 'Gemini 3.1 Flash';
         if (model === 'gemini-3.1-pro-preview') return 'Gemini 3.1 Pro';
         if (model === 'llama-3.3-70b-versatile') return 'Groq Llama 3.3';
@@ -136,6 +117,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
         if (model === 'codex:gpt-5.4') return 'GPT 5.4 Codex';
         if (model === 'codex:gpt-5.4-mini') return 'GPT 5.4 Mini Codex';
         if (model === 'codex:gpt-5.3') return 'GPT 5.3 Codex';
+        if (model === 'codex:gpt-5.3-codex-spark') return 'GPT 5.3 Codex Spark';
         if (model === 'codex:gpt-5.2') return 'GPT 5.2 Codex';
         if (model === 'codex:gpt-5.1') return 'GPT 5.1 Codex';
         if (model === 'codex:gpt-5') return 'GPT 5 Codex';
@@ -145,10 +127,6 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
         // Check dynamic cloud models
         const cloud = cloudModels.find(m => m.id === model);
         if (cloud) return cloud.name;
-
-        // Check custom providers
-        const custom = customProviders.find(p => p.id === model || p.name === model);
-        if (custom) return custom.name;
 
         return model;
     };
@@ -173,22 +151,9 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
                     {/* Tabs */}
                     <div className="flex border-b border-slate-200 bg-slate-50 dark:border-white/10 dark:bg-white/5">
                         <button
-                            onClick={() => setActiveTab('cloud')}
-                            className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'cloud' ? 'border-t-2 border-t-emerald-500 bg-white text-emerald-600 dark:bg-[#1d2027] dark:text-emerald-300' : 'text-slate-500 hover:text-slate-950 dark:text-slate-400 dark:hover:text-white'}`}
+                            className="flex-1 border-t-2 border-t-emerald-500 bg-white py-2 text-[10px] font-bold uppercase tracking-wider text-emerald-600 transition-colors dark:bg-[#1d2027] dark:text-emerald-300"
                         >
                             Cloud
-                        </button>
-                        <button
-                            onClick={() => setActiveTab('custom')}
-                            className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'custom' ? 'border-t-2 border-t-emerald-500 bg-white text-emerald-600 dark:bg-[#1d2027] dark:text-emerald-300' : 'text-slate-500 hover:text-slate-950 dark:text-slate-400 dark:hover:text-white'}`}
-                        >
-                            Custom
-                        </button>
-                        <button
-                            onClick={() => setActiveTab('local')}
-                            className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider transition-colors ${activeTab === 'local' ? 'border-t-2 border-t-emerald-500 bg-white text-emerald-600 dark:bg-[#1d2027] dark:text-emerald-300' : 'text-slate-500 hover:text-slate-950 dark:text-slate-400 dark:hover:text-white'}`}
-                        >
-                            Local
                         </button>
                     </div>
 
@@ -196,83 +161,34 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
                     <div className="p-2 overflow-y-auto overscroll-contain" style={{ maxHeight: menuPosition.maxHeight }}>
 
                         {/* Cloud Models */}
-                        {activeTab === 'cloud' && (
-                            <div className="space-y-1">
-                                {cloudModels.length === 0 ? (
-                                    <div className="text-center py-6 text-slate-500 dark:text-slate-400">
-                                        <p className="text-xs mb-2">No cloud providers configured.</p>
-                                        <p className="text-[10px] opacity-70">Add API keys in Settings.</p>
-                                    </div>
-                                ) : (
-                                    cloudModels.map((m, idx) => {
-                                        const prevProvider = idx > 0 ? cloudModels[idx - 1].provider : null;
-                                        const showDivider = prevProvider && prevProvider !== m.provider;
-                                        const icon = m.provider === 'gemini' ? <Monitor size={14} /> : <Cloud size={14} />;
-                                        return (
-                                            <React.Fragment key={m.id}>
-                                                {showDivider && <div className="h-px bg-slate-200 dark:bg-white/10 my-1" />}
-                                                <ModelOption
-                                                    id={m.id}
-                                                    name={m.name}
-                                                    desc={m.desc}
-                                                    icon={icon}
-                                                    selected={currentModel === m.id}
-                                                    onSelect={() => handleSelect(m.id)}
-                                                />
-                                            </React.Fragment>
-                                        );
-                                    })
-                                )}
-                            </div>
-                        )}
+                        <div className="space-y-1">
+                            {cloudModels.length === 0 ? (
+                                <div className="text-center py-6 text-slate-500 dark:text-slate-400">
+                                    <p className="text-xs mb-2">No cloud providers configured.</p>
+                                    <p className="text-[10px] opacity-70">Add Codex or Gemini in Settings.</p>
+                                </div>
+                            ) : (
+                                cloudModels.map((m, idx) => {
+                                    const prevProvider = idx > 0 ? cloudModels[idx - 1].provider : null;
+                                    const showDivider = prevProvider && prevProvider !== m.provider;
+                                    const icon = m.provider === 'gemini' ? <Monitor size={14} /> : <Cloud size={14} />;
+                                    return (
+                                        <React.Fragment key={m.id}>
+                                            {showDivider && <div className="h-px bg-slate-200 dark:bg-white/10 my-1" />}
+                                            <ModelOption
+                                                id={m.id}
+                                                name={m.name}
+                                                desc={m.desc}
+                                                icon={icon}
+                                                selected={currentModel === m.id}
+                                                onSelect={() => handleSelect(m.id)}
+                                            />
+                                        </React.Fragment>
+                                    );
+                                })
+                            )}
+                        </div>
 
-                        {/* Custom Models */}
-                        {activeTab === 'custom' && (
-                            <div className="space-y-1">
-                                {customProviders.length === 0 ? (
-                                    <div className="text-center py-6 text-slate-500 dark:text-slate-400">
-                                        <p className="text-xs mb-2">No custom providers.</p>
-                                        <button className="text-[10px] text-emerald-600 dark:text-emerald-300 hover:underline">Manage in Settings</button>
-                                    </div>
-                                ) : (
-                                    customProviders.map(provider => (
-                                        <ModelOption
-                                            key={provider.id}
-                                            id={provider.id}
-                                            name={provider.name}
-                                            desc="Custom cURL"
-                                            icon={<Terminal size={14} />}
-                                            selected={currentModel === provider.id}
-                                            onSelect={() => handleSelect(provider.id)}
-                                        />
-                                    ))
-                                )}
-                            </div>
-                        )}
-
-                        {/* Local Models (Ollama) */}
-                        {activeTab === 'local' && (
-                            <div className="space-y-1">
-                                {ollamaModels.length === 0 ? (
-                                    <div className="text-center py-6 text-slate-500 dark:text-slate-400">
-                                        <p className="text-xs">No Ollama models found.</p>
-                                        <p className="text-[10px] mt-1 opacity-70">Ensure Ollama is running.</p>
-                                    </div>
-                                ) : (
-                                    ollamaModels.map(model => (
-                                        <ModelOption
-                                            key={model}
-                                            id={`ollama-${model}`}
-                                            name={model}
-                                            desc="Local"
-                                            icon={<Server size={14} />}
-                                            selected={currentModel === `ollama-${model}`}
-                                            onSelect={() => handleSelect(`ollama-${model}`)}
-                                        />
-                                    ))
-                                )}
-                            </div>
-                        )}
                     </div>
                 </div>,
                 document.body,

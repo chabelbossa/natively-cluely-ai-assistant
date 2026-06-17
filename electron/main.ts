@@ -2524,7 +2524,16 @@ export class AppState {
     try {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const cm = CredentialsManager.getInstance();
-      const defaultModel = cm.getDefaultModel();
+      const storedDefaultModel = cm.getDefaultModel();
+      const codexPreferredModel = cm.getCodexPreferredModel?.() || 'codex:gpt-5.5';
+      const isSupportedDefault =
+        storedDefaultModel.startsWith('codex:') ||
+        storedDefaultModel.startsWith('gemini-') ||
+        storedDefaultModel.startsWith('models/');
+      const defaultModel = isSupportedDefault ? storedDefaultModel : codexPreferredModel;
+      if (storedDefaultModel !== defaultModel) {
+        cm.setDefaultModel(defaultModel);
+      }
       const all = [...(cm.getCurlProviders() || []), ...(cm.getCustomProviders() || [])];
       console.log(`[Main] Reverting model to default: ${defaultModel}`);
       this.processingHelper.getLLMHelper().setModel(defaultModel, all);
@@ -3529,6 +3538,72 @@ export class AppState {
 
 // Application initialization
 
+function getOneShotSummaryRegenerationJob(): {
+  meetingId: string;
+  model: string;
+  useAudioReplay: boolean;
+  outputPath?: string;
+} | null {
+  const meetingId = String(process.env.NATIVELY_REGENERATE_MEETING_ID || '').trim();
+  if (!meetingId) return null;
+
+  return {
+    meetingId,
+    model: String(process.env.NATIVELY_REGENERATE_MODEL || 'codex:gpt-5.5').trim() || 'codex:gpt-5.5',
+    useAudioReplay: /^(1|true|yes)$/i.test(String(process.env.NATIVELY_REGENERATE_USE_AUDIO_REPLAY || '')),
+    outputPath: String(process.env.NATIVELY_REGENERATE_OUTPUT_PATH || '').trim() || undefined,
+  };
+}
+
+async function maybeRunOneShotSummaryRegeneration(appState: AppState): Promise<boolean> {
+  const job = getOneShotSummaryRegenerationJob();
+  if (!job) return false;
+
+  const { CredentialsManager } = require('./services/CredentialsManager');
+  const credManager = CredentialsManager.getInstance();
+  const providers = [
+    ...(credManager.getCurlProviders() || []),
+    ...(credManager.getCustomProviders() || []),
+  ];
+
+  const llmHelper = appState.processingHelper.getLLMHelper();
+  llmHelper.setModel(job.model, providers);
+
+  console.log(
+    `[OneShotSummaryRegen] Starting regeneration for meeting ${job.meetingId} ` +
+    `with model=${job.model} useAudioReplay=${job.useAudioReplay}`
+  );
+
+  const result = await appState.regenerateMeetingSummary(job.meetingId, {
+    useAudioReplay: job.useAudioReplay,
+  });
+  const meeting = DatabaseManager.getInstance().getMeetingDetails(job.meetingId);
+  const payload = {
+    success: result.success,
+    error: result.error,
+    meetingId: job.meetingId,
+    requestedModel: job.model,
+    runtimeProvider: llmHelper.getCurrentProvider(),
+    runtimeModel: llmHelper.getCurrentModel(),
+    generationRoute: llmHelper.getLastMeetingSummaryRoute(),
+    useAudioReplay: job.useAudioReplay,
+    overview: result.detailedSummary?.overview || meeting?.detailedSummary?.overview || '',
+    quality: result.detailedSummary?.quality || meeting?.detailedSummary?.quality || null,
+    sections: result.detailedSummary?.sections || meeting?.detailedSummary?.sections || [],
+    actionItems: result.detailedSummary?.actionItems || meeting?.detailedSummary?.actionItems || [],
+    keyPoints: result.detailedSummary?.keyPoints || meeting?.detailedSummary?.keyPoints || [],
+  };
+
+  if (job.outputPath) {
+    fs.writeFileSync(job.outputPath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+    console.log(`[OneShotSummaryRegen] Wrote output to ${job.outputPath}`);
+  }
+
+  console.log(JSON.stringify(payload, null, 2));
+  app.exit(result.success ? 0 : 1);
+  return true;
+}
+
 async function initializeApp() {
   // 1. Enforce single instance — prevent duplicate dock icons from leftover processes.
   // In development mode with hot-reload this is still safe because electron is restarted
@@ -3569,6 +3644,10 @@ async function initializeApp() {
 
   // Initialize IPC handlers before window creation
   initializeIpcHandlers(appState)
+
+  if (await maybeRunOneShotSummaryRegeneration(appState)) {
+    return;
+  }
 
   // Apply the full disguise payload (names, dock icon, AUMID) early
   appState.applyInitialDisguise();

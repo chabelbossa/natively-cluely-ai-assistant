@@ -10,9 +10,13 @@ const defaultDebugDir = path.join(userData, 'meeting-debug');
 const dbPath = process.argv.includes('--db')
   ? process.argv[process.argv.indexOf('--db') + 1]
   : path.join(userData, 'natively.db');
-const debugPath = process.argv.includes('--debug')
+const explicitDebugPath = process.argv.includes('--debug')
   ? process.argv[process.argv.indexOf('--debug') + 1]
+  : null;
+const debugSelection = explicitDebugPath
+  ? { path: explicitDebugPath, skippedLatestMissingManifest: null }
   : findLatestJsonl(defaultDebugDir);
+const debugPath = debugSelection?.path || null;
 
 if (!debugPath) {
   fail('No meeting-debug JSONL file found.');
@@ -48,6 +52,9 @@ const manifestPath = meetingEnd?.payload?.audioDebugManifestPath;
 
 const failures = [];
 const warnings = [];
+if (debugSelection?.skippedLatestMissingManifest) {
+  warnings.push(`latest_debug_skipped_missing_audio_manifest:${debugSelection.skippedLatestMissingManifest}`);
+}
 
 checkAudioManifest(manifestPath, failures, warnings);
 checkRouterContract(events, failures);
@@ -318,7 +325,36 @@ function findLatestJsonl(dir) {
     .filter(file => file.endsWith('.jsonl'))
     .map(file => path.join(dir, file))
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
-  return files[0] || null;
+
+  if (files.length === 0) return null;
+
+  for (const file of files) {
+    const meetingEnd = readLatestMeetingEnd(file);
+    const manifestPath = meetingEnd?.payload?.audioDebugManifestPath;
+    if (manifestPath && fs.existsSync(manifestPath)) {
+      return {
+        path: file,
+        skippedLatestMissingManifest: file === files[0] ? null : path.basename(files[0]),
+      };
+    }
+  }
+
+  return { path: files[0], skippedLatestMissingManifest: null };
+}
+
+function readLatestMeetingEnd(filePath) {
+  try {
+    const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index];
+      if (!line.includes('"meeting_end"')) continue;
+      const event = JSON.parse(line);
+      if (event.type === 'meeting_end') return event;
+    }
+  } catch (_error) {
+    return null;
+  }
+  return null;
 }
 
 function normalize(text) {

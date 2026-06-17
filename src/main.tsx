@@ -33,8 +33,8 @@ if (!window.electronAPI) {
     getNativeAudioStatus: async () => ({ connected: false }),
     getKeybinds: async () => [],
     resetKeybinds: async () => [],
-    getDefaultModel: async () => ({ model: 'gemini-3.1-flash-lite-preview' }),
-    getCurrentLlmConfig: async () => ({ provider: 'gemini', model: 'gemini-3.1-flash-lite-preview', isOllama: false }),
+    getDefaultModel: async () => ({ model: 'codex:gpt-5.5' }),
+    getCurrentLlmConfig: async () => ({ provider: 'codex', model: 'codex:gpt-5.5', isOllama: false }),
     getAvailableOllamaModels: async () => [],
     getStoredCredentials: async () => ({
       hasGeminiKey: false,

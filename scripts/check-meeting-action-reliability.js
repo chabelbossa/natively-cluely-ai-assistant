@@ -28,10 +28,19 @@ const mainPath = path.join(repoRoot, "electron", "main.ts");
 const preloadPath = path.join(repoRoot, "electron", "preload.ts");
 const electronTypesPath = path.join(repoRoot, "src", "types", "electron.d.ts");
 const promptsPath = path.join(repoRoot, "electron", "llm", "prompts.ts");
+const promptProfilePath = path.join(repoRoot, "electron", "llm", "PromptProfileRegistry.ts");
 const ragPromptsPath = path.join(repoRoot, "electron", "rag", "prompts.ts");
+const llmHelperPath = path.join(repoRoot, "electron", "LLMHelper.ts");
+const orchestratorPath = path.join(
+  repoRoot,
+  "electron",
+  "meeting",
+  "MeetingActionOrchestrator.ts",
+);
 
 const engine = fs.readFileSync(enginePath, "utf8");
 const packet = fs.readFileSync(packetPath, "utf8");
+const orchestrator = fs.readFileSync(orchestratorPath, "utf8");
 const router = fs.readFileSync(routerPath, "utf8");
 const ui = fs.readFileSync(interfacePath, "utf8");
 const meetingChatOverlay = fs.readFileSync(meetingChatOverlayPath, "utf8");
@@ -39,7 +48,9 @@ const main = fs.readFileSync(mainPath, "utf8");
 const preload = fs.readFileSync(preloadPath, "utf8");
 const electronTypes = fs.readFileSync(electronTypesPath, "utf8");
 const prompts = fs.readFileSync(promptsPath, "utf8");
+const promptProfileRegistry = fs.readFileSync(promptProfilePath, "utf8");
 const ragPrompts = fs.readFileSync(ragPromptsPath, "utf8");
+const llmHelper = fs.readFileSync(llmHelperPath, "utf8");
 
 const checks = [
   {
@@ -103,6 +114,54 @@ const checks = [
       /enrichQuestionWithNeighborContext[\s\S]*if \(this\.isStandaloneQuestion\(question\)\) return question[\s\S]*private isStandaloneQuestion/,
   },
   {
+    name: "context packet ranks the latest three plausible interlocutor questions",
+    source: packet,
+    pattern:
+      /questionCandidates[\s\S]*buildQuestionCandidatesBlock[\s\S]*\[RECENT QUESTION CANDIDATES\][\s\S]*candidate_\$\{candidate\.rank\}/,
+  },
+  {
+    name: "what-to-say packet prompt allows profile-grade answers instead of one short phrase",
+    source: packet,
+    pattern:
+      /Output the exact words the user can say aloud now[\s\S]*selected prompt profile[\s\S]*4-7 strong spoken sentences[\s\S]*complete enough for profile-grade/,
+  },
+  {
+    name: "legacy action orchestrator no longer forces one-phrase live answers",
+    source: orchestrator,
+    pattern:
+      /Return the exact words the user can say aloud now[\s\S]*4-7 strong spoken sentences/,
+  },
+  {
+    name: "adaptive prompt profile registry covers live meeting modes",
+    source: promptProfileRegistry,
+    pattern:
+      /(?=[\s\S]*resolvePromptProfile)(?=[\s\S]*buildPromptProfileBlock)(?=[\s\S]*interview_candidate)(?=[\s\S]*meeting_copilot)(?=[\s\S]*project_context)(?=[\s\S]*client_call)(?=[\s\S]*learning)/,
+  },
+  {
+    name: "prompt profiles are compact behavior contracts rather than a giant static system prompt",
+    source: promptProfileRegistry,
+    pattern:
+      /\[PROMPT PROFILE\][\s\S]*selection_policy=This profile is selected from the active user mode[\s\S]*not a giant static system prompt/,
+  },
+  {
+    name: "active mode context injects selected prompt profile into live action packets",
+    source: engine,
+    pattern:
+      /buildPromptProfileBlockForMode[\s\S]*promptProfileBlock[\s\S]*modeContextBlock[\s\S]*promptProfileBlock/,
+  },
+  {
+    name: "meeting packet contract lets selected prompt profile override generic defaults",
+    source: packet,
+    pattern:
+      /\[PROMPT PROFILE\][\s\S]*selected user mode[\s\S]*selected prompt profile wins over generic live-meeting defaults[\s\S]*profile-specific direct answers/,
+  },
+  {
+    name: "legacy action orchestrator respects prompt profile policy",
+    source: orchestrator,
+    pattern:
+      /\[PROMPT PROFILE\][\s\S]*active profile wins over generic meeting defaults/,
+  },
+  {
     name: "late giant mic finals are trimmed or rejected before becoming ME duplicates",
     source: router,
     pattern:
@@ -133,6 +192,35 @@ const checks = [
       /UNIVERSAL_WHAT_TO_ANSWER_PROMPT[\s\S]*target_source=local_user[\s\S]*unless target_source=local_user or \[LOCAL USER QUESTION\] is present/,
   },
   {
+    name: "what-to-answer prompt selects among recent question candidates before answering",
+    source: prompts,
+    pattern:
+      /UNIVERSAL_WHAT_TO_ANSWER_PROMPT[\s\S]*\[RECENT QUESTION CANDIDATES\][\s\S]*candidate_1[\s\S]*candidate_2[\s\S]*candidate_3[\s\S]*Answer the selected question/,
+  },
+  {
+    name: "live universal prompts allow substantial interview answers",
+    source: prompts,
+    pattern:
+      /UNIVERSAL_ANSWER_PROMPT[\s\S]*4-7 strong spoken sentences[\s\S]*UNIVERSAL_WHAT_TO_ANSWER_PROMPT[\s\S]*4-7 strong spoken sentences/,
+  },
+  {
+    name: "codex model catalog exposes GPT 5.3 Codex Spark fallback",
+    source: fs.readFileSync(path.join(repoRoot, "src", "utils", "modelUtils.ts"), "utf8"),
+    pattern: /codex:gpt-5\.3-codex-spark[\s\S]*GPT 5\.3 Codex Spark/,
+  },
+  {
+    name: "meeting summary regeneration honors selected Codex model before Groq/Gemini",
+    source: llmHelper,
+    pattern:
+      /generateMeetingSummary[\s\S]*Attempting Codex \(\$\{this\.currentModelId\}\) for summary[\s\S]*generateWithCodex\(`Context:\\n\$\{context\}`,\s*systemPrompt,\s*this\.currentModelId\)[\s\S]*Attempting Groq for summary/,
+  },
+  {
+    name: "meeting summary one-shot reports actual generation route instead of only runtime model",
+    source: `${llmHelper}\n${main}`,
+    pattern:
+      /getLastMeetingSummaryRoute[\s\S]*usedFallback[\s\S]*generationRoute: llmHelper\.getLastMeetingSummaryRoute\(\)/,
+  },
+  {
     name: "action stream cancellation does not block timeout fallback",
     source: engine,
     pattern:
@@ -149,6 +237,12 @@ const checks = [
     source: engine,
     pattern:
       /improveLiveActionOutput[\s\S]*reviewLiveActionQuality[\s\S]*repairLiveActionOutput[\s\S]*quality_repair_still_weak/,
+  },
+  {
+    name: "underdeveloped direct-question answers are treated as repairable",
+    source: engine,
+    pattern:
+      /directQuestionWithEvidence[\s\S]*outputWords < 35[\s\S]*underdeveloped_interview_answer[\s\S]*hardReasons[\s\S]*underdeveloped_interview_answer[\s\S]*reason\.includes\('underdeveloped'\)/,
   },
   {
     name: "quality repair prompt uses relevant prior meeting evidence",
@@ -179,6 +273,18 @@ const checks = [
     source: engine,
     pattern:
       /looksLikeBugFlowContext\(bugFlowContext\)[\s\S]*envoie-moi le flux[\s\S]*comparer l'envoi simple avec les flux IA\/Pierre/,
+  },
+  {
+    name: "technical interview fallback answers common full-stack questions instead of echoing stale context",
+    source: engine,
+    pattern:
+      /(?=[\s\S]*buildTechnicalInterviewFallbackAnswer)(?=[\s\S]*architecture backend)(?=[\s\S]*OAuth2\/OIDC)(?=[\s\S]*monolithe)(?=[\s\S]*microservices)(?=[\s\S]*goulot)(?=[\s\S]*Dockerfiles)(?=[\s\S]*revue de code)(?=[\s\S]*dette technique)(?=[\s\S]*pic massif)/,
+  },
+  {
+    name: "generic repeat requests are treated as insufficient when reliable context exists",
+    source: engine,
+    pattern:
+      /isInsufficientContextFallback[\s\S]*could you repeat[\s\S]*address your question properly/,
   },
   {
     name: "clarify and follow-up outputs are collapsed to a single question",
@@ -261,9 +367,45 @@ const checks = [
 ];
 
 const failures = checks.filter((check) => !check.pattern.test(check.source));
+const chatWithGeminiBlock =
+  llmHelper.match(/public async chatWithGemini[\s\S]*?Interview lock: automatic generation is intentionally restricted to Codex \+ Gemini/)?.[0] ||
+  "";
+const streamChatWithGeminiBlock =
+  llmHelper.match(/public async \* streamChatWithGemini[\s\S]*?Codex-first temporary lock/)?.[0] ||
+  "";
 const recordOnlyBlock =
   main.match(/if \(!shouldFeedPassiveContext\) \{[\s\S]*?return;\s*\}/)?.[0] ||
   "";
+
+if (
+  !chatWithGeminiBlock ||
+  /GROQ FAST TEXT OVERRIDE|this\.useOllama|this\.activeCurlProvider|this\.customProvider|currentModelId === 'natively'/.test(chatWithGeminiBlock)
+) {
+  failures.push({
+    name: "non-streaming live chat path is locked to Codex/Gemini before fallback",
+  });
+}
+
+if (!streamChatWithGeminiBlock || /this\.useOllama|streamWithNatively|streamWithGroq|streamWithCustom/.test(streamChatWithGeminiBlock)) {
+  failures.push({
+    name: "streaming live chat path is locked to Codex/Gemini before fallback",
+  });
+}
+
+if (/Output exactly one short phrase/.test(packet)) {
+  failures.push({
+    name: "what-to-say packet prompt must not force exactly one short phrase",
+  });
+}
+
+if (
+  /Keep answers SHORT|under 30 seconds|2-3 sentences max|3-4 sentences max|Maximum 2-3 sentences|2-3 sentences total|At most ONE clarifying|exceeds 4-5 sentences/.test(prompts) ||
+  /one phrase only|two short sentences/.test(orchestrator)
+) {
+  failures.push({
+    name: "live prompts must not reintroduce hard tiny-answer caps",
+  });
+}
 
 if (!recordOnlyBlock || /feedCopilotContext/.test(recordOnlyBlock)) {
   failures.push({

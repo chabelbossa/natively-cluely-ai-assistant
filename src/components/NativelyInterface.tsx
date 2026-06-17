@@ -104,6 +104,7 @@ const estimateTokens = (text: string): number =>
 
 const shortenModelName = (model: string): string => {
   const map: Record<string, string> = {
+    "gemini-3.5-flash": "Gemini 3.5 Flash",
     "gemini-3.1-flash-lite-preview": "Gemini 3.1 Flash",
     "gemini-3.1-pro-preview": "Gemini 3.1 Pro",
     "llama-3.3-70b-versatile": "Groq Llama 3.3",
@@ -117,6 +118,7 @@ const shortenModelName = (model: string): string => {
     "codex:gpt-5.4": "GPT 5.4 Codex",
     "codex:gpt-5.4-mini": "GPT 5.4 Mini Codex",
     "codex:gpt-5.3": "GPT 5.3 Codex",
+    "codex:gpt-5.3-codex-spark": "GPT 5.3 Codex Spark",
     "codex:gpt-5.2": "GPT 5.2 Codex",
     "codex:gpt-5.1": "GPT 5.1 Codex",
     "codex:gpt-5": "GPT 5 Codex",
