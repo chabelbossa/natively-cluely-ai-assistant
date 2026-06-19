@@ -562,6 +562,12 @@ export function initializeIpcHandlers(appState: AppState): void {
   // that a newer stream has taken over.
   let _chatStreamId = 0;
 
+  safeHandle("cancel-gemini-chat-stream", async () => {
+    _chatStreamId++;
+    console.log(`[IPC] gemini-chat-stream cancelled at id ${_chatStreamId}`);
+    return { success: true };
+  });
+
   safeHandle(
     "gemini-chat-stream",
     async (
@@ -569,7 +575,11 @@ export function initializeIpcHandlers(appState: AppState): void {
       message: string,
       imagePaths?: string[],
       context?: string,
-      options?: { skipSystemPrompt?: boolean; ignoreKnowledgeMode?: boolean },
+      options?: {
+        skipSystemPrompt?: boolean;
+        ignoreKnowledgeMode?: boolean;
+        skipTranscript?: boolean;
+      },
     ) => {
       try {
         console.log(
@@ -583,15 +593,17 @@ export function initializeIpcHandlers(appState: AppState): void {
 
         // Update IntelligenceManager with USER message immediately
         const intelligenceManager = appState.getIntelligenceManager();
-        intelligenceManager.addTranscript(
-          {
-            text: message,
-            speaker: "user",
-            timestamp: Date.now(),
-            final: true,
-          },
-          true,
-        );
+        if (!options?.skipTranscript) {
+          intelligenceManager.addTranscript(
+            {
+              text: message,
+              speaker: "user",
+              timestamp: Date.now(),
+              final: true,
+            },
+            true,
+          );
+        }
 
         let fullResponse = "";
 
@@ -645,7 +657,7 @@ export function initializeIpcHandlers(appState: AppState): void {
             event.sender.send("gemini-stream-done");
 
             // Update IntelligenceManager with ASSISTANT message after completion
-            if (fullResponse.trim().length > 0) {
+            if (!options?.skipTranscript && fullResponse.trim().length > 0) {
               intelligenceManager.addAssistantMessage(fullResponse);
               // Log Usage for streaming chat
               intelligenceManager.logUsage("chat", message, fullResponse);

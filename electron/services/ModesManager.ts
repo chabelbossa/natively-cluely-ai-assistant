@@ -77,7 +77,7 @@ export const MODE_TEMPLATES: Array<{
     { type: 'tech-lead',            label: 'Tech Lead',             description: 'Architecture, technical debt, tradeoffs, team capacity.' },
     { type: 'backend-api',          label: 'Backend API',           description: 'API contracts, auth, pagination, error handling, DB schema.' },
     { type: 'frontend-handoff',     label: 'Frontend Handoff',      description: 'UI states, responsive, validations, API contract needs.' },
-    { type: 'client-discovery',     label: 'Client Discovery',      description: 'Business objectives, constraints, budget, decision-makers.' },
+    { type: 'client-discovery',     label: 'Opportunity Discovery', description: 'Project vision, role fit, constraints, stakeholders, next steps.' },
     { type: 'sprint-planning',      label: 'Sprint Planning',       description: 'Priorities, capacity, dependencies, ticket breakdown.' },
 ];
 
@@ -190,11 +190,12 @@ export const TEMPLATE_NOTE_SECTIONS: Record<ModeTemplateType, Array<{ title: str
         { title: 'Accessibility',     description: 'A11y considerations and requirements.' },
     ],
     'client-discovery': [
-        { title: 'Business objective', description: 'What the client wants to achieve.' },
-        { title: 'Constraints',        description: 'Budget, timeline, technical, or organizational limits.' },
-        { title: 'Decision-makers',    description: 'Who has authority and what matters to them.' },
-        { title: 'Success metrics',    description: 'How the client will measure success.' },
-        { title: 'Next steps',         description: 'What needs to happen before the next conversation.' },
+        { title: 'Vision / objective', description: 'What the client, partner, or founder wants to build and why now.' },
+        { title: 'Problem and users',  description: 'Target users, pain intensity, current workaround, and who benefits first.' },
+        { title: 'Expected contribution', description: 'Role, ownership, decision rights, time expectation, and how I can create leverage.' },
+        { title: 'Constraints',        description: 'Budget, timeline, technical, organizational, or execution limits.' },
+        { title: 'Success metrics',    description: 'How the project will measure traction, launch readiness, or business success.' },
+        { title: 'Risks and next steps', description: 'Open risks, missing information, decision-makers, and what happens after the call.' },
     ],
     'sprint-planning': [
         { title: 'Sprint goal',        description: 'The primary objective for this sprint.' },

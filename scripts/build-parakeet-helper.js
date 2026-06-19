@@ -8,6 +8,7 @@ const scratchDir = path.join(packageDir, '.build');
 const distDir = path.join(packageDir, 'dist');
 const builtBinary = path.join(scratchDir, 'release', 'parakeet-stt-helper');
 const distBinary = path.join(distDir, 'parakeet-stt-helper');
+const entitlementsPath = path.join(root, 'assets', 'entitlements.mac.plist');
 
 if (process.platform !== 'darwin') {
   console.log('[Parakeet Helper] Skipping build: helper is macOS-only.');
@@ -37,5 +38,24 @@ if (!fs.existsSync(builtBinary)) {
 fs.copyFileSync(builtBinary, distBinary);
 fs.chmodSync(distBinary, 0o755);
 
-console.log(`[Parakeet Helper] Built: ${distBinary}`);
+if (!fs.existsSync(entitlementsPath)) {
+  throw new Error(`Entitlements file not found: ${entitlementsPath}`);
+}
 
+console.log('[Parakeet Helper] Signing helper with hardened runtime...');
+execFileSync('codesign', [
+  '--force',
+  '--options',
+  'runtime',
+  '--timestamp=none',
+  '--entitlements',
+  entitlementsPath,
+  '--sign',
+  '-',
+  distBinary,
+], {
+  cwd: root,
+  stdio: 'inherit',
+});
+
+console.log(`[Parakeet Helper] Built: ${distBinary}`);

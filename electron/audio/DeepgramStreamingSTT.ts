@@ -161,7 +161,8 @@ export class DeepgramStreamingSTT extends EventEmitter {
                 endpointing: 300,
                 utterance_end_ms: 1000,
                 vad_events: true,
-                diarize: true,          // ← Real-time speaker diarization
+                diarize: true,          // Backward-compatible streaming diarization flag.
+                diarize_model: 'latest', // Current streaming diarizer; avoids relying on deprecated diarize-only routing.
             };
 
             console.log(`[DeepgramStreaming][connect] options=${JSON.stringify({
@@ -173,6 +174,7 @@ export class DeepgramStreamingSTT extends EventEmitter {
                 endpointing: liveOptions.endpointing,
                 utterance_end_ms: liveOptions.utterance_end_ms,
                 diarize: liveOptions.diarize,
+                diarize_model: liveOptions.diarize_model,
             })}`);
 
             this.live = deepgram.listen.live(liveOptions);

@@ -872,10 +872,18 @@ export class AppState {
   private readonly _MIC_GATE_PEAK_THRESHOLD = 150;    // system audio peak above this → gate mic
   private readonly _MIC_GATE_OVERRIDE_RMS = 900;      // likely direct user speech → let mic through
   private readonly _MIC_GATE_OVERRIDE_PEAK = 3000;
+  private readonly _MIC_GATE_DIRECT_SPEECH_RATIO = 1.35; // mic must clearly beat system level while gated
+  private readonly _MIC_GATE_DOMINANT_DIRECT_SPEECH_RATIO = 2.2;
+  private readonly _MIC_GATE_ECHO_HISTORY_MS = 1800;
+  private readonly _MIC_GATE_MAX_ECHO_FRAMES = 96;
+  private readonly _MIC_GATE_ECHO_CORRELATION_THRESHOLD = 0.78;
   private _micGateActivations = 0;
   private _micGateDeactivations = 0;
   private _micGateDroppedChunks = 0;
   private _micGateAllowedStrongChunks = 0;
+  private _micGateDroppedRelativeEchoChunks = 0;
+  private _micGateDroppedCorrelatedEchoChunks = 0;
+  private _recentSystemEchoFrames: Array<{ timestamp: number; envelope: Float32Array; rms: number; peak: number }> = [];
 
   // ── Cross-channel transcript deduplication ──
   // When system audio is active, the microphone picks up speaker output as room
@@ -1292,12 +1300,119 @@ export class AppState {
     this.audioDebugRecorder?.writeTrack(track, chunk, sampleRate || 48000);
   }
 
+  private createPcmEnvelope(chunk: Buffer): Float32Array | null {
+    const sampleCount = Math.floor(chunk.length / 2);
+    if (sampleCount < 32) return null;
+
+    const bucketCount = 32;
+    const sums = new Float64Array(bucketCount);
+    const counts = new Uint16Array(bucketCount);
+
+    for (let i = 0; i < sampleCount; i++) {
+      const value = chunk.readInt16LE(i * 2);
+      const bucket = Math.min(bucketCount - 1, Math.floor((i * bucketCount) / sampleCount));
+      sums[bucket] += value * value;
+      counts[bucket]++;
+    }
+
+    const envelope = new Float32Array(bucketCount);
+    for (let i = 0; i < bucketCount; i++) {
+      envelope[i] = counts[i] > 0 ? Math.sqrt(sums[i] / counts[i]) : 0;
+    }
+    return envelope;
+  }
+
+  private getEnvelopeCorrelation(a: Float32Array, b: Float32Array): number {
+    const n = Math.min(a.length, b.length);
+    if (n < 8) return 0;
+
+    let meanA = 0;
+    let meanB = 0;
+    for (let i = 0; i < n; i++) {
+      meanA += a[i];
+      meanB += b[i];
+    }
+    meanA /= n;
+    meanB /= n;
+
+    let numerator = 0;
+    let energyA = 0;
+    let energyB = 0;
+    for (let i = 0; i < n; i++) {
+      const da = a[i] - meanA;
+      const db = b[i] - meanB;
+      numerator += da * db;
+      energyA += da * da;
+      energyB += db * db;
+    }
+
+    const denominator = Math.sqrt(energyA * energyB);
+    return denominator > 1e-6 ? Math.abs(numerator / denominator) : 0;
+  }
+
+  private pruneSystemEchoFrames(now: number): void {
+    const cutoff = now - this._MIC_GATE_ECHO_HISTORY_MS;
+    this._recentSystemEchoFrames = this._recentSystemEchoFrames
+      .filter(frame => frame.timestamp >= cutoff)
+      .slice(-this._MIC_GATE_MAX_ECHO_FRAMES);
+  }
+
+  private rememberSystemEchoFrame(chunk: Buffer, level: { rms: number; peak: number }): void {
+    const now = Date.now();
+    this.pruneSystemEchoFrames(now);
+
+    const isAudible = level.rms > this._MIC_GATE_RMS_THRESHOLD || level.peak > this._MIC_GATE_PEAK_THRESHOLD;
+    if (!isAudible) return;
+
+    const envelope = this.createPcmEnvelope(chunk);
+    if (!envelope) return;
+
+    this._recentSystemEchoFrames.push({
+      timestamp: now,
+      envelope,
+      rms: level.rms,
+      peak: level.peak,
+    });
+
+    if (this._recentSystemEchoFrames.length > this._MIC_GATE_MAX_ECHO_FRAMES) {
+      this._recentSystemEchoFrames = this._recentSystemEchoFrames.slice(-this._MIC_GATE_MAX_ECHO_FRAMES);
+    }
+  }
+
+  private findCorrelatedSystemEcho(chunk: Buffer): { correlation: number; ageMs: number; rms: number; peak: number } | null {
+    if (this._recentSystemEchoFrames.length === 0) return null;
+
+    const now = Date.now();
+    this.pruneSystemEchoFrames(now);
+
+    const micEnvelope = this.createPcmEnvelope(chunk);
+    if (!micEnvelope) return null;
+
+    let best: { correlation: number; ageMs: number; rms: number; peak: number } | null = null;
+    for (const frame of this._recentSystemEchoFrames) {
+      const correlation = this.getEnvelopeCorrelation(micEnvelope, frame.envelope);
+      if (!best || correlation > best.correlation) {
+        best = {
+          correlation,
+          ageMs: now - frame.timestamp,
+          rms: frame.rms,
+          peak: frame.peak,
+        };
+      }
+    }
+
+    return best && best.correlation >= this._MIC_GATE_ECHO_CORRELATION_THRESHOLD ? best : null;
+  }
+
   /**
    * Update the mic gate state based on system audio levels.
    * Called on every system audio chunk (before the 5s throttle of maybeLogAudioLevel).
    */
   private updateMicGate(chunk: Buffer): void {
     const level = this.getPcm16Level(chunk);
+    this._lastSystemAudioLevel = level;
+    this.rememberSystemEchoFrame(chunk, level);
+
     const isLoud = level.rms > this._MIC_GATE_RMS_THRESHOLD || level.peak > this._MIC_GATE_PEAK_THRESHOLD;
 
     if (isLoud) {
@@ -1331,18 +1446,46 @@ export class AppState {
     if (!this._micGated) return false;
 
     const level = this.getPcm16Level(chunk);
+    const systemLevel = this._lastSystemAudioLevel;
+    const systemRms = systemLevel?.rms ?? 0;
+    const systemPeak = systemLevel?.peak ?? 0;
     const looksLikeDirectSpeech =
-      level.rms >= this._MIC_GATE_OVERRIDE_RMS || level.peak >= this._MIC_GATE_OVERRIDE_PEAK;
+      (level.rms >= this._MIC_GATE_OVERRIDE_RMS && level.rms >= systemRms * this._MIC_GATE_DIRECT_SPEECH_RATIO) ||
+      (level.peak >= this._MIC_GATE_OVERRIDE_PEAK && level.peak >= systemPeak * this._MIC_GATE_DIRECT_SPEECH_RATIO);
+    const looksLikeDominantDirectSpeech =
+      (systemRms <= 0 || level.rms >= systemRms * this._MIC_GATE_DOMINANT_DIRECT_SPEECH_RATIO) ||
+      (systemPeak <= 0 || level.peak >= systemPeak * this._MIC_GATE_DOMINANT_DIRECT_SPEECH_RATIO);
+    const correlatedEcho = this.findCorrelatedSystemEcho(chunk);
+
+    if (correlatedEcho && !looksLikeDominantDirectSpeech) {
+      this._micGateDroppedChunks++;
+      this._micGateDroppedCorrelatedEchoChunks++;
+      if (this._micGateDroppedCorrelatedEchoChunks <= 10 || this._micGateDroppedCorrelatedEchoChunks % 50 === 0) {
+        console.log(`[Main][mic-gate] DROP correlated-echo #${this._micGateDroppedCorrelatedEchoChunks} corr=${correlatedEcho.correlation.toFixed(2)} age=${correlatedEcho.ageMs}ms rms=${level.rms.toFixed(1)} peak=${level.peak} systemRms=${systemRms.toFixed(1)} systemPeak=${systemPeak}`);
+      }
+      if (this._micGateDroppedChunks <= 10 || this._micGateDroppedChunks % 250 === 0) {
+        console.log(`[Main][mic-gate] DROP echo-chunk #${this._micGateDroppedChunks} rms=${level.rms.toFixed(1)} peak=${level.peak}`);
+      }
+      return true;
+    }
 
     if (looksLikeDirectSpeech) {
       this._micGateAllowedStrongChunks++;
       if (this._micGateAllowedStrongChunks <= 10 || this._micGateAllowedStrongChunks % 50 === 0) {
-        console.log(`[Main][mic-gate] PASS strong-mic #${this._micGateAllowedStrongChunks} rms=${level.rms.toFixed(1)} peak=${level.peak}`);
+        console.log(`[Main][mic-gate] PASS strong-mic #${this._micGateAllowedStrongChunks} rms=${level.rms.toFixed(1)} peak=${level.peak} systemRms=${systemRms.toFixed(1)} systemPeak=${systemPeak}`);
       }
       return false;
     }
 
     this._micGateDroppedChunks++;
+    const absoluteStrong =
+      level.rms >= this._MIC_GATE_OVERRIDE_RMS || level.peak >= this._MIC_GATE_OVERRIDE_PEAK;
+    if (absoluteStrong) {
+      this._micGateDroppedRelativeEchoChunks++;
+      if (this._micGateDroppedRelativeEchoChunks <= 10 || this._micGateDroppedRelativeEchoChunks % 50 === 0) {
+        console.log(`[Main][mic-gate] DROP relative-echo #${this._micGateDroppedRelativeEchoChunks} rms=${level.rms.toFixed(1)} peak=${level.peak} systemRms=${systemRms.toFixed(1)} systemPeak=${systemPeak}`);
+      }
+    }
     if (this._micGateDroppedChunks <= 10 || this._micGateDroppedChunks % 250 === 0) {
       console.log(`[Main][mic-gate] DROP echo-chunk #${this._micGateDroppedChunks} rms=${level.rms.toFixed(1)} peak=${level.peak}`);
     }
@@ -2311,8 +2454,16 @@ export class AppState {
       // dialog itself when it first attempts to access screen content.
     }
 
-    if (metadata?.debugAudioRecording === true) {
-      this.startAudioDebugRecording(metadata);
+    const forceAudioDebugRecording = process.env.NATIVELY_FORCE_AUDIO_DEBUG === '1';
+    if (metadata?.debugAudioRecording === true || forceAudioDebugRecording) {
+      if (forceAudioDebugRecording && metadata?.debugAudioRecording !== true) {
+        console.log('[AudioDebugRecorder] Enabled by NATIVELY_FORCE_AUDIO_DEBUG=1.');
+      }
+      this.startAudioDebugRecording({
+        ...(metadata || {}),
+        debugAudioRecording: true,
+        debugAudioRecordingForced: forceAudioDebugRecording || undefined,
+      });
     } else {
       this.audioDebugRecorder?.abort();
       this.audioDebugRecorder = null;

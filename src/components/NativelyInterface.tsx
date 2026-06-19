@@ -97,10 +97,162 @@ interface Message {
   modelUsed?: string;
   tokensUsed?: number;
   durationMs?: number;
+  agenticRunId?: number;
+  agenticPass?: number;
 }
+
+type AgenticAnswerSource = "manual" | "voice" | "screenshot";
+
+type AgenticRunState = {
+  id: number;
+  cancelled: boolean;
+  maxPasses: number;
+};
+
+type AgenticAnswerRequest = {
+  question: string;
+  imagePaths?: string[];
+  baseContext?: string;
+  historyMessages?: Message[];
+  source: AgenticAnswerSource;
+};
 
 const estimateTokens = (text: string): number =>
   Math.max(1, Math.round(text.length / 4));
+
+const AGENTIC_MAX_PASSES = 3;
+const AGENTIC_PASS_DELAY_MS = 450;
+const AGENTIC_MEMORY_MAX_CHARS = 2200;
+const AGENTIC_MODE_STORAGE_KEY = "natively_agentic_answer_enabled";
+
+const compactAgenticText = (text: string, maxChars: number): string => {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (compact.length <= maxChars) return compact;
+  return `${compact.slice(0, Math.max(0, maxChars - 18)).trim()} ...[trimmed]`;
+};
+
+const buildAgenticConversationMemory = (messages: Message[]): string => {
+  const settled = messages.filter(
+    (message) =>
+      !message.isStreaming &&
+      !message.pendingAction &&
+      !message.isNegotiationCoaching &&
+      message.text.trim().length > 0 &&
+      (message.role === "user" || message.role === "system"),
+  );
+
+  if (settled.length === 0) return "";
+
+  const recentTurns = settled.slice(-10).map((message) => {
+    const role = message.role === "user" ? "User" : "Assistant";
+    return `${role}: ${compactAgenticText(message.text, 320)}`;
+  });
+
+  const lastUser = [...settled].reverse().find((message) => message.role === "user");
+  const lastAssistant = [...settled]
+    .reverse()
+    .find((message) => message.role === "system");
+
+  return compactAgenticText(
+    [
+      "Compact chat memory for references such as previous answer, correction, or continue.",
+      lastUser ? `Previous user request: ${compactAgenticText(lastUser.text, 260)}` : "",
+      lastAssistant
+        ? `Previous assistant answer: ${compactAgenticText(lastAssistant.text, 420)}`
+        : "",
+      "Recent turns:",
+      ...recentTurns,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    AGENTIC_MEMORY_MAX_CHARS,
+  );
+};
+
+const isNoUsefulAgenticUpdate = (text: string): boolean => {
+  const normalized = text.trim().toLowerCase().replace(/\s+/g, " ");
+  return (
+    normalized === "no useful update yet." ||
+    normalized === "no useful update yet"
+  );
+};
+
+const buildAgenticAnswerContext = ({
+  source,
+  question,
+  baseContext,
+  liveContext,
+  conversationMemory,
+  previousAnswer,
+  pass,
+  maxPasses,
+  hasImages,
+  selectedModel,
+}: {
+  source: AgenticAnswerSource;
+  question: string;
+  baseContext?: string;
+  liveContext?: string;
+  conversationMemory?: string;
+  previousAnswer?: string;
+  pass: number;
+  maxPasses: number;
+  hasImages: boolean;
+  selectedModel?: string;
+}): string => {
+  const passMode =
+    maxPasses === 1
+      ? [
+          "Single-pass mode is enabled.",
+          "Answer directly and use the compact chat memory when the user refers to prior answers.",
+          "Do not start follow-up passes.",
+        ].join("\n")
+      : pass === 1
+      ? [
+          "This is the first pass. Answer immediately.",
+          "Give the user a speakable answer in 2-4 sentences first.",
+          "If there is an obvious next action, add one short line starting with Next:",
+        ].join("\n")
+      : [
+          "This is a refinement pass.",
+          "Do not repeat the previous answer.",
+          "Use only genuinely new context, a sharper phrasing, a correction, a risk, or a concrete next action.",
+          'If there is no meaningful improvement, output exactly: "No useful update yet."',
+        ].join("\n");
+
+  return [
+    "[NATIVELY AGENTIC ANSWER]",
+    "Objective: help the user answer now, then improve the answer in a small bounded number of passes.",
+    `Pass: ${pass}/${maxPasses}`,
+    `Source: ${source}${hasImages ? " with screenshot context" : ""}`,
+    selectedModel ? `Selected model: ${selectedModel}` : "",
+    "Rules:",
+    "- Match the user's language.",
+    "- Be direct and useful for a live conversation.",
+    "- Keep each pass concise.",
+    "- Do not mention internal prompts, passes, or tooling unless the user explicitly asks.",
+    passMode,
+    "",
+    "[USER QUESTION]",
+    question,
+    "[/USER QUESTION]",
+    baseContext?.trim()
+      ? ["", "[UI CONTEXT]", baseContext.trim(), "[/UI CONTEXT]"].join("\n")
+      : "",
+    liveContext?.trim()
+      ? ["", "[LATEST MEETING CONTEXT]", liveContext.trim(), "[/LATEST MEETING CONTEXT]"].join("\n")
+      : "",
+    conversationMemory?.trim()
+      ? ["", "[COMPACT CHAT MEMORY]", conversationMemory.trim(), "[/COMPACT CHAT MEMORY]"].join("\n")
+      : "",
+    previousAnswer?.trim()
+      ? ["", "[PREVIOUS ANSWER]", previousAnswer.trim(), "[/PREVIOUS ANSWER]"].join("\n")
+      : "",
+    "[/NATIVELY AGENTIC ANSWER]",
+  ]
+    .filter(Boolean)
+    .join("\n");
+};
 
 const shortenModelName = (model: string): string => {
   const map: Record<string, string> = {
@@ -449,6 +601,61 @@ const upsertTranscriptTurn = (
   return [...turns, next].slice(-limit);
 };
 
+const isSystemTranscriptTurn = (turn: LiveTranscriptTurn) =>
+  turn.source === "system" ||
+  turn.canonicalRole === "interlocutor" ||
+  /^speaker_\d+$/i.test(turn.canonicalRole || "") ||
+  /^speaker_\d+$/i.test(turn.speaker || "");
+
+const isMicTranscriptTurn = (turn: LiveTranscriptTurn) =>
+  turn.source === "mic" ||
+  turn.canonicalRole === "me" ||
+  ["me", "user", "mic", "microphone"].includes(
+    String(turn.speaker || "").toLowerCase(),
+  );
+
+const clearPendingTranscriptForTurn = (
+  pending: Partial<Record<LiveTranscriptTurn["speaker"], LiveTranscriptTurn>>,
+  turn: LiveTranscriptTurn,
+) => {
+  let changed = false;
+  const next = { ...pending };
+
+  for (const [speaker, pendingTurn] of Object.entries(next)) {
+    if (!pendingTurn) continue;
+
+    const sameSpeaker =
+      speaker === turn.speaker || pendingTurn.speaker === turn.speaker;
+    const sameSource =
+      Boolean(pendingTurn.source) &&
+      Boolean(turn.source) &&
+      pendingTurn.source === turn.source;
+    const sameSystemFamily =
+      isSystemTranscriptTurn(pendingTurn) && isSystemTranscriptTurn(turn);
+    const sameMicFamily =
+      isMicTranscriptTurn(pendingTurn) && isMicTranscriptTurn(turn);
+
+    if (sameSpeaker || sameSource || sameSystemFamily || sameMicFamily) {
+      delete next[speaker];
+      changed = true;
+    }
+  }
+
+  return changed ? next : pending;
+};
+
+const shouldShowPendingTranscriptTurn = (turn: LiveTranscriptTurn) => {
+  if (turn.final) return true;
+  if (!isMicTranscriptTurn(turn)) return true;
+
+  const flags = new Set(turn.qualityFlags || []);
+  return !(
+    flags.has("possible_overlap") ||
+    flags.has("mic_gate_held") ||
+    flags.has("echo_suspect")
+  );
+};
+
 const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   onEndMeeting,
   overlayOpacity = OVERLAY_OPACITY_DEFAULT,
@@ -462,6 +669,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const [inputValue, setInputValue] = useState("");
   const { shortcuts, isShortcutPressed } = useShortcuts();
   const [messages, setMessages] = useState<Message[]>([]);
+  const messagesRef = useRef<Message[]>([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
   const [copilotSuggestion, setCopilotSuggestion] =
     useState<CopilotSuggestion | null>(null);
   const [copilotStatus, setCopilotStatus] =
@@ -482,6 +693,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const incrementPending = () => setPendingCount((c) => c + 1);
   const decrementPending = () => setPendingCount((c) => Math.max(0, c - 1));
   const isProcessing = pendingCount > 0;
+  const activeAgenticRunRef = useRef<AgenticRunState | null>(null);
+  const geminiStreamBufferRef = useRef("");
+  const [isAgenticModeEnabled, setIsAgenticModeEnabled] = useState(() => {
+    return localStorage.getItem(AGENTIC_MODE_STORAGE_KEY) !== "false";
+  });
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>(
     {},
   );
@@ -722,6 +938,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setIsCommandToolsOpen(false);
     }
   }, [isConversationFocusMode, isCommandToolsOpen]);
+
+  useEffect(() => {
+    localStorage.setItem(
+      AGENTIC_MODE_STORAGE_KEY,
+      String(isAgenticModeEnabled),
+    );
+  }, [isAgenticModeEnabled]);
 
   useEffect(() => {
     // Load the persisted default model (not the runtime model)
@@ -1056,6 +1279,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     };
 
     if (!transcript.final) {
+      if (!shouldShowPendingTranscriptTurn(turn)) {
+        setPendingLiveTranscript((prev) =>
+          clearPendingTranscriptForTurn(prev, turn),
+        );
+        return;
+      }
+
       setPendingLiveTranscript((prev) => ({
         ...prev,
         [speaker]: {
@@ -1070,21 +1300,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           rawSpeaker: transcript.rawSpeaker,
         },
       }));
-      setLiveTranscriptTurns((prev) =>
-        upsertTranscriptTurn(prev, turn, MAX_LIVE_TRANSCRIPT_TURNS),
-      );
-      setCopyTranscriptTurns((prev) =>
-        upsertTranscriptTurn(prev, turn, MAX_COPY_TRANSCRIPT_TURNS),
-      );
       return;
     }
 
-    setPendingLiveTranscript((prev) => {
-      if (!prev[speaker]) return prev;
-      const next = { ...prev };
-      delete next[speaker];
-      return next;
-    });
+    setPendingLiveTranscript((prev) => clearPendingTranscriptForTurn(prev, turn));
 
     setLiveTranscriptTurns((prev) =>
       upsertTranscriptTurn(prev, turn, MAX_LIVE_TRANSCRIPT_TURNS),
@@ -1911,6 +2130,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
           // Not JSON — normal text token, fall through to the standard append.
         }
 
+        geminiStreamBufferRef.current += token;
+
         setMessages((prev) => {
           const lastMsg = prev[prev.length - 1];
           if (lastMsg && lastMsg.isStreaming && lastMsg.role === "system") {
@@ -2132,6 +2353,191 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     return () => cleanups.forEach((fn) => fn());
   }, [currentModel]); // Ensure tracking captures correct model
 
+  const cancelActiveWork = async () => {
+    const activeRun = activeAgenticRunRef.current;
+    if (activeRun) {
+      activeRun.cancelled = true;
+    }
+
+    setPendingCount(0);
+    setActionLoading({});
+    requestStartTimeRef.current = null;
+    streamStartTimesRef.current = {};
+    geminiStreamBufferRef.current = "";
+
+    try {
+      await window.electronAPI.cancelGeminiStream?.();
+    } catch (err) {
+      console.warn("[NativelyInterface] Failed to cancel Gemini stream:", err);
+    }
+
+    try {
+      await window.electronAPI.resetIntelligence?.();
+    } catch (err) {
+      console.warn("[NativelyInterface] Failed to reset intelligence:", err);
+    }
+
+    setMessages((prev) => {
+      let changed = false;
+      const stopped = prev.map((msg) => {
+        if (!msg.isStreaming) return msg;
+        changed = true;
+        const existing = msg.text.trim();
+        return {
+          ...msg,
+          isStreaming: false,
+          text: existing ? `${existing}\n\nStopped.` : "Stopped.",
+        };
+      });
+      return changed ? stopped : prev;
+    });
+  };
+
+  const handleAgenticModeToggle = async () => {
+    const nextEnabled = !isAgenticModeEnabled;
+    setIsAgenticModeEnabled(nextEnabled);
+
+    if (!nextEnabled && isProcessing) {
+      await cancelActiveWork();
+    }
+  };
+
+  const runAgenticResponse = async ({
+    question,
+    imagePaths,
+    baseContext,
+    historyMessages,
+    source,
+  }: AgenticAnswerRequest) => {
+    const normalizedQuestion =
+      question.trim() || (imagePaths?.length ? "Analyze this screenshot" : "");
+    if (!normalizedQuestion) return;
+
+    const run: AgenticRunState = {
+      id: Date.now(),
+      cancelled: false,
+      maxPasses: isAgenticModeEnabled ? AGENTIC_MAX_PASSES : 1,
+    };
+    activeAgenticRunRef.current = run;
+
+    let previousAnswer = "";
+    const conversationMemory = buildAgenticConversationMemory(
+      historyMessages ?? messagesRef.current,
+    );
+
+    for (let pass = 1; pass <= run.maxPasses; pass += 1) {
+      if (run.cancelled || activeAgenticRunRef.current?.id !== run.id) break;
+      if (pass > 1) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, AGENTIC_PASS_DELAY_MS),
+        );
+      }
+      if (run.cancelled || activeAgenticRunRef.current?.id !== run.id) break;
+
+      let liveContext = "";
+      try {
+        const contextResult = await window.electronAPI.getIntelligenceContext?.();
+        liveContext = contextResult?.context || "";
+      } catch (err) {
+        console.warn("[NativelyInterface] Failed to refresh live context:", err);
+      }
+
+      const context = buildAgenticAnswerContext({
+        source,
+        question: normalizedQuestion,
+        baseContext,
+        liveContext,
+        conversationMemory,
+        previousAnswer,
+        pass,
+        maxPasses: run.maxPasses,
+        hasImages: Boolean(imagePaths?.length),
+        selectedModel: currentModelRef.current,
+      });
+
+      const streamMessage =
+        pass === 1
+          ? normalizedQuestion
+          : `Refine the answer to this live question without repeating yourself: ${normalizedQuestion}`;
+
+      geminiStreamBufferRef.current = "";
+      requestStartTimeRef.current = Date.now();
+      incrementPending();
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `${run.id}-${pass}`,
+          role: "system",
+          text: "",
+          isStreaming: true,
+          intent: "agentic",
+          agenticRunId: run.id,
+          agenticPass: pass,
+        },
+      ]);
+
+      try {
+        await window.electronAPI.streamGeminiChat(
+          streamMessage,
+          imagePaths,
+          context,
+          pass > 1 ? { skipTranscript: true } : undefined,
+        );
+      } catch (err) {
+        decrementPending();
+        requestStartTimeRef.current = null;
+        const message = err instanceof Error ? err.message : String(err);
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (
+            last?.isStreaming &&
+            last.agenticRunId === run.id &&
+            last.agenticPass === pass
+          ) {
+            return prev.slice(0, -1).concat({
+              ...last,
+              isStreaming: false,
+              text: last.text.trim()
+                ? `${last.text}\n\nError: ${message}`
+                : `Error starting stream: ${message}`,
+            });
+          }
+          return [
+            ...prev,
+            {
+              id: `${Date.now()}-agentic-error`,
+              role: "system",
+              text: `Error: ${message}`,
+            },
+          ];
+        });
+        break;
+      }
+
+      const passAnswer = geminiStreamBufferRef.current.trim();
+      if (run.cancelled || activeAgenticRunRef.current?.id !== run.id) break;
+
+      if (!passAnswer) break;
+      if (pass > 1 && isNoUsefulAgenticUpdate(passAnswer)) {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.agenticRunId === run.id && last.agenticPass === pass) {
+            return prev.slice(0, -1);
+          }
+          return prev;
+        });
+        break;
+      }
+
+      previousAnswer = [previousAnswer, passAnswer].filter(Boolean).join("\n\n");
+    }
+
+    if (activeAgenticRunRef.current?.id === run.id) {
+      activeAgenticRunRef.current = null;
+    }
+  };
+
   const handleAnswerNow = async () => {
     if (isManualRecording) {
       // Stop recording - send accumulated voice input to Gemini
@@ -2194,6 +2600,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         return;
       }
 
+      const historyMessages = messagesRef.current;
+
       // Show user's spoken question
       setMessages((prev) => [
         ...prev,
@@ -2208,64 +2616,52 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
       setTimeout(() => scrollMessagesToBottom("smooth"), 50);
 
-      // Add placeholder for streaming response
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          role: "system",
-          text: "",
-          isStreaming: true,
-        },
-      ]);
-
-      incrementPending();
-
       try {
-        let prompt = "";
+        if (currentAttachments.length === 0 && window.electronAPI.ragQueryLive) {
+          // JIT RAG pre-flight stays as the fastest indexed answer path when available.
+          const ragPlaceholderId = `${Date.now()}-rag`;
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: ragPlaceholderId,
+              role: "system",
+              text: "",
+              isStreaming: true,
+              intent: "rag",
+            },
+          ]);
+          incrementPending();
 
-        if (currentAttachments.length > 0) {
-          // Image + Voice Context
-          prompt = `You are a helper. The user has provided a screenshot and a spoken question/command.
-User said: "${question}"
+          let ragResult: { success?: boolean } | undefined;
+          try {
+            ragResult = await window.electronAPI.ragQueryLive?.(question);
+          } catch (ragErr) {
+            console.warn("[NativelyInterface] RAG pre-flight failed:", ragErr);
+          }
 
-Instructions:
-1. Analyze the screenshot in the context of what the user said.
-2. Provide a direct, helpful answer.
-3. Be concise.`;
-        } else {
-          // JIT RAG pre-flight: try to use indexed meeting context first
-          const ragResult = await window.electronAPI.ragQueryLive?.(question);
           if (ragResult?.success) {
             // JIT RAG handled it — response streamed via rag:stream-chunk events
             return;
           }
 
-          // Voice Only (Smart Extract) — fallback
-          prompt = `You are a real-time interview assistant. The user just repeated or paraphrased a question from their interviewer.
-Instructions:
-1. Extract the core question being asked
-2. Provide a clear, concise, and professional answer that the user can say out loud
-3. Keep the answer conversational but informative (2-4 sentences ideal)
-4. Do NOT include phrases like "The question is..." - just give the answer directly
-5. Format for speaking out loud, not for reading
-
-Provide only the answer, nothing else.`;
+          decrementPending();
+          setMessages((prev) =>
+            prev.filter((message) => message.id !== ragPlaceholderId),
+          );
         }
 
-        // Call Streaming API: message = question, context = instructions
-        requestStartTimeRef.current = Date.now();
-        await window.electronAPI.streamGeminiChat(
+        await runAgenticResponse({
           question,
-          currentAttachments.length > 0
-            ? currentAttachments.map((s) => s.path)
-            : undefined,
-          prompt,
-          { skipSystemPrompt: true },
-        );
+          imagePaths:
+            currentAttachments.length > 0
+              ? currentAttachments.map((s) => s.path)
+              : undefined,
+          baseContext: conversationContext,
+          historyMessages,
+          source: currentAttachments.length > 0 ? "screenshot" : "voice",
+        });
       } catch (err) {
         // Initial invocation failing (e.g. IPC error before stream starts)
-        decrementPending();
         setMessages((prev) => {
           const last = prev[prev.length - 1];
           // If we just added the empty streaming placeholder, remove it or fill it with error
@@ -2309,6 +2705,7 @@ Provide only the answer, nothing else.`;
 
     const userText = inputValue;
     const currentAttachments = attachedContext;
+    const historyMessages = messagesRef.current;
 
     // Clear inputs immediately
     setInputValue("");
@@ -2329,58 +2726,20 @@ Provide only the answer, nothing else.`;
 
     setTimeout(() => scrollMessagesToBottom("smooth"), 50);
 
-    const useMeetingContextAnswer = currentAttachments.length === 0;
-
-    // Add placeholder for the response. Text-only questions use the meeting
-    // action pipeline so free-form chat sees the same canonical transcript
-    // context as the live buttons.
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: Date.now().toString(),
-        role: "system",
-        text: "",
-        isStreaming: true,
-        intent: useMeetingContextAnswer ? "manual" : undefined,
-      },
-    ]);
-
     setIsExpanded(true);
-    incrementPending();
 
     try {
-      if (useMeetingContextAnswer) {
-        streamStartTimesRef.current["manual"] = Date.now();
-        const result = await window.electronAPI.submitManualQuestion(
-          userText || "",
-        );
-        const answer = result?.answer || "";
-
-        if (!answer) {
-          delete streamStartTimesRef.current["manual"];
-          setMessages((prev) =>
-            finalizePendingActionMessage(
-              prev,
-              "manual",
-              "I could not answer reliably from the current meeting context.",
-            ),
-          );
-          decrementPending();
-        }
-        return;
-      }
-
-      // Screenshot requests still need the vision chat path.
-      requestStartTimeRef.current = Date.now();
-      await window.electronAPI.streamGeminiChat(
-        userText || "Analyze this screenshot",
-        currentAttachments.length > 0
-          ? currentAttachments.map((s) => s.path)
-          : undefined,
-        conversationContext, // Pass context so "answer this" works
-      );
+      await runAgenticResponse({
+        question: userText || "Analyze this screenshot",
+        imagePaths:
+          currentAttachments.length > 0
+            ? currentAttachments.map((s) => s.path)
+            : undefined,
+        baseContext: conversationContext,
+        historyMessages,
+        source: currentAttachments.length > 0 ? "screenshot" : "manual",
+      });
     } catch (err) {
-      decrementPending();
       setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last && last.isStreaming && last.text === "") {
@@ -3025,7 +3384,7 @@ Provide only the answer, nothing else.`;
     processScreenshots: handleWhatToSay,
     resetCancel: async () => {
       if (isProcessing) {
-        decrementPending();
+        await cancelActiveWork();
       } else {
         await window.electronAPI.resetIntelligence();
         setMessages([]);
@@ -3067,7 +3426,7 @@ Provide only the answer, nothing else.`;
     processScreenshots: handleWhatToSay,
     resetCancel: async () => {
       if (isProcessing) {
-        decrementPending();
+        await cancelActiveWork();
       } else {
         await window.electronAPI.resetIntelligence();
         setMessages([]);
@@ -3266,7 +3625,10 @@ Provide only the answer, nothing else.`;
   const copyableTranscriptTurns = [...copyTranscriptTurns].sort(
     (a, b) => a.timestamp - b.timestamp,
   );
-  const hasPendingTranscript = Object.keys(pendingLiveTranscript).length > 0;
+  const pendingTranscriptTurns = Object.values(pendingLiveTranscript)
+    .filter((turn): turn is LiveTranscriptTurn => Boolean(turn))
+    .sort((a, b) => a.timestamp - b.timestamp);
+  const hasPendingTranscript = pendingTranscriptTurns.length > 0;
   const hasLiveTranscript =
     showTranscript &&
     (visibleTranscriptTurns.length > 0 || hasPendingTranscript || isConnected);
@@ -3297,15 +3659,18 @@ Provide only the answer, nothing else.`;
     0,
     transcriptWindowEnd - transcriptPageSize,
   );
-  const displayedTranscriptTurns = visibleTranscriptTurns.slice(
+  const displayedStableTranscriptTurns = visibleTranscriptTurns.slice(
     transcriptWindowStart,
     transcriptWindowEnd,
   );
+  const displayedTranscriptTurns =
+    currentTranscriptPage === 0
+      ? [...displayedStableTranscriptTurns, ...pendingTranscriptTurns]
+      : displayedStableTranscriptTurns;
   const transcriptQualityFlags = [
     ...visibleTranscriptTurns.slice(-6),
-    ...Object.values(pendingLiveTranscript),
-  ].filter((turn): turn is LiveTranscriptTurn => Boolean(turn))
-    .flatMap((turn) => turn.qualityFlags || []);
+    ...pendingTranscriptTurns,
+  ].flatMap((turn) => turn.qualityFlags || []);
   const transcriptStatusBadges = [
     transcriptQualityFlags.includes("speaker_stable") ? "Speaker stable" : "",
     transcriptQualityFlags.includes("mic_gate_held") ? "Mic gated" : "",
@@ -4276,6 +4641,34 @@ Provide only the answer, nothing else.`;
                     )}
                     <span>Follow Up</span>
                   </button>
+                  <button
+                    data-testid="natively-action-agentic-toggle"
+                    onClick={handleAgenticModeToggle}
+                    aria-pressed={isAgenticModeEnabled}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10.5px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${
+                      isAgenticModeEnabled
+                        ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/25 hover:bg-emerald-500/15"
+                        : quickActionClass
+                    }`}
+                    style={
+                      isAgenticModeEnabled ? undefined : appearance.chipStyle
+                    }
+                    title="Toggle agentic answers"
+                  >
+                    <Sparkles className="w-3 h-3 opacity-80" />
+                    <span>{isAgenticModeEnabled ? "Agent On" : "Agent Off"}</span>
+                  </button>
+                  {isProcessing && (
+                    <button
+                      data-testid="natively-action-stop-generation"
+                      onClick={cancelActiveWork}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10.5px] font-medium transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 bg-red-500/10 text-red-400 ring-1 ring-red-500/20 hover:bg-red-500/15"
+                      title="Stop current response"
+                    >
+                      <CircleSlash className="w-3 h-3 opacity-80" />
+                      <span>Stop</span>
+                    </button>
+                  )}
                   <button
                     data-testid="natively-action-answer"
                     onClick={handleAnswerNow}

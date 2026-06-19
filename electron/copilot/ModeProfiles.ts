@@ -150,7 +150,7 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
     },
     client_discovery: {
         mode: 'client_discovery',
-        label: 'Client Discovery Copilot',
+        label: 'Opportunity Discovery Copilot',
         automaticEnabled: true,
         minSegments: 2,
         minContextMs: 15_000,
@@ -158,7 +158,7 @@ export const COPILOT_MODE_PROFILES: Record<CopilotMode, CopilotModeProfile> = {
         minConfidence: 0.65,
         allowedActions: ['WAIT', 'SUGGEST', 'ASK'],
         suggestionTypes: ['client_need', 'business_goal', 'scope', 'priority', 'deadline'],
-        systemBehavior: 'Clarify business objectives, constraints, budget, timeline, decision-makers, and success metrics.'
+        systemBehavior: 'Clarify project vision, business objectives, target users, expected contribution, constraints, stakeholders, timing, and success metrics.'
     },
     sprint_planning: {
         mode: 'sprint_planning',
@@ -248,7 +248,7 @@ export function resolveCopilotMode(activeMode: ActiveModeLike): CopilotMode | nu
         if (/\b(tech lead|tech|lead)\b/.test(name)) return 'tech_lead';
         if (/\b(api|backend|endpoint|rest)\b/.test(name)) return 'backend_api';
         if (/\b(frontend|ui|ux|handoff)\b/.test(name)) return 'frontend_handoff';
-        if (/\b(discovery|business)\b/.test(name)) return 'client_discovery';
+        if (/\b(discovery|business|opportunity|opportunit|opportunité|partnership|partenariat|founder|fondateur|venture|projet)\b/.test(name)) return 'client_discovery';
         if (/\b(sprint|scrum|agile)\b/.test(name)) return 'sprint_planning';
         if (/\b(client|sales|vente|commercial|nego|meeting)\b/.test(name)) return 'client_meeting';
         if (/\b(interview|entretien|technical|technique|coding|code|assessment)\b/.test(name)) return 'technical_interview';

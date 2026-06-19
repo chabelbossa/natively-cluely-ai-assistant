@@ -98,14 +98,56 @@ function rms(pcm) {
 
 function chooseAudibleWindow(pcm, sampleRate) {
   const chunkBytes = Math.max(2, Math.floor(sampleRate * 0.5) * 2);
-  const windowBytes = Math.min(pcm.length, sampleRate * 2 * 14);
-  for (let offset = 0; offset + chunkBytes <= pcm.length; offset += chunkBytes) {
-    const chunk = pcm.subarray(offset, offset + chunkBytes);
-    if (rms(chunk) >= 120) {
-      const start = Math.max(0, offset - sampleRate * 2);
-      return pcm.subarray(start, Math.min(pcm.length, start + windowBytes));
+  const windowBytes = Math.min(pcm.length, sampleRate * 2 * 45);
+  const stepBytes = Math.max(chunkBytes, sampleRate * 2 * 2);
+  let best = {
+    start: 0,
+    score: -1,
+    audibleChunks: 0,
+    avgRms: 0,
+  };
+
+  for (let start = 0; start < pcm.length; start += stepBytes) {
+    const end = Math.min(pcm.length, start + windowBytes);
+    let score = 0;
+    let audibleChunks = 0;
+    let totalRms = 0;
+    let chunks = 0;
+
+    for (let offset = start; offset + chunkBytes <= end; offset += chunkBytes) {
+      const value = rms(pcm.subarray(offset, offset + chunkBytes));
+      chunks++;
+      totalRms += value;
+      if (value >= 120) {
+        audibleChunks++;
+        score += Math.min(value, 2000);
+      } else {
+        score += value * 0.1;
+      }
+    }
+
+    if (
+      audibleChunks > best.audibleChunks ||
+      (audibleChunks === best.audibleChunks && score > best.score)
+    ) {
+      best = {
+        start,
+        score,
+        audibleChunks,
+        avgRms: chunks > 0 ? totalRms / chunks : 0,
+      };
     }
   }
+
+  if (best.audibleChunks > 0) {
+    const start = Math.max(0, best.start - sampleRate * 2);
+    const end = Math.min(pcm.length, start + windowBytes);
+    console.log(
+      `[ParakeetGuard] selected window start=${Math.round(start / 2 / sampleRate)}s duration=${Math.round((end - start) / 2 / sampleRate)}s audibleChunks=${best.audibleChunks} avgRms=${best.avgRms.toFixed(1)}`,
+    );
+    return pcm.subarray(start, end);
+  }
+
   return pcm.subarray(0, windowBytes);
 }
 

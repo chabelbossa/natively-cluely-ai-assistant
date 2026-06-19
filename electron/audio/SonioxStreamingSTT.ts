@@ -11,6 +11,7 @@
  *
  * Key features:
  *   - 60+ language auto-detection
+ *   - Real-time speaker diarization
  *   - Language hints for multilingual accuracy
  *   - Endpoint detection for auto-finalization on speech pauses
  *   - Up to 8000-token structured context for domain-specific terms
@@ -46,6 +47,9 @@ export class SonioxStreamingSTT extends EventEmitter {
         super();
         this.apiKey = apiKey;
     }
+
+    /** Soniox annotates real-time tokens with speaker IDs when enabled. */
+    public readonly supportsDiarization = true;
 
     // =========================================================================
     // Configuration (match GoogleSTT / DeepgramStreamingSTT interface)
@@ -208,6 +212,7 @@ export class SonioxStreamingSTT extends EventEmitter {
                 sample_rate: this.sampleRate,
                 num_channels: this.numChannels,
                 enable_language_identification: true,
+                enable_speaker_diarization: true,
                 enable_endpoint_detection: true,
             };
 
@@ -254,8 +259,8 @@ export class SonioxStreamingSTT extends EventEmitter {
                 const tokens = msg.tokens;
                 if (!tokens || !Array.isArray(tokens) || tokens.length === 0) return;
 
-                let currentFinalText = '';
-                let nonFinalText = '';
+                const finalTokens: any[] = [];
+                const nonFinalTokens: any[] = [];
 
                 for (const token of tokens) {
                     if (!token.text) continue;
@@ -271,11 +276,14 @@ export class SonioxStreamingSTT extends EventEmitter {
                     }
 
                     if (token.is_final) {
-                        currentFinalText += token.text;
+                        finalTokens.push(token);
                     } else {
-                        nonFinalText += token.text;
+                        nonFinalTokens.push(token);
                     }
                 }
+
+                const currentFinalText = finalTokens.map(token => token.text).join('');
+                const nonFinalText = nonFinalTokens.map(token => token.text).join('');
 
                 // 1. Emit final tokens immediately
                 if (currentFinalText) {
@@ -283,6 +291,7 @@ export class SonioxStreamingSTT extends EventEmitter {
                         text: currentFinalText,
                         isFinal: true,
                         confidence: 1.0,
+                        speakerId: this.getDominantSpeakerId(finalTokens),
                     });
                 }
 
@@ -292,6 +301,7 @@ export class SonioxStreamingSTT extends EventEmitter {
                         text: nonFinalText,
                         isFinal: false,
                         confidence: 1.0,
+                        speakerId: this.getDominantSpeakerId(nonFinalTokens),
                     });
                 }
 
@@ -331,6 +341,25 @@ export class SonioxStreamingSTT extends EventEmitter {
                 this.isActive = false;
             }
         });
+    }
+
+    private getDominantSpeakerId(tokens: any[]): number | undefined {
+        const speakerCounts: Record<number, number> = {};
+        for (const token of tokens) {
+            const speakerId = this.parseSpeakerId(token?.speaker);
+            if (speakerId === undefined) continue;
+            speakerCounts[speakerId] = (speakerCounts[speakerId] ?? 0) + 1;
+        }
+
+        const dominant = Object.entries(speakerCounts).sort((a, b) => b[1] - a[1])[0];
+        return dominant ? Number(dominant[0]) : undefined;
+    }
+
+    private parseSpeakerId(raw: unknown): number | undefined {
+        if (raw === undefined || raw === null) return undefined;
+        if (typeof raw === 'number' && Number.isFinite(raw)) return Math.max(0, Math.floor(raw));
+        const match = String(raw).match(/(?:speaker[_-]?)?(\d+)/i);
+        return match ? Number(match[1]) : undefined;
     }
 
     // =========================================================================

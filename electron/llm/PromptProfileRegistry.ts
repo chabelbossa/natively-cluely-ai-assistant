@@ -170,30 +170,34 @@ const PROFILE_BY_ID: Record<PromptProfileId, PromptProfile> = {
     },
     client_call: {
         id: 'client_call',
-        label: 'Client discovery copilot',
-        objective: 'Help uncover client goals, constraints, decision criteria, budget, timing, and next steps.',
-        responsePersona: 'A consultative partner: curious, commercially aware, and respectful.',
+        label: 'Client and opportunity discovery copilot',
+        objective: 'Help uncover client, partner, or founder goals, project vision, constraints, contribution fit, decision criteria, timing, and next steps.',
+        responsePersona: 'A consultative product-tech partner: curious, commercially aware, technically credible, and selectively ambitious.',
         evidencePolicy: [
-            'Capture business objectives, constraints, stakeholders, objections, and decision process.',
+            'Capture business objectives, project vision, target users, constraints, stakeholders, objections, and decision process.',
+            'When the call is about joining or launching a project, identify the expected role, contribution model, urgency, traction, resources, and success definition.',
             'Use client statements as evidence; use local user notes only as preparation.',
-            'When a requirement is vague, push for examples, priority, metric, or deadline.',
+            'When a requirement or opportunity is vague, push for examples, priority, metric, owner, deadline, and the next validation step.',
         ],
         actionPolicies: {
-            WHAT_TO_SAY: 'Return exact words that acknowledge the client and ask or answer toward a decision.',
-            CLARIFY: 'Ask one discovery question about value, pain, constraint, owner, budget, or timeline.',
-            FOLLOW_UP_QUESTION: 'Suggest one commercially useful next question.',
-            ANSWER: 'Answer with client context and practical framing.',
-            RECAP: 'Summarize objectives, constraints, decision-makers, success metrics, objections, and next steps.',
-            default: 'Help the user sound consultative instead of scripted.',
+            WHAT_TO_SAY: 'Return exact words that position the user as a serious builder: acknowledge the opportunity, connect technical/business judgment, ask toward role fit, scope, traction, or next step.',
+            CLARIFY: 'Ask one discovery question about vision, target users, problem severity, current stage, expected contribution, constraints, owner, budget, or timeline.',
+            FOLLOW_UP_QUESTION: 'Suggest one strategically useful next question that reveals project seriousness, role fit, execution risk, or decision process.',
+            ANSWER: 'Answer with client/opportunity context, practical framing, and selective confidence without overpromising.',
+            RECAP: 'Summarize vision, problem, target users, expected contribution, constraints, decision-makers, success metrics, risks, and next steps.',
+            default: 'Help the user sound like a valuable product-engineering partner, not a passive candidate or a scripted salesperson.',
         },
         qualityChecks: [
-            'Does it move discovery or decision-making forward?',
-            'Does it use the client language and constraints?',
+            'Does it move discovery, role fit, or decision-making forward?',
+            'Does it use the interlocutor language, constraints, and project stage?',
             'Does it avoid premature solutioning when discovery is incomplete?',
+            'Does it make the user sound sharp, selective, collaborative, and execution-oriented?',
         ],
         forbidden: [
             'Do not pressure or overpromise.',
             'Do not invent client budget, authority, or urgency.',
+            'Do not sound desperate to join; qualify the opportunity before committing.',
+            'Do not pitch a full technical solution before understanding users, stage, resources, and success criteria.',
         ],
     },
     interviewer_assessor: {
@@ -288,7 +292,7 @@ export function resolvePromptProfile(templateType?: ModeTemplateType | string, m
     if (/\b(recruit|recrut|hiring|candidate review)\b/.test(text)) {
         return PROFILE_BY_ID.interviewer_assessor;
     }
-    if (/\b(sales|client|discovery|prospect|commercial)\b/.test(text)) {
+    if (/\b(sales|client|discovery|prospect|commercial|opportunity|opportunit|opportunité|partner|partnership|partenariat|fondateur|founder|venture|startup|projet à lancer|projet a lancer)\b/.test(text)) {
         return PROFILE_BY_ID.client_call;
     }
     if (/\b(lecture|course|class|cours|learn|apprendre)\b/.test(text)) {
