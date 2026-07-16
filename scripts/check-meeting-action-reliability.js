@@ -307,6 +307,12 @@ const checks = [
       /getServiceTierMessageMeta[\s\S]*serviceTierFallback[\s\S]*Standard fallback/,
   },
   {
+    name: "completed action cards preserve the model that actually ran",
+    source: ui,
+    pattern:
+      /resolveLiveActionModelId\(serviceTier\?\.model, fallbackModel\)[\s\S]*actionModelIdsRef\.current\[actionId\] = currentModelRef\.current[\s\S]*getActionMessageMeta\(actionId, data\)/,
+  },
+  {
     name: "underdeveloped direct-question answers are treated as repairable",
     source: engine,
     pattern:

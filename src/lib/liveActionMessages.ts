@@ -24,6 +24,17 @@ export interface LiveActionMessageMeta {
   serviceTierFallback?: boolean;
 }
 
+export function resolveLiveActionModelId(
+  serviceTierModel?: string,
+  actionModel?: string,
+  currentModel?: string,
+): string | undefined {
+  const model = [serviceTierModel, actionModel, currentModel]
+    .map((value) => String(value || '').trim())
+    .find(Boolean);
+  return model || undefined;
+}
+
 export function createLiveActionId(): string {
   if (typeof globalThis.crypto?.randomUUID === 'function') {
     return globalThis.crypto.randomUUID();

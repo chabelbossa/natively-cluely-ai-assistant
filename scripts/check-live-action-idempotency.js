@@ -26,8 +26,20 @@ const {
   appendStreamingMessage,
   cancelActionMessage,
   finalizeStreamingMessage,
+  resolveLiveActionModelId,
   upsertPendingActionMessage,
 } = virtualModule.exports;
+
+assert.equal(
+  resolveLiveActionModelId('gpt-5.6-terra', 'codex:gpt-5.6-sol', 'codex:gpt-5.6-luna'),
+  'gpt-5.6-terra',
+  'the backend action model must override a later UI selection',
+);
+assert.equal(
+  resolveLiveActionModelId(undefined, 'codex:gpt-5.6-sol', 'codex:gpt-5.6-luna'),
+  'codex:gpt-5.6-sol',
+  'the model captured when the action starts must override the current UI selection',
+);
 
 const queue = (messages, actionId, intent = 'what_to_answer') =>
   upsertPendingActionMessage(messages, actionId, intent, 'Preparing...');
@@ -143,7 +155,7 @@ async function verifyPendingStreamCancellation() {
 }
 
 verifyPendingStreamCancellation()
-  .then(() => console.log('Live action idempotency tests passed (9 scenarios).'))
+  .then(() => console.log('Live action idempotency tests passed (10 scenarios).'))
   .catch((error) => {
     console.error(error);
     process.exit(1);

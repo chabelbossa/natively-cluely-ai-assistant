@@ -2840,7 +2840,7 @@ export class AppState {
     })
 
     this.intelligenceManager.on('manual_answer_result', (answer: string, question: string) => {
-      sendToRenderers('intelligence-manual-result', { answer, question });
+      sendToRenderers('intelligence-manual-result', { answer, question, serviceTier: currentCodexServiceTier() });
     })
 
     this.intelligenceManager.on('mode_changed', (mode: string) => {

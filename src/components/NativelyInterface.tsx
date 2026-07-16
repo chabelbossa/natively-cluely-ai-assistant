@@ -82,6 +82,7 @@ import {
   createLiveActionId,
   finalizePendingActionMessage,
   finalizeStreamingMessage,
+  resolveLiveActionModelId,
   settleActionMessage,
   upsertPendingActionMessage,
 } from "../lib/liveActionMessages";
@@ -331,9 +332,20 @@ const formatLiveActionError = (error: unknown, mode?: string): string => {
   return mode ? `Error (${mode}): ${raw}` : `Error: ${raw}`;
 };
 
-const getServiceTierMessageMeta = (data: unknown): Pick<LiveActionMessageMeta, "serviceTierUsed" | "serviceTierFallback"> => {
-  const serviceTier = (data as { serviceTier?: { used?: "fast" | "standard"; fallback?: boolean } } | null)?.serviceTier;
+const getServiceTierMessageMeta = (
+  data: unknown,
+  fallbackModel?: string,
+): Pick<LiveActionMessageMeta, "modelUsed" | "serviceTierUsed" | "serviceTierFallback"> => {
+  const serviceTier = (data as {
+    serviceTier?: {
+      used?: "fast" | "standard";
+      fallback?: boolean;
+      model?: string;
+    };
+  } | null)?.serviceTier;
+  const model = resolveLiveActionModelId(serviceTier?.model, fallbackModel);
   return {
+    ...(model ? { modelUsed: shortenModelName(model) } : {}),
     serviceTierUsed: serviceTier?.used,
     serviceTierFallback: serviceTier?.fallback === true,
   };
@@ -601,6 +613,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   );
   const activeActionIdsRef = useRef<Record<string, string>>({});
   const streamStartTimesRef = useRef<Record<string, number>>({});
+  const actionModelIdsRef = useRef<Record<string, string>>({});
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [conversationContext, setConversationContext] = useState<string>("");
   const [isManualRecording, setIsManualRecording] = useState(false);
@@ -691,6 +704,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const queueActionMessage = (intent: string, text: string, loadingKey?: string): string => {
     const actionId = createLiveActionId();
     streamStartTimesRef.current[actionId] = Date.now();
+    actionModelIdsRef.current[actionId] = currentModelRef.current;
     if (loadingKey) {
       activeActionIdsRef.current[loadingKey] = actionId;
       setActionLoading((prev) => ({ ...prev, [loadingKey]: true }));
@@ -783,6 +797,15 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   useEffect(() => {
     currentModelRef.current = currentModel;
   }, [currentModel]);
+
+  const getActionMessageMeta = (
+    actionId: string,
+    data?: unknown,
+  ): Pick<LiveActionMessageMeta, "modelUsed" | "serviceTierUsed" | "serviceTierFallback"> =>
+    getServiceTierMessageMeta(
+      data,
+      actionModelIdsRef.current[actionId] || currentModelRef.current,
+    );
 
   // Dynamic Action Button Mode (Recap vs Brainstorm)
   const [actionButtonMode, setActionButtonMode] = useState<
@@ -1470,10 +1493,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         delete streamStartTimesRef.current[actionId];
         setMessages((prev) =>
           finalizeStreamingMessage(prev, actionId, intent, data.answer, {
-            modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(data.answer),
             durationMs,
-            ...getServiceTierMessageMeta(data),
+            ...getActionMessageMeta(actionId, data),
           }),
         );
       }),
@@ -1500,10 +1522,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         delete streamStartTimesRef.current[actionId];
         setMessages((prev) =>
           finalizeStreamingMessage(prev, actionId, data.intent, data.answer, {
-            modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(data.answer),
             durationMs,
-            ...getServiceTierMessageMeta(data),
+            ...getActionMessageMeta(actionId, data),
           }),
         );
       }),
@@ -1531,10 +1552,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         delete streamStartTimesRef.current[actionId];
         setMessages((prev) =>
           finalizeStreamingMessage(prev, actionId, "recap", data.summary, {
-            modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(data.summary),
             durationMs,
-            ...getServiceTierMessageMeta(data),
+            ...getActionMessageMeta(actionId, data),
           }),
         );
       }),
@@ -1583,13 +1603,19 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
             "follow_up_questions",
             data.questions,
             {
-              modelUsed: shortenModelName(currentModelRef.current),
               tokensUsed: estimateTokens(text),
               durationMs,
-              ...getServiceTierMessageMeta(data),
+              ...getActionMessageMeta(actionId, data),
             },
           ),
         );
+      }),
+    );
+
+    cleanups.push(
+      window.electronAPI.onIntelligenceManualStarted(() => {
+        actionModelIdsRef.current.manual = currentModelRef.current;
+        streamStartTimesRef.current.manual = Date.now();
       }),
     );
 
@@ -1602,9 +1628,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         delete streamStartTimesRef.current[actionId];
         setMessages((prev) =>
           settleActionMessage(prev, actionId, "manual", data.answer, {
-            modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(data.answer),
             durationMs,
+            ...getActionMessageMeta(actionId, data),
           }),
         );
       }),
@@ -1708,10 +1734,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       delete streamStartTimesRef.current[actionId];
       setMessages((prev) =>
         finalizeStreamingMessage(prev, actionId, "clarify", data.clarification, {
-          modelUsed: shortenModelName(currentModelRef.current),
           tokensUsed: estimateTokens(data.clarification),
           durationMs,
-          ...getServiceTierMessageMeta(data),
+          ...getActionMessageMeta(actionId, data),
         }),
       );
     });
@@ -1776,8 +1801,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       if (answer) {
         setMessages((prev) =>
           finalizePendingActionMessage(prev, actionId, intent, answer, {
-            modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(answer),
+            ...getActionMessageMeta(actionId, result),
           }),
         );
       }
@@ -1801,7 +1826,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       const result = await window.electronAPI.generateFollowUp({ actionId, intent });
       const refined = result?.refined || "";
       if (refined) {
-        setMessages((prev) => finalizePendingActionMessage(prev, actionId, intent, refined));
+        setMessages((prev) =>
+          finalizePendingActionMessage(prev, actionId, intent, refined, {
+            tokensUsed: estimateTokens(refined),
+            ...getActionMessageMeta(actionId, result),
+          }),
+        );
       }
     } catch (err) {
       setMessages((prev) => settleActionMessage(prev, actionId, intent, formatLiveActionError(err), undefined, "failed"));
@@ -1824,8 +1854,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       if (summary) {
         setMessages((prev) =>
           finalizePendingActionMessage(prev, actionId, intent, summary, {
-            modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(summary),
+            ...getActionMessageMeta(actionId, result),
           }),
         );
       }
@@ -1857,8 +1887,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       if (questions) {
         setMessages((prev) =>
           finalizePendingActionMessage(prev, actionId, intent, questions, {
-            modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(questions),
+            ...getActionMessageMeta(actionId, result),
           }),
         );
       }
@@ -1885,8 +1915,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       if (clarification) {
         setMessages((prev) =>
           finalizePendingActionMessage(prev, actionId, intent, clarification, {
-            modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(clarification),
+            ...getActionMessageMeta(actionId, result),
           }),
         );
       }
@@ -1935,8 +1965,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       if (hint) {
         setMessages((prev) =>
           finalizePendingActionMessage(prev, actionId, intent, hint, {
-            modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(hint),
+            ...getActionMessageMeta(actionId, result),
           }),
         );
       }
@@ -1985,8 +2015,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       if (script) {
         setMessages((prev) =>
           finalizePendingActionMessage(prev, actionId, intent, script, {
-            modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(script),
+            ...getActionMessageMeta(actionId, result),
           }),
         );
       }
@@ -2295,6 +2325,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     activeActionIdsRef.current = {};
     requestStartTimeRef.current = null;
     streamStartTimesRef.current = {};
+    actionModelIdsRef.current = {};
     geminiStreamBufferRef.current = "";
 
     try {
