@@ -30,6 +30,16 @@ if (fs.existsSync(electronDir)) {
   entryPoints.push(...findTs(electronDir).map(f => path.relative(rootDir, f)));
 }
 
+// Shared runtime modules imported by both the renderer and Electron main process.
+// esbuild runs without bundling, so these files must be emitted explicitly.
+const sharedRuntimeFiles = [
+  'src/config/codexModels.ts',
+];
+for (const sharedFile of sharedRuntimeFiles) {
+  const absolutePath = path.resolve(rootDir, sharedFile);
+  if (fs.existsSync(absolutePath)) entryPoints.push(sharedFile);
+}
+
 // Also include premium electron files if they exist
 const premiumDir = path.resolve(rootDir, 'premium/electron');
 if (fs.existsSync(premiumDir)) {

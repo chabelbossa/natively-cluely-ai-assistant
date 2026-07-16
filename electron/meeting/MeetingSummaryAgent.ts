@@ -620,11 +620,44 @@ ${sectionShape}
 
   private extractJson(text: string): string | null {
     const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-    if (fenced?.[1]) return fenced[1].trim();
-    const first = text.indexOf('{');
-    const last = text.lastIndexOf('}');
-    if (first < 0 || last <= first) return null;
-    return text.slice(first, last + 1).trim();
+    const candidates = fenced?.[1] ? [fenced[1], text] : [text];
+
+    for (const candidate of candidates) {
+      const first = candidate.indexOf('{');
+      if (first < 0) continue;
+
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+
+      for (let index = first; index < candidate.length; index += 1) {
+        const character = candidate[index];
+
+        if (inString) {
+          if (escaped) {
+            escaped = false;
+          } else if (character === '\\') {
+            escaped = true;
+          } else if (character === '"') {
+            inString = false;
+          }
+          continue;
+        }
+
+        if (character === '"') {
+          inString = true;
+        } else if (character === '{') {
+          depth += 1;
+        } else if (character === '}') {
+          depth -= 1;
+          if (depth === 0) {
+            return candidate.slice(first, index + 1).trim();
+          }
+        }
+      }
+    }
+
+    return null;
   }
 
   private cleanText(text: string): string {

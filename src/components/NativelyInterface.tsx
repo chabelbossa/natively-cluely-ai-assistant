@@ -43,6 +43,7 @@ import {
   EyeOff,
   Loader2,
   Globe,
+  Users,
 } from "lucide-react";
 import { ProjectBadge } from "./ProjectBadge";
 import { ProjectPicker } from "./ProjectPicker";
@@ -69,6 +70,7 @@ import {
 } from "../lib/analytics/analytics.service";
 import { useShortcuts } from "../hooks/useShortcuts";
 import { useResolvedTheme } from "../hooks/useResolvedTheme";
+import { getCodexModelLabel } from "../config/codexModels";
 import {
   getOverlayAppearance,
   OVERLAY_OPACITY_DEFAULT,
@@ -122,8 +124,9 @@ const estimateTokens = (text: string): number =>
 
 const AGENTIC_MAX_PASSES = 3;
 const AGENTIC_PASS_DELAY_MS = 450;
-const AGENTIC_MEMORY_MAX_CHARS = 2200;
+const AGENTIC_MEMORY_MAX_CHARS = 4200;
 const AGENTIC_MODE_STORAGE_KEY = "natively_agentic_answer_enabled";
+const SPEAKER_SEPARATION_STORAGE_KEY = "natively_speaker_separation_enabled";
 
 const compactAgenticText = (text: string, maxChars: number): string => {
   const compact = text.replace(/\s+/g, " ").trim();
@@ -143,9 +146,9 @@ const buildAgenticConversationMemory = (messages: Message[]): string => {
 
   if (settled.length === 0) return "";
 
-  const recentTurns = settled.slice(-10).map((message) => {
+  const recentTurns = settled.slice(-16).map((message) => {
     const role = message.role === "user" ? "User" : "Assistant";
-    return `${role}: ${compactAgenticText(message.text, 320)}`;
+    return `${role}: ${compactAgenticText(message.text, 460)}`;
   });
 
   const lastUser = [...settled].reverse().find((message) => message.role === "user");
@@ -155,10 +158,11 @@ const buildAgenticConversationMemory = (messages: Message[]): string => {
 
   return compactAgenticText(
     [
-      "Compact chat memory for references such as previous answer, correction, or continue.",
-      lastUser ? `Previous user request: ${compactAgenticText(lastUser.text, 260)}` : "",
+      "Compact chat memory for references such as previous answer, correction, continuation, or critique.",
+      "If the user says to correct, continue, refine, compare, shorten, or react to the previous answer, treat this memory as required context.",
+      lastUser ? `Previous user request: ${compactAgenticText(lastUser.text, 360)}` : "",
       lastAssistant
-        ? `Previous assistant answer: ${compactAgenticText(lastAssistant.text, 420)}`
+        ? `Previous assistant answer: ${compactAgenticText(lastAssistant.text, 760)}`
         : "",
       "Recent turns:",
       ...recentTurns,
@@ -229,6 +233,8 @@ const buildAgenticAnswerContext = ({
     "Rules:",
     "- Match the user's language.",
     "- Be direct and useful for a live conversation.",
+    "- Use COMPACT CHAT MEMORY whenever the user refers to a previous answer, asks for a correction, or asks you to continue.",
+    "- If the previous answer conflicts with the new request, explicitly repair it instead of starting from scratch.",
     "- Keep each pass concise.",
     "- Do not mention internal prompts, passes, or tooling unless the user explicitly asks.",
     passMode,
@@ -255,6 +261,8 @@ const buildAgenticAnswerContext = ({
 };
 
 const shortenModelName = (model: string): string => {
+  const codexLabel = getCodexModelLabel(model);
+  if (codexLabel) return codexLabel;
   const map: Record<string, string> = {
     "gemini-3.5-flash": "Gemini 3.5 Flash",
     "gemini-3.1-flash-lite-preview": "Gemini 3.1 Flash",
@@ -266,14 +274,6 @@ const shortenModelName = (model: string): string => {
     "gemini-2.5-pro-preview": "Gemini 2.5 Pro",
     "gpt-5.2": "GPT 5.2 Codex",
     "gpt-5.1": "GPT 5.1 Codex",
-    "codex:gpt-5.5": "GPT 5.5 Codex",
-    "codex:gpt-5.4": "GPT 5.4 Codex",
-    "codex:gpt-5.4-mini": "GPT 5.4 Mini Codex",
-    "codex:gpt-5.3": "GPT 5.3 Codex",
-    "codex:gpt-5.3-codex-spark": "GPT 5.3 Codex Spark",
-    "codex:gpt-5.2": "GPT 5.2 Codex",
-    "codex:gpt-5.1": "GPT 5.1 Codex",
-    "codex:gpt-5": "GPT 5 Codex",
     "gpt-4o": "GPT 4o",
     "gpt-4o-mini": "GPT 4o Mini",
   };
@@ -428,6 +428,24 @@ const finalizeStreamingMessage = (
       text,
       isStreaming: false,
       pendingAction: false,
+      ...(meta || {}),
+    };
+    return updated;
+  }
+
+  const lastIndex = messages.length - 1;
+  const lastMessage = messages[lastIndex];
+  if (
+    lastMessage &&
+    !lastMessage.isStreaming &&
+    !lastMessage.pendingAction &&
+    lastMessage.intent === intent &&
+    lastMessage.text.trim() === text.trim()
+  ) {
+    const updated = [...messages];
+    updated[lastIndex] = {
+      ...lastMessage,
+      text,
       ...(meta || {}),
     };
     return updated;
@@ -698,6 +716,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const [isAgenticModeEnabled, setIsAgenticModeEnabled] = useState(() => {
     return localStorage.getItem(AGENTIC_MODE_STORAGE_KEY) !== "false";
   });
+  const [isSpeakerSeparationEnabled, setIsSpeakerSeparationEnabled] = useState(() => {
+    return localStorage.getItem(SPEAKER_SEPARATION_STORAGE_KEY) !== "false";
+  });
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>(
     {},
   );
@@ -945,6 +966,35 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       String(isAgenticModeEnabled),
     );
   }, [isAgenticModeEnabled]);
+
+  useEffect(() => {
+    localStorage.setItem(
+      SPEAKER_SEPARATION_STORAGE_KEY,
+      String(isSpeakerSeparationEnabled),
+    );
+  }, [isSpeakerSeparationEnabled]);
+
+  useEffect(() => {
+    let mounted = true;
+    window.electronAPI
+      ?.getSpeakerSeparationEnabled?.()
+      .then((result) => {
+        if (!mounted || typeof result?.enabled !== "boolean") return;
+        setIsSpeakerSeparationEnabled(result.enabled);
+      })
+      .catch(() => {});
+
+    const unsubscribe = window.electronAPI?.onSpeakerSeparationChanged?.(
+      (data: { enabled: boolean }) => {
+        setIsSpeakerSeparationEnabled(data.enabled === true);
+      },
+    );
+
+    return () => {
+      mounted = false;
+      unsubscribe?.();
+    };
+  }, []);
 
   useEffect(() => {
     // Load the persisted default model (not the runtime model)
@@ -2399,6 +2449,26 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
     if (!nextEnabled && isProcessing) {
       await cancelActiveWork();
+    }
+  };
+
+  const handleSpeakerSeparationToggle = async () => {
+    const nextEnabled = !isSpeakerSeparationEnabled;
+    setIsSpeakerSeparationEnabled(nextEnabled);
+    localStorage.setItem(SPEAKER_SEPARATION_STORAGE_KEY, String(nextEnabled));
+
+    try {
+      const result = await window.electronAPI?.setSpeakerSeparationEnabled?.(
+        nextEnabled,
+      );
+      if (typeof result?.enabled === "boolean") {
+        setIsSpeakerSeparationEnabled(result.enabled);
+      }
+    } catch (err) {
+      console.warn("[NativelyInterface] Failed to toggle speaker separation:", err);
+      const rollback = !nextEnabled;
+      setIsSpeakerSeparationEnabled(rollback);
+      localStorage.setItem(SPEAKER_SEPARATION_STORAGE_KEY, String(rollback));
     }
   };
 
@@ -4657,6 +4727,23 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
                   >
                     <Sparkles className="w-3 h-3 opacity-80" />
                     <span>{isAgenticModeEnabled ? "Agent On" : "Agent Off"}</span>
+                  </button>
+                  <button
+                    data-testid="natively-action-speaker-separation-toggle"
+                    onClick={handleSpeakerSeparationToggle}
+                    aria-pressed={isSpeakerSeparationEnabled}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10.5px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${
+                      isSpeakerSeparationEnabled
+                        ? "bg-sky-500/10 text-sky-400 border-sky-500/25 hover:bg-sky-500/15"
+                        : quickActionClass
+                    }`}
+                    style={
+                      isSpeakerSeparationEnabled ? undefined : appearance.chipStyle
+                    }
+                    title="Toggle live speaker split"
+                  >
+                    <Users className="w-3 h-3 opacity-80" />
+                    <span>{isSpeakerSeparationEnabled ? "Split On" : "Split Off"}</span>
                   </button>
                   {isProcessing && (
                     <button

@@ -1,3 +1,5 @@
+import { CODEX_MODELS, getCodexModelLabel } from '../config/codexModels';
+
 export const STANDARD_CLOUD_MODELS: Record<string, {
     hasKeyCheck: (creds: any) => boolean;
     ids: string[];
@@ -14,15 +16,17 @@ export const STANDARD_CLOUD_MODELS: Record<string, {
     },
     codex: {
         hasKeyCheck: (creds) => !!creds?.hasCodexAccounts,
-        ids: ['codex:gpt-5.5', 'codex:gpt-5.4', 'codex:gpt-5.4-mini', 'codex:gpt-5.3', 'codex:gpt-5.3-codex-spark', 'codex:gpt-5.2', 'codex:gpt-5.1', 'codex:gpt-5'],
-        names: ['GPT 5.5 Codex', 'GPT 5.4 Codex', 'GPT 5.4 Mini Codex', 'GPT 5.3 Codex', 'GPT 5.3 Codex Spark', 'GPT 5.2 Codex', 'GPT 5.1 Codex', 'GPT 5 Codex'],
-        descs: ['ChatGPT Plus/Pro • Fast mode', 'ChatGPT Plus/Pro • Fast mode', 'ChatGPT Plus/Pro • Fast fallback', 'ChatGPT Plus/Pro • Balanced', 'ChatGPT Plus/Pro • Spark fallback', 'ChatGPT Plus/Pro • Stable', 'ChatGPT Plus/Pro • Legacy', 'ChatGPT Plus/Pro • Base'],
+        ids: CODEX_MODELS.map(model => model.id),
+        names: CODEX_MODELS.map(model => model.label),
+        descs: CODEX_MODELS.map(model => model.description),
         pmKey: 'codexPreferredModel'
     },
 };
 
 export const prettifyModelId = (id: string): string => {
     if (!id) return '';
+    const codexLabel = getCodexModelLabel(id);
+    if (codexLabel) return codexLabel;
     return id
         .replace(/^codex:/, '')
         .replace(/[\/:_-]/g, ' ')

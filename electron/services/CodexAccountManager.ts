@@ -10,12 +10,17 @@ import { DEFAULT_CODEX_SETTINGS } from "../types/codex-multi-auth";
 import { CredentialsManager } from "./CredentialsManager";
 import { refreshAccessToken } from "./CodexOAuthFlow";
 
+const TOKEN_REFRESH_INTERVAL_MS = 60 * 1000;
+
 export class CodexAccountManager {
   private static instance: CodexAccountManager;
   private cm: CredentialsManager;
+  private refreshTimer: NodeJS.Timeout | null = null;
+  private refreshInFlight: Promise<void> | null = null;
 
   private constructor() {
     this.cm = CredentialsManager.getInstance();
+    this.startAutoRefresh();
   }
 
   public static getInstance(): CodexAccountManager {
@@ -87,6 +92,7 @@ export class CodexAccountManager {
     }
 
     this.cm.setCodexAccounts(accounts);
+    if (enabled) this.queueAutoRefresh("account-enabled");
     return true;
   }
 
@@ -164,6 +170,30 @@ export class CodexAccountManager {
     for (const account of accounts) {
       await this.refreshTokenIfNeeded(account.alias);
     }
+  }
+
+  private startAutoRefresh(): void {
+    if (this.refreshTimer) return;
+
+    this.queueAutoRefresh("startup");
+    this.refreshTimer = setInterval(() => {
+      this.queueAutoRefresh("scheduled");
+    }, TOKEN_REFRESH_INTERVAL_MS);
+
+    if (this.refreshTimer.unref) this.refreshTimer.unref();
+  }
+
+  private queueAutoRefresh(reason: string): void {
+    if (this.refreshInFlight) return;
+    if (this.getEnabledAccounts().length === 0) return;
+
+    this.refreshInFlight = this.refreshAllTokens()
+      .catch((error) => {
+        console.error(`[CodexAccountManager] Auto token refresh failed (${reason}):`, error);
+      })
+      .finally(() => {
+        this.refreshInFlight = null;
+      });
   }
 
   // =========================================================================

@@ -575,7 +575,52 @@ Goal:
     }
 
     private postProcessLiveActionOutput(output: string, sanitizeSingleQuestion?: boolean): string {
-        return sanitizeSingleQuestion ? this.sanitizeSingleQuestionOutput(output) : output.trim();
+        const deduplicated = this.collapseRepeatedLiveActionOutput(output);
+        return sanitizeSingleQuestion ? this.sanitizeSingleQuestionOutput(deduplicated) : deduplicated.trim();
+    }
+
+    private collapseRepeatedLiveActionOutput(output: string): string {
+        const trimmed = String(output || '').trim();
+        if (trimmed.length < 80) return trimmed;
+
+        const repeatedHalf = this.extractRepeatedHalf(trimmed);
+        if (repeatedHalf) return repeatedHalf;
+
+        const repeatedSentences = this.extractRepeatedUnitSequence(trimmed, /(?<=[.!?])\s+/);
+        if (repeatedSentences) return repeatedSentences;
+
+        const repeatedParagraphs = this.extractRepeatedUnitSequence(trimmed, /\n{2,}/);
+        if (repeatedParagraphs) return repeatedParagraphs;
+
+        return trimmed;
+    }
+
+    private extractRepeatedHalf(output: string): string {
+        const midpoint = Math.floor(output.length / 2);
+        const offsets = [0, -1, 1, -2, 2, -3, 3, -4, 4, -8, 8];
+        for (const offset of offsets) {
+            const cut = midpoint + offset;
+            if (cut < 40 || output.length - cut < 40) continue;
+            const left = output.slice(0, cut).trim();
+            const right = output.slice(cut).trim();
+            if (this.sameSubstantialText(left, right)) return left;
+        }
+        return '';
+    }
+
+    private extractRepeatedUnitSequence(output: string, separator: RegExp): string {
+        const units = output.split(separator).map((unit) => unit.trim()).filter(Boolean);
+        if (units.length < 2 || units.length % 2 !== 0) return '';
+        const midpoint = units.length / 2;
+        const left = units.slice(0, midpoint).join(' ').trim();
+        const right = units.slice(midpoint).join(' ').trim();
+        return this.sameSubstantialText(left, right) ? left : '';
+    }
+
+    private sameSubstantialText(left: string, right: string): boolean {
+        const normalizedLeft = this.normalizeForComparison(left);
+        const normalizedRight = this.normalizeForComparison(right);
+        return normalizedLeft.length >= 80 && normalizedLeft === normalizedRight;
     }
 
     private looksLikeGenericMeetingOutput(output: string): boolean {

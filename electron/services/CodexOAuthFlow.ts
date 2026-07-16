@@ -11,19 +11,24 @@
  */
 
 import http from "node:http";
+import https from "node:https";
+import dns from "node:dns";
 import crypto from "node:crypto";
 import { shell } from "electron";
 import type {
   PKCEPair,
   AuthorizationFlow,
   TokenResult,
+  TokenResultFailed,
   OAuthServerInfo,
 } from "../types/codex-multi-auth";
 
 // OAuth constants (from openai/codex CLI)
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
-const TOKEN_URL = "https://auth.openai.com/oauth/token";
+const TOKEN_HOST = "auth.openai.com";
+const TOKEN_PATH = "/oauth/token";
+const TOKEN_URL = `https://${TOKEN_HOST}${TOKEN_PATH}`;
 
 const OAUTH_CALLBACK_PORT = 1455;
 const OAUTH_CALLBACK_PATH = "/auth/callback";
@@ -38,6 +43,13 @@ const REQUIRED_OAUTH_SCOPES = [
   "api.connectors.invoke",
 ];
 const SCOPE = REQUIRED_OAUTH_SCOPES.join(" ");
+const TOKEN_REQUEST_TIMEOUT_MS = 30_000;
+const TOKEN_REQUEST_MAX_ATTEMPTS = 4;
+const TOKEN_DNS_TIMEOUT_MS = 5_000;
+
+type TokenJsonResult =
+  | { type: "success"; json: Record<string, unknown> }
+  | TokenResultFailed;
 
 // ============================================================================
 // PKCE Generation
@@ -122,34 +134,268 @@ export async function createAuthorizationFlow(
 // Token Exchange
 // ============================================================================
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableTokenStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function retryAfterMs(headers: Headers): number | null {
+  const retryAfter = headers.get("retry-after");
+  if (!retryAfter) return null;
+
+  const seconds = Number(retryAfter.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return seconds * 1000;
+  }
+
+  const retryAt = Date.parse(retryAfter);
+  if (Number.isFinite(retryAt)) {
+    return Math.max(0, retryAt - Date.now());
+  }
+
+  return null;
+}
+
+function formatTokenNetworkError(error: unknown): string {
+  const err = error as Error & { code?: string; cause?: { code?: string; message?: string } };
+  const code = err?.cause?.code || err?.code || err?.name;
+  const detail = err?.cause?.message || err?.message || String(error);
+  const suffix = code ? ` (${code})` : "";
+  return `Network error while contacting OpenAI OAuth at auth.openai.com: ${detail}${suffix}. Check DNS, VPN, firewall, or internet connectivity, then try again.`;
+}
+
+function formatTokenErrorDetail(error: unknown): string {
+  const err = error as Error & { code?: string; cause?: { code?: string; message?: string } };
+  const code = err?.cause?.code || err?.code || err?.name;
+  const detail = err?.cause?.message || err?.message || String(error);
+  return code ? `${detail} (${code})` : detail;
+}
+
+function normalizeTokenNetworkMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  if (message.startsWith("Network error while contacting OpenAI OAuth")) return message;
+  return formatTokenNetworkError(error);
+}
+
+async function resolveTokenHostIpv4(): Promise<string[]> {
+  let timeout: NodeJS.Timeout | null = null;
+  try {
+    const addresses = await Promise.race([
+      dns.promises.resolve4(TOKEN_HOST),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`DNS resolve4 timed out after ${TOKEN_DNS_TIMEOUT_MS}ms`)),
+          TOKEN_DNS_TIMEOUT_MS
+        );
+      }),
+    ]);
+
+    if (addresses.length === 0) {
+      throw new Error(`DNS resolve4 returned no IPv4 addresses for ${TOKEN_HOST}`);
+    }
+
+    return addresses;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function toFetchHeaders(headers: http.IncomingHttpHeaders): Headers {
+  const result = new Headers();
+  for (const [key, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value) result.append(key, item);
+    } else if (typeof value === "string") {
+      result.set(key, value);
+    }
+  }
+  return result;
+}
+
+async function requestTokenViaResolvedIpv4(body: URLSearchParams): Promise<Response> {
+  const payload = body.toString();
+  const addresses = await resolveTokenHostIpv4();
+  let lastError: unknown = null;
+
+  for (const address of addresses) {
+    try {
+      return await new Promise<Response>((resolve, reject) => {
+        const req = https.request(
+          {
+            host: address,
+            servername: TOKEN_HOST,
+            path: TOKEN_PATH,
+            method: "POST",
+            headers: {
+              Host: TOKEN_HOST,
+              "Content-Type": "application/x-www-form-urlencoded",
+              "Content-Length": Buffer.byteLength(payload),
+            },
+            timeout: TOKEN_REQUEST_TIMEOUT_MS,
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on("data", (chunk: Buffer | string) => {
+              chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+            });
+            res.on("end", () => {
+              resolve(
+                new Response(Buffer.concat(chunks).toString("utf8"), {
+                  status: res.statusCode ?? 502,
+                  headers: toFetchHeaders(res.headers),
+                })
+              );
+            });
+          }
+        );
+
+        req.on("timeout", () => {
+          req.destroy(new Error(`OpenAI OAuth HTTPS request timed out after ${TOKEN_REQUEST_TIMEOUT_MS}ms`));
+        });
+        req.on("error", reject);
+        req.end(payload);
+      });
+    } catch (error) {
+      lastError = error;
+      console.warn(
+        `[CodexOAuthFlow] OAuth token request failed via ${address}: ${formatTokenErrorDetail(error)}`
+      );
+    }
+  }
+
+  throw lastError ?? new Error(`Unable to contact ${TOKEN_HOST} via resolved IPv4 address`);
+}
+
+async function requestTokenViaFetch(body: URLSearchParams): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TOKEN_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function requestTokenHttpResponse(body: URLSearchParams): Promise<Response> {
+  try {
+    return await requestTokenViaResolvedIpv4(body);
+  } catch (resolvedError) {
+    console.warn(
+      `[CodexOAuthFlow] OAuth token request via resolve4 failed; falling back to fetch: ${formatTokenErrorDetail(resolvedError)}`
+    );
+    try {
+      return await requestTokenViaFetch(body);
+    } catch (fetchError) {
+      throw new Error(
+        `${formatTokenNetworkError(fetchError)} resolve4 fallback also failed: ${formatTokenErrorDetail(resolvedError)}`
+      );
+    }
+  }
+}
+
+async function requestTokenJson(
+  body: URLSearchParams,
+  operation: string
+): Promise<TokenJsonResult> {
+  let lastFailure: TokenResultFailed | null = null;
+
+  for (let attempt = 1; attempt <= TOKEN_REQUEST_MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await requestTokenHttpResponse(body);
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        const failed: TokenResultFailed = {
+          type: "failed",
+          reason: "http_error",
+          statusCode: res.status,
+          message: text || `OpenAI OAuth ${operation} failed with HTTP ${res.status}`,
+        };
+        lastFailure = failed;
+
+        if (attempt < TOKEN_REQUEST_MAX_ATTEMPTS && isRetryableTokenStatus(res.status)) {
+          const delay = retryAfterMs(res.headers) ?? Math.min(20_000, 1000 * 2 ** (attempt - 1));
+          console.warn(
+            `[CodexOAuthFlow] OAuth ${operation} returned ${res.status}; retrying in ${Math.round(delay / 1000)}s`
+          );
+          await sleep(delay);
+          continue;
+        }
+
+        return failed;
+      }
+
+      const json = (await res.json().catch((): null => null)) as Record<string, unknown> | null;
+      if (!json || typeof json !== "object") {
+        return {
+          type: "failed",
+          reason: "invalid_response",
+          message: "OpenAI OAuth token response was not valid JSON",
+        };
+      }
+
+      return { type: "success", json };
+    } catch (error) {
+      const failed: TokenResultFailed = {
+        type: "failed",
+        reason: "network_error",
+        message: normalizeTokenNetworkMessage(error),
+      };
+      lastFailure = failed;
+
+      if (attempt < TOKEN_REQUEST_MAX_ATTEMPTS) {
+        const delay = Math.min(20_000, 1000 * 2 ** (attempt - 1));
+        console.warn(
+          `[CodexOAuthFlow] OAuth ${operation} network failure; retrying in ${Math.round(delay / 1000)}s`
+        );
+        await sleep(delay);
+        continue;
+      }
+
+      return failed;
+    }
+  }
+
+  return (
+    lastFailure ?? {
+      type: "failed",
+      reason: "network_error",
+      message: `OpenAI OAuth ${operation} failed after retries`,
+    }
+  );
+}
+
 export async function exchangeAuthorizationCode(
   code: string,
   verifier: string
 ): Promise<TokenResult> {
-  const res = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
+  const tokenResult = await requestTokenJson(
+    new URLSearchParams({
       grant_type: "authorization_code",
       client_id: CLIENT_ID,
       code,
       code_verifier: verifier,
       redirect_uri: REDIRECT_URI,
     }),
-  });
+    "code exchange"
+  );
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    console.error(`[CodexOAuthFlow] code->token failed: ${res.status} ${text}`);
-    return {
-      type: "failed",
-      reason: "http_error",
-      statusCode: res.status,
-      message: text || undefined,
-    };
+  if (tokenResult.type === "failed") {
+    console.error(
+      `[CodexOAuthFlow] code->token failed: ${tokenResult.reason} ${tokenResult.message || ""}`
+    );
+    return tokenResult;
   }
 
-  const json = (await res.json()) as Record<string, unknown>;
+  const { json } = tokenResult;
 
   if (
     typeof json.access_token !== "string" ||
@@ -177,63 +423,48 @@ export async function exchangeAuthorizationCode(
 export async function refreshAccessToken(
   refreshToken: string
 ): Promise<TokenResult> {
-  try {
-    const response = await fetch(TOKEN_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-        client_id: CLIENT_ID,
-      }),
-    });
+  const tokenResult = await requestTokenJson(
+    new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: CLIENT_ID,
+    }),
+    "token refresh"
+  );
 
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      console.error(`[CodexOAuthFlow] Token refresh failed: ${response.status} ${text}`);
-      return {
-        type: "failed",
-        reason: "http_error",
-        statusCode: response.status,
-        message: text || undefined,
-      };
-    }
+  if (tokenResult.type === "failed") {
+    console.error(
+      `[CodexOAuthFlow] Token refresh failed: ${tokenResult.reason} ${tokenResult.message || ""}`
+    );
+    return tokenResult;
+  }
 
-    const json = (await response.json()) as Record<string, unknown>;
+  const { json } = tokenResult;
 
-    if (
-      typeof json.access_token !== "string" ||
-      typeof json.expires_in !== "number"
-    ) {
-      return {
-        type: "failed",
-        reason: "invalid_response",
-        message: "Refresh response missing required fields",
-      };
-    }
-
-    const nextRefresh =
-      typeof json.refresh_token === "string"
-        ? json.refresh_token
-        : refreshToken;
-
-    return {
-      type: "success",
-      access: json.access_token,
-      refresh: nextRefresh,
-      expires: Date.now() + json.expires_in * 1000,
-      idToken: typeof json.id_token === "string" ? json.id_token : undefined,
-      scope: typeof json.scope === "string" ? json.scope : undefined,
-    };
-  } catch (error) {
-    const err = error as Error;
-    console.error("[CodexOAuthFlow] Token refresh error", err);
+  if (
+    typeof json.access_token !== "string" ||
+    typeof json.expires_in !== "number"
+  ) {
     return {
       type: "failed",
-      reason: "network_error",
-      message: err?.message,
+      reason: "invalid_response",
+      message: "Refresh response missing required fields",
     };
   }
+
+  const nextRefresh =
+    typeof json.refresh_token === "string"
+      ? json.refresh_token
+      : refreshToken;
+
+  return {
+    type: "success",
+    access: json.access_token,
+    refresh: nextRefresh,
+    expires: Date.now() + json.expires_in * 1000,
+    idToken: typeof json.id_token === "string" ? json.id_token : undefined,
+    scope: typeof json.scope === "string" ? json.scope : undefined,
+  };
 }
 
 // ============================================================================

@@ -166,7 +166,7 @@ export interface CodexResponsesRequest {
   stream?: boolean;
   store?: boolean;
   reasoning?: {
-    effort?: "none" | "low" | "medium" | "high" | "xhigh";
+    effort?: "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
   };
 }
 

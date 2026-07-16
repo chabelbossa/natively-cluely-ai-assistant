@@ -843,7 +843,10 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     }
 
     const bestQuestion = questionCandidates[0];
-    if (bestQuestion) {
+    let recentSource = reliableItems;
+    let demotedQuestion: MeetingContextPacket['questionCandidates'][number] | undefined;
+
+    if (bestQuestion && !this.shouldDemoteStaleQuestionCandidate(bestQuestion, reliableItems)) {
       return {
         kind: 'direct_question',
         text: this.truncate(bestQuestion.text, 420),
@@ -853,7 +856,12 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
       };
     }
 
-    const recent = reliableItems.slice(-16);
+    if (bestQuestion) {
+      demotedQuestion = bestQuestion;
+      recentSource = this.itemsAfterFocusTimestamp(bestQuestion.timestamp, reliableItems);
+    }
+
+    const recent = recentSource.slice(-16);
 
     for (let i = recent.length - 1; i >= 0; i--) {
       const item = recent[i];
@@ -893,8 +901,57 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
       text: topic,
       confidence: topic ? 0.56 : 0,
       timestamp: recent[recent.length - 1]?.timestamp,
-      reason: topic ? 'latest_interlocutor_topic' : 'no_focus_candidate',
+      reason: topic
+        ? demotedQuestion
+          ? `latest_interlocutor_topic_after_stale_question:${demotedQuestion.reason}`
+          : 'latest_interlocutor_topic'
+        : 'no_focus_candidate',
     };
+  }
+
+  private shouldDemoteStaleQuestionCandidate(
+    question: MeetingContextPacket['questionCandidates'][number],
+    reliableItems: ContextItem[],
+  ): boolean {
+    const newerItems = reliableItems
+      .filter((item) => item.timestamp > question.timestamp + 2_500)
+      .filter((item) => !this.isLowSignalFollowUp(item.text));
+    if (newerItems.length === 0) return false;
+
+    const latestTimestamp = reliableItems[reliableItems.length - 1]?.timestamp || question.timestamp;
+    const questionAgeMs = latestTimestamp - question.timestamp;
+    const newerText = newerItems.map((item) => item.text).join(' ');
+    const newerWords = this.normalize(newerText).split(' ').filter(Boolean).length;
+
+    if (questionAgeMs < 18_000) return false;
+    if (this.isQuestionContinuation(question.text, newerText)) return false;
+    return newerWords >= 18;
+  }
+
+  private itemsAfterFocusTimestamp(timestamp: number, reliableItems: ContextItem[]): ContextItem[] {
+    const newerItems = reliableItems.filter((item) => item.timestamp > timestamp + 2_500);
+    return newerItems.length > 0 ? newerItems : reliableItems;
+  }
+
+  private isLowSignalFollowUp(text: string): boolean {
+    const normalized = this.normalize(text);
+    const words = normalized.split(' ').filter(Boolean);
+    if (words.length === 0) return true;
+    if (words.length <= 6 && /^(ok|okay|d accord|daccord|oui|non|parfait|super|bien note|bien noté|mm hmm|hum|daccord okay)\b/i.test(normalized)) {
+      return true;
+    }
+    return false;
+  }
+
+  private isQuestionContinuation(questionText: string, newerText: string): boolean {
+    const normalizedNewerText = this.normalize(newerText);
+    const hasContinuationMarker = /\b(autrement dit|en d autres termes|je reformule|pour preciser|pour etre clair|ce que je veux dire|je prends un exemple|par exemple|la raison est|to rephrase|in other words|to clarify|what i mean|let me explain|for example)\b/i.test(normalizedNewerText);
+    if (hasContinuationMarker) return true;
+
+    const questionKeywords = new Set(this.extractEvidenceKeywords(questionText));
+    const newerKeywords = this.extractEvidenceKeywords(newerText);
+    const sharedKeywords = newerKeywords.filter((keyword) => questionKeywords.has(keyword));
+    return sharedKeywords.length >= 2;
   }
 
   private deriveLocalUserFocus(selectedItems: ContextItem[]): InterlocutorFocus {
@@ -955,7 +1012,7 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     if (focusIndex < 0) return reliableItems.slice(-5);
 
     const start = Math.max(0, focusIndex - 4);
-    const end = Math.min(reliableItems.length, focusIndex + 2);
+    const end = Math.min(reliableItems.length, focusIndex + 7);
     return reliableItems.slice(start, end);
   }
 
@@ -988,7 +1045,6 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     return candidates
       .sort((a, b) => b.timestamp - a.timestamp)
       .slice(0, 3)
-      .sort((a, b) => b.score - a.score || b.timestamp - a.timestamp)
       .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
   }
 
@@ -1271,7 +1327,7 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
 
     score += Math.min(2, words.length / 10);
     score += index / Math.max(1, total) * 0.8;
-    if (/\b(ia|ai|react|next|javascript|youtube|video|vidéos|chaine|chaîne|vues|outil|outils|changement|alerte|vitesse|ecoulement|écoulement|produit|expiration|publicite|publicité|campagne|backend|frontend|client|manager|mvp)\b/i.test(normalized)) {
+    if (/\b(ia|ai|react|next|javascript|youtube|video|vidéos|chaine|chaîne|vues|outil|outils|changement|alerte|vitesse|ecoulement|écoulement|produit|expiration|publicite|publicité|campagne|backend|frontend|client|manager|mvp|associe|associé|investissement|fonds|apport|equity|parts|remuneration|rémunération|remunerations|rémunérations|salaire|mensuel|contrat|conditions|palier)\b/i.test(normalized)) {
       score += 2.4;
     }
     if (/\d/.test(normalized)) score += 0.4;

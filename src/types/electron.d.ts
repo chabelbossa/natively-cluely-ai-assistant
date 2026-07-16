@@ -168,7 +168,7 @@ export interface ElectronAPI {
   setClaudeApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   getNativelyUsage: () => Promise<{ ok: boolean; error?: string; plan?: string; quota?: { transcription: { used: number; limit: number; remaining: number }; ai: { used: number; limit: number; remaining: number }; search: { used: number; limit: number; remaining: number }; resets_at: string }; member_since?: string }>
-  getStoredCredentials: () => Promise<{ hasNativelyKey?: boolean; hasGeminiKey: boolean; hasGroqKey: boolean; hasDeepInfraKey?: boolean; hasOpenCodeGoKey?: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; providerKeys: Record<string, ProviderKeysInfo>; googleServiceAccountPath: string | null; sttProvider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local'; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; groqSttModel?: string; localSttMode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; localSttEndpoint?: string; localSttModel?: string; localSttGlossary?: string; localSttWhisperCppModelPath?: string; localSttWhisperCppExecutablePath?: string; hasSonioxKey?: boolean; hasTavilyKey?: boolean; geminiPreferredModel?: string; groqPreferredModel?: string; deepinfraPreferredModel?: string; openCodeGoPreferredModel?: string; openaiPreferredModel?: string; claudePreferredModel?: string; codexPreferredModel?: string; hasCodexAccounts?: boolean; sttGroqKey?: string; sttOpenaiKey?: string; sttDeepgramKey?: string; sttElevenLabsKey?: string; sttAzureKey?: string; sttIbmKey?: string; sttSonioxKey?: string }>
+  getStoredCredentials: () => Promise<{ hasNativelyKey?: boolean; hasGeminiKey: boolean; hasGroqKey: boolean; hasDeepInfraKey?: boolean; hasOpenCodeGoKey?: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; providerKeys: Record<string, ProviderKeysInfo>; googleServiceAccountPath: string | null; sttProvider: 'none' | 'google' | 'groq' | 'openai' | 'deepgram' | 'elevenlabs' | 'azure' | 'ibmwatson' | 'soniox' | 'natively' | 'local'; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; groqSttModel?: string; localSttMode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; localSttEndpoint?: string; localSttModel?: string; localSttGlossary?: string; localSttWhisperCppModelPath?: string; localSttWhisperCppExecutablePath?: string; hasSonioxKey?: boolean; hasTavilyKey?: boolean; geminiPreferredModel?: string; groqPreferredModel?: string; deepinfraPreferredModel?: string; openCodeGoPreferredModel?: string; openaiPreferredModel?: string; claudePreferredModel?: string; codexPreferredModel?: string; codexReasoningEffort?: string; hasCodexAccounts?: boolean; sttGroqKey?: string; sttOpenaiKey?: string; sttDeepgramKey?: string; sttElevenLabsKey?: string; sttAzureKey?: string; sttIbmKey?: string; sttSonioxKey?: string }>
   // Provider Key Management (round-robin)
   getProviderMaskedKeys: (provider: string) => Promise<{ success: boolean; keys?: MaskedKeyInfo[]; count?: number; error?: string }>
   addProviderKey: (provider: string, key: string) => Promise<{ success: boolean; index?: number; count?: number; error?: string }>
@@ -214,6 +214,7 @@ export interface ElectronAPI {
   onNativeAudioDisconnected: (callback: () => void) => () => void
   onSystemAudioSilent: (callback: (data: { message: string; rms?: number; peak?: number }) => void) => () => void
   onSystemAudioActive: (callback: (data: { message: string; rms?: number; peak?: number }) => void) => () => void
+  onSpeakerSeparationChanged: (callback: (data: { enabled: boolean }) => void) => () => void
   onSuggestionGenerated: (callback: (data: { question: string; suggestion: string; confidence: number }) => void) => () => void
   onSuggestionProcessingStart: (callback: () => void) => () => void
   onSuggestionError: (callback: (error: { error: string }) => void) => () => void
@@ -304,6 +305,8 @@ export interface ElectronAPI {
   clearMeetingBrief: () => Promise<{ success: boolean; error?: string }>
   endMeeting: () => Promise<{ success: boolean; error?: string }>
   finalizeMicSTT: () => Promise<void>
+  getSpeakerSeparationEnabled: () => Promise<{ enabled: boolean }>
+  setSpeakerSeparationEnabled: (enabled: boolean) => Promise<{ success: boolean; enabled?: boolean; error?: string }>
   getRecentMeetings: () => Promise<Array<{ id: string; title: string; date: string; duration: string; summary: string }>>
   getMeetingDetails: (id: string) => Promise<any>
   updateMeetingTitle: (id: string, title: string) => Promise<boolean>
@@ -346,6 +349,8 @@ export interface ElectronAPI {
   getDefaultModel: () => Promise<{ model: string }>;
   setModel: (modelId: string) => Promise<{ success: boolean; error?: string }>;
   setDefaultModel: (modelId: string) => Promise<{ success: boolean; error?: string }>;
+  getCodexReasoningEffort: (modelId?: string) => Promise<{ model: string; reasoningEffort: string }>;
+  setCodexReasoningEffort: (effort: string, modelId?: string) => Promise<{ success: boolean; model: string; reasoningEffort: string }>;
   toggleModelSelector: (coords: { x: number; y: number }) => Promise<void>;
   hideModelSelector: () => Promise<void>;
   forceRestartOllama: () => Promise<void>;

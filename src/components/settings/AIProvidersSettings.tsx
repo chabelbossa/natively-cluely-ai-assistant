@@ -4,6 +4,12 @@ import { STANDARD_CLOUD_MODELS, prettifyModelId } from '../../utils/modelUtils';
 import { validateCurl } from '../../lib/curl-validator';
 import { ProviderCard } from './ProviderCard';
 import { CodexProviderCard } from './CodexProviderCard';
+import {
+    DEFAULT_CODEX_MODEL,
+    DEFAULT_CODEX_REASONING_EFFORT,
+    resolveCodexReasoningEffort,
+    type CodexReasoningEffort,
+} from '../../config/codexModels';
 
 type MaskedKey = { index: number; masked: string };
 
@@ -114,7 +120,8 @@ export const AIProvidersSettings: React.FC = () => {
     const [isRefreshingOllama, setIsRefreshingOllama] = useState(false);
 
     // --- Default Model ---
-    const [defaultModel, setDefaultModel] = useState<string>('codex:gpt-5.5');
+    const [defaultModel, setDefaultModel] = useState<string>(DEFAULT_CODEX_MODEL);
+    const [codexReasoningEffort, setCodexReasoningEffort] = useState<CodexReasoningEffort>(DEFAULT_CODEX_REASONING_EFFORT);
     const [fastResponseMode, setFastResponseMode] = useState(false);
     const [credentialsLoaded, setCredentialsLoaded] = useState(false);
 
@@ -160,6 +167,12 @@ export const AIProvidersSettings: React.FC = () => {
                     if (creds.claudePreferredModel) pm.claude = creds.claudePreferredModel;
                     if (creds.codexPreferredModel) pm.codex = creds.codexPreferredModel;
                     setPreferredModels(pm);
+                    if (creds.codexReasoningEffort) {
+                        setCodexReasoningEffort(resolveCodexReasoningEffort(
+                            creds.codexPreferredModel || DEFAULT_CODEX_MODEL,
+                            creds.codexReasoningEffort,
+                        ));
+                    }
                 }
 
                 // Mark credentials as fully loaded after the supported provider state is ready.
@@ -527,6 +540,7 @@ export const AIProvidersSettings: React.FC = () => {
                     <CodexProviderCard
                         hasAccounts={!!hasStoredKey.codex}
                         preferredModel={preferredModels.codex}
+                        reasoningEffort={codexReasoningEffort}
                         onAddAccount={async () => {
                             const alias = window.prompt('Enter an alias for this ChatGPT account (e.g. personal, work):');
                             if (!alias?.trim()) return;
@@ -548,8 +562,15 @@ export const AIProvidersSettings: React.FC = () => {
                         }}
                         onPreferredModelChange={(model) => {
                             setPreferredModels(prev => ({ ...prev, codex: model }));
-                            // @ts-ignore
                             window.electronAPI?.setProviderPreferredModel?.('codex', model).catch(console.error);
+                            if (defaultModel.startsWith('codex:')) {
+                                setDefaultModel(model);
+                                window.electronAPI?.setDefaultModel(model).catch(console.error);
+                            }
+                        }}
+                        onReasoningEffortChange={(effort, model) => {
+                            setCodexReasoningEffort(effort);
+                            window.electronAPI?.setCodexReasoningEffort?.(effort, model).catch(console.error);
                         }}
                         testStatus={testStatus.codex || 'idle'}
                         testError={testError.codex}

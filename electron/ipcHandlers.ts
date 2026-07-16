@@ -27,6 +27,11 @@ import {
 import { runOAuthFlow, refreshAccessToken } from "./services/CodexOAuthFlow";
 import { CodexAccountManager } from "./services/CodexAccountManager";
 import { CodexAuthRouter } from "./services/CodexAuthRouter";
+import {
+  CODEX_MODELS,
+  DEFAULT_CODEX_MODEL,
+  resolveCodexModelId,
+} from "../src/config/codexModels";
 
 export function initializeIpcHandlers(appState: AppState): void {
   const safeHandle = (
@@ -39,14 +44,18 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   const resolveSupportedDefaultModel = (cm: any, requestedModel?: string): string => {
     const normalized = String(requestedModel || "").trim();
-    const codexPreferredModel = cm.getCodexPreferredModel?.() || "codex:gpt-5.5";
+    const codexPreferredModel = cm.getCodexPreferredModel?.() || DEFAULT_CODEX_MODEL;
+    const hasEnabledCodexAccount = Array.isArray(cm.getCodexAccounts?.())
+      && cm.getCodexAccounts().some((account: any) => account?.enabled !== false);
     const isSupported =
       normalized.startsWith("codex:") ||
       normalized.startsWith("gemini-") ||
       normalized.startsWith("models/");
 
     if (!normalized) return codexPreferredModel;
+    if (normalized.startsWith("codex:")) return resolveCodexModelId(normalized);
     if (!isSupported) return codexPreferredModel;
+    if (hasEnabledCodexAccount && !normalized.startsWith("codex:")) return codexPreferredModel;
     return normalized;
   };
 
@@ -463,6 +472,15 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle("finalize-mic-stt", async () => {
     appState.finalizeMicSTT();
+  });
+
+  safeHandle("get-speaker-separation-enabled", async () => {
+    return { enabled: appState.getSpeakerSeparationEnabled() };
+  });
+
+  safeHandle("set-speaker-separation-enabled", async (_, enabled: boolean) => {
+    appState.setSpeakerSeparationEnabled(enabled === true);
+    return { success: true, enabled: appState.getSpeakerSeparationEnabled() };
   });
 
   // IPC handler for analyzing image from file path
@@ -1880,6 +1898,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         openaiPreferredModel: creds.openaiPreferredModel || undefined,
         claudePreferredModel: creds.claudePreferredModel || undefined,
         codexPreferredModel: creds.codexPreferredModel || undefined,
+        codexReasoningEffort: cm.getCodexReasoningEffort?.(creds.codexPreferredModel) || "medium",
         hasCodexAccounts: (creds.codexAccounts ?? []).filter((a: any) => a.enabled).length > 0,
       };
     } catch (error: any) {
@@ -1931,6 +1950,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         sttSonioxKey: "",
         hasCodexAccounts: false,
         codexPreferredModel: undefined,
+        codexReasoningEffort: "medium",
       };
     }
   });
@@ -1957,16 +1977,13 @@ export function initializeIpcHandlers(appState: AppState): void {
         if (provider === "codex") {
           return {
             success: true,
-            models: [
-              { id: "codex:gpt-5.5", label: "GPT 5.5 Codex" },
-              { id: "codex:gpt-5.4", label: "GPT 5.4 Codex" },
-              { id: "codex:gpt-5.4-mini", label: "GPT 5.4 Mini Codex" },
-              { id: "codex:gpt-5.3", label: "GPT 5.3 Codex" },
-              { id: "codex:gpt-5.3-codex-spark", label: "GPT 5.3 Codex Spark" },
-              { id: "codex:gpt-5.2", label: "GPT 5.2 Codex" },
-              { id: "codex:gpt-5.1", label: "GPT 5.1 Codex" },
-              { id: "codex:gpt-5", label: "GPT 5 Codex" },
-            ],
+            models: CODEX_MODELS.map((model) => ({
+              id: model.id,
+              label: model.label,
+              description: model.description,
+              defaultReasoningEffort: model.defaultReasoningEffort,
+              supportedReasoningEfforts: model.supportedReasoningEfforts,
+            })),
           };
         }
 
@@ -2024,7 +2041,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         const { CredentialsManager } = require("./services/CredentialsManager");
         const cm = CredentialsManager.getInstance();
         if (provider === "codex") {
-          cm.setCodexPreferredModel(modelId);
+          cm.setCodexPreferredModel(resolveCodexModelId(modelId));
         } else {
           cm.setPreferredModel(provider, modelId);
         }
@@ -2036,6 +2053,27 @@ export function initializeIpcHandlers(appState: AppState): void {
       }
     },
   );
+
+  safeHandle("get-codex-reasoning-effort", async (_, modelId?: string) => {
+    const { CredentialsManager } = require("./services/CredentialsManager");
+    const cm = CredentialsManager.getInstance();
+    const resolvedModelId = resolveCodexModelId(modelId || cm.getCodexPreferredModel?.());
+    return {
+      model: resolvedModelId,
+      reasoningEffort: cm.getCodexReasoningEffort(resolvedModelId),
+    };
+  });
+
+  safeHandle("set-codex-reasoning-effort", async (_, effort: string, modelId?: string) => {
+    const { CredentialsManager } = require("./services/CredentialsManager");
+    const cm = CredentialsManager.getInstance();
+    const resolvedModelId = resolveCodexModelId(modelId || cm.getCodexPreferredModel?.());
+    return {
+      success: true,
+      model: resolvedModelId,
+      reasoningEffort: cm.setCodexReasoningEffort(effort, resolvedModelId),
+    };
+  });
 
   // ==========================================
   // STT Provider Management Handlers
@@ -2696,7 +2734,14 @@ export function initializeIpcHandlers(appState: AppState): void {
           if (healthy.length === 0) {
             return { success: false, error: "All Codex accounts are on cooldown. Wait a moment and try again." };
           }
-          return { success: true };
+          const { CredentialsManager } = require("./services/CredentialsManager");
+          const cm = CredentialsManager.getInstance();
+          const modelId = resolveCodexModelId(cm.getCodexPreferredModel?.());
+          const result = await appState.processingHelper.getLLMHelper().testCodexConnection(
+            modelId,
+            cm.getCodexReasoningEffort(modelId),
+          );
+          return { success: true, ...result };
         }
 
         if (!apiKey || !apiKey.trim()) {
@@ -2939,7 +2984,7 @@ export function initializeIpcHandlers(appState: AppState): void {
       return { model: resolveSupportedDefaultModel(cm, cm.getDefaultModel()) };
     } catch (error: any) {
       console.error("Error getting default model:", error);
-      return { model: "codex:gpt-5.5" };
+      return { model: DEFAULT_CODEX_MODEL };
     }
   });
 
@@ -4535,7 +4580,7 @@ export function initializeIpcHandlers(appState: AppState): void {
         return { success: false, error: result.error || "OAuth flow failed" };
       }
       const manager = CodexAccountManager.getInstance();
-      const ok = manager.reauthAccount(alias, {
+      const ok = await manager.reauthAccount(alias, {
         accessToken: result.account.accessToken,
         refreshToken: result.account.refreshToken,
         expiresAt: result.account.expiresAt,

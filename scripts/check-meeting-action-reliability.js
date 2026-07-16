@@ -54,10 +54,10 @@ const llmHelper = fs.readFileSync(llmHelperPath, "utf8");
 
 const checks = [
   {
-    name: "manual text questions use the meeting action pipeline",
+    name: "manual text questions use the agentic live-context stream path",
     source: ui,
     pattern:
-      /const useMeetingContextAnswer = currentAttachments\.length === 0[\s\S]*window\.electronAPI\.submitManualQuestion/,
+      /const runAgenticResponse = async[\s\S]*window\.electronAPI\.getIntelligenceContext[\s\S]*buildAgenticAnswerContext[\s\S]*window\.electronAPI\.streamGeminiChat[\s\S]*const handleManualSubmit = async[\s\S]*runAgenticResponse\([\s\S]*source: currentAttachments\.length > 0 \? "screenshot" : "manual"/,
   },
   {
     name: "manual results settle the existing answer card",
@@ -118,6 +118,18 @@ const checks = [
     source: packet,
     pattern:
       /questionCandidates[\s\S]*buildQuestionCandidatesBlock[\s\S]*\[RECENT QUESTION CANDIDATES\][\s\S]*candidate_\$\{candidate\.rank\}/,
+  },
+  {
+    name: "latest valid interlocutor question remains candidate one",
+    source: packet,
+    pattern:
+      /return candidates[\s\S]*\.sort\(\(a, b\) => b\.timestamp - a\.timestamp\)[\s\S]*\.slice\(0, 3\)[\s\S]*\.map\(\(candidate, index\) => \(\{ \.\.\.candidate, rank: index \+ 1 \}\)\)/,
+  },
+  {
+    name: "question focus keeps the following explanation in supporting context",
+    source: packet,
+    pattern:
+      /pickSupportingInterlocutorItems[\s\S]*focusIndex \+ 7/,
   },
   {
     name: "what-to-say packet prompt allows profile-grade answers instead of one short phrase",
@@ -205,7 +217,7 @@ const checks = [
   },
   {
     name: "codex model catalog exposes GPT 5.3 Codex Spark fallback",
-    source: fs.readFileSync(path.join(repoRoot, "src", "utils", "modelUtils.ts"), "utf8"),
+    source: `${fs.readFileSync(path.join(repoRoot, "src", "utils", "modelUtils.ts"), "utf8")}\n${fs.readFileSync(path.join(repoRoot, "src", "config", "codexModels.ts"), "utf8")}`,
     pattern: /codex:gpt-5\.3-codex-spark[\s\S]*GPT 5\.3 Codex Spark/,
   },
   {
@@ -291,6 +303,18 @@ const checks = [
     source: engine,
     pattern:
       /postProcessLiveActionOutput[\s\S]*sanitizeSingleQuestionOutput[\s\S]*sanitizeSingleQuestion: true[\s\S]*sanitizeSingleQuestion: true/,
+  },
+  {
+    name: "live action outputs collapse duplicated model paragraphs before persistence",
+    source: engine,
+    pattern:
+      /postProcessLiveActionOutput[\s\S]*collapseRepeatedLiveActionOutput[\s\S]*extractRepeatedHalf[\s\S]*sameSubstantialText/,
+  },
+  {
+    name: "late duplicate final events coalesce with the last settled action card",
+    source: ui,
+    pattern:
+      /finalizeStreamingMessage[\s\S]*lastMessage\.intent === intent[\s\S]*lastMessage\.text\.trim\(\) === text\.trim\(\)[\s\S]*updated\[lastIndex\]/,
   },
   {
     name: "clarify falls back from empty or generic unreliable answers",

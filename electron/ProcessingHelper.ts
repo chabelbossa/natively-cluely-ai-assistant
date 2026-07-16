@@ -4,6 +4,7 @@ import { AppState } from "./main"
 import { LLMHelper } from "./LLMHelper"
 import { CredentialsManager } from "./services/CredentialsManager"
 import { app } from "electron"
+import { DEFAULT_CODEX_MODEL, resolveCodexModelId } from "../src/config/codexModels"
 // import dotenv from "dotenv" // Removed static import
 
 if (!app.isPackaged) {
@@ -166,10 +167,11 @@ export class ProcessingHelper {
   }
 
   private resolveStartupDefaultModel(defaultModel: string, credManager: CredentialsManager): string {
-    const codexPreferredModel = credManager.getCodexPreferredModel() || 'codex:gpt-5.5';
+    const codexPreferredModel = credManager.getCodexPreferredModel() || DEFAULT_CODEX_MODEL;
     const normalized = String(defaultModel || '').trim();
     const isSupported = normalized.startsWith('codex:') || normalized.startsWith('gemini-') || normalized.startsWith('models/');
 
+    if (normalized.startsWith('codex:')) return resolveCodexModelId(normalized);
     return isSupported ? normalized : codexPreferredModel;
   }
 

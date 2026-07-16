@@ -10,6 +10,7 @@ import type { CodexAccount } from "../types/codex-multi-auth";
 
 const RESPONSES_API_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_BETA_HEADER = "responses=2026-02-06";
+const MINIMUM_GPT_56_CODEX_VERSION = "0.144.0";
 const DEFAULT_SERVICE_TIER = "fast";
 const MAX_ROTATION_ATTEMPTS = 5;
 
@@ -18,7 +19,7 @@ export interface CodexResponsesParams {
   input: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   stream?: boolean;
   store?: boolean;
-  reasoning?: { effort?: "none" | "low" | "medium" | "high" | "xhigh" };
+  reasoning?: { effort?: "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" };
 }
 
 class CodexApiError extends Error {
@@ -89,15 +90,49 @@ export class CodexResponsesClient {
       body.service_tier = serviceTier;
     }
 
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${account.accessToken}`,
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      "OpenAI-Beta": OPENAI_BETA_HEADER,
+      Originator: "codex_cli_rs",
+      Version: MINIMUM_GPT_56_CODEX_VERSION,
+      "User-Agent": `codex_cli_rs/${MINIMUM_GPT_56_CODEX_VERSION} (Natively)`,
+    };
+    const accountId = this.extractChatGptAccountId(account);
+    if (accountId) {
+      headers["ChatGPT-Account-ID"] = accountId;
+    }
+
     return fetch(RESPONSES_API_URL, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${account.accessToken}`,
-        "Content-Type": "application/json",
-        "OpenAI-Beta": OPENAI_BETA_HEADER,
-      },
+      headers,
       body: JSON.stringify(body),
     });
+  }
+
+  private extractChatGptAccountId(account: CodexAccount): string | undefined {
+    for (const token of [account.idToken, account.accessToken]) {
+      if (!token) continue;
+      try {
+        const payload = JSON.parse(Buffer.from(token.split(".")[1] || "", "base64url").toString("utf8")) as Record<string, unknown>;
+        const accountId = payload.chatgpt_account_id
+          || payload["https://api.openai.com/auth.chatgpt_account_id"];
+        if (typeof accountId === "string" && accountId.trim()) {
+          return accountId.trim();
+        }
+        const organizations = payload.organizations;
+        if (Array.isArray(organizations)) {
+          const organizationId = (organizations[0] as Record<string, unknown> | undefined)?.id;
+          if (typeof organizationId === "string" && organizationId.trim()) {
+            return organizationId.trim();
+          }
+        }
+      } catch {
+        // The token can be opaque. The account-id header is optional in that case.
+      }
+    }
+    return undefined;
   }
 
   private async callResponsesApiWithFastDefault(
@@ -110,13 +145,6 @@ export class CodexResponsesClient {
     }
 
     const message = await fastResponse.text().catch(() => "");
-    if (this.isFastModeRejected(fastResponse.status, message)) {
-      console.warn(
-        `[CodexResponsesClient] Fast mode rejected for ${params.model}; retrying without service_tier`
-      );
-      return this.callResponsesApi(account, params, undefined);
-    }
-
     throw new CodexApiError(fastResponse.status, message);
   }
 
@@ -238,16 +266,6 @@ export class CodexResponsesClient {
     return model.startsWith("codex:") ? model.slice("codex:".length) : model;
   }
 
-  private isFastModeRejected(status: number, message: string): boolean {
-    if (status !== 400 && status !== 422) return false;
-    const lowered = message.toLowerCase();
-    const mentionsServiceTier = lowered.includes("service_tier") || lowered.includes("service tier");
-    const mentionsFastMode =
-      lowered.includes("fast mode") ||
-      (lowered.includes("fast") && (lowered.includes("tier") || lowered.includes("mode")));
-    return mentionsServiceTier || mentionsFastMode;
-  }
-
   private parseSseText(text: string): string {
     const chunks: string[] = [];
     let completedText = "";
@@ -277,6 +295,18 @@ export class CodexResponsesClient {
   }
 
   private extractEventText(event: Record<string, unknown>): string {
+    const eventType = typeof event.type === "string" ? event.type : "";
+    if (eventType) {
+      if (eventType === "response.output_text.delta") {
+        return typeof event.delta === "string" ? event.delta : "";
+      }
+
+      // Completion events can contain the whole final answer. Emitting that text
+      // after the deltas would duplicate the response in the live UI.
+      return "";
+    }
+
+    // Compatibility with older/untyped Codex SSE payloads.
     if (typeof event.delta === "string") return event.delta;
     if (typeof event.output_text === "string") return event.output_text;
     if (typeof event.text === "string") return event.text;

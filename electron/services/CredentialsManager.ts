@@ -7,6 +7,12 @@ import { app, safeStorage } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import type { CodexAccount, CodexMultiAuthSettings } from '../types/codex-multi-auth';
+import {
+    DEFAULT_CODEX_MODEL,
+    resolveCodexModelId,
+    resolveCodexReasoningEffort,
+    type CodexReasoningEffort,
+} from '../../src/config/codexModels';
 
 const CREDENTIALS_PATH = path.join(app.getPath('userData'), 'credentials.enc');
 
@@ -85,6 +91,7 @@ export interface StoredCredentials {
     codexAccounts?: CodexAccount[];
     codexSettings?: CodexMultiAuthSettings;
     codexPreferredModel?: string;
+    codexReasoningEffort?: CodexReasoningEffort;
 }
 
 export type StoredLlmProvider = 'gemini' | 'groq' | 'deepinfra' | 'opencode_go' | 'openai' | 'claude';
@@ -596,13 +603,34 @@ export class CredentialsManager {
     }
 
     public getCodexPreferredModel(): string | undefined {
-        return this.credentials.codexPreferredModel;
+        return resolveCodexModelId(this.credentials.codexPreferredModel || DEFAULT_CODEX_MODEL);
     }
 
     public setCodexPreferredModel(modelId: string): void {
-        this.credentials.codexPreferredModel = modelId;
+        const resolvedModelId = resolveCodexModelId(modelId);
+        this.credentials.codexPreferredModel = resolvedModelId;
+        this.credentials.codexReasoningEffort = resolveCodexReasoningEffort(
+            resolvedModelId,
+            this.credentials.codexReasoningEffort,
+        );
         this.saveCredentials();
-        console.log(`[CredentialsManager] Codex preferred model set to: ${modelId}`);
+        console.log(`[CredentialsManager] Codex preferred model set to: ${resolvedModelId}`);
+    }
+
+    public getCodexReasoningEffort(modelId?: string): CodexReasoningEffort {
+        return resolveCodexReasoningEffort(
+            resolveCodexModelId(modelId || this.credentials.codexPreferredModel),
+            this.credentials.codexReasoningEffort,
+        );
+    }
+
+    public setCodexReasoningEffort(effort: string, modelId?: string): CodexReasoningEffort {
+        const resolvedModelId = resolveCodexModelId(modelId || this.credentials.codexPreferredModel);
+        const resolvedEffort = resolveCodexReasoningEffort(resolvedModelId, effort);
+        this.credentials.codexReasoningEffort = resolvedEffort;
+        this.saveCredentials();
+        console.log(`[CredentialsManager] Codex reasoning effort set to: ${resolvedEffort}`);
+        return resolvedEffort;
     }
 
     public saveCustomProvider(provider: CustomProvider): void {

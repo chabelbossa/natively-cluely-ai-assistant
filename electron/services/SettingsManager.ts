@@ -12,6 +12,7 @@ export interface AppSettings {
     actionButtonMode?: 'recap' | 'brainstorm';
     groqFastTextMode?: boolean;
     knowledgeMode?: boolean;
+    speakerSeparationEnabled?: boolean;
 }
 
 export class SettingsManager {

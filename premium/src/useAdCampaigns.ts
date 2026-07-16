@@ -80,6 +80,7 @@ export function useAdCampaigns(
 ) {
   const [activeAd, setActiveAd] = useState<ActiveAd>(null);
   const [shownToday, setShownToday] = useState(0);
+  const adsDisabled = true;
 
   // Update shown count
   useEffect(() => {
@@ -95,15 +96,17 @@ export function useAdCampaigns(
   );
 
   const previewAd = useCallback((ad: any) => {
+    if (adsDisabled) return;
     if (typeof ad === 'string') {
       setActiveAd(ad);
     } else if (ad && typeof ad === 'object') {
       setActiveAd(ad as RemoteCampaign);
     }
-  }, []);
+  }, [adsDisabled]);
 
   // ─── Auto-select campaign based on user state ─────────────────
   useEffect(() => {
+    if (adsDisabled) return;
     if (!isAppReady) return;
     if (planDetails.isPremium) return;
 
@@ -159,6 +162,7 @@ export function useAdCampaigns(
     lastMeetingEndTime,
     isProcessingMeeting,
     appStartTime,
+    adsDisabled,
   ]);
 
   return {

@@ -266,6 +266,7 @@ export class AppState {
   private isMeetingStopping: boolean = false;
   private meetingFinalizationPromise: Promise<void> | null = null;
   private lastAcceptedSttTranscriptAt: number = 0;
+  private speakerSeparationEnabled: boolean = true;
   private readonly POST_STOP_STT_WAIT_MS = 45_000;
   private readonly POST_STOP_STT_MIN_WAIT_MS = 5_000;
   private _isQuitting: boolean = false;
@@ -301,6 +302,7 @@ export class AppState {
     this.isUndetectable = settingsManager.get('isUndetectable') ?? false;
     this.disguiseMode = settingsManager.get('disguiseMode') ?? 'none';
     this._verboseLogging = settingsManager.get('verboseLogging') ?? false;
+    this.speakerSeparationEnabled = settingsManager.get('speakerSeparationEnabled') ?? true;
     setVerboseLoggingFlag(this._verboseLogging);
     console.log(`[AppState] Initialized with isUndetectable=${this.isUndetectable}, disguiseMode=${this.disguiseMode}, verboseLogging=${this._verboseLogging}`);
 
@@ -513,6 +515,20 @@ export class AppState {
 
   public getIsMeetingFinalizing(): boolean {
     return this.isMeetingStopping;
+  }
+
+  public getSpeakerSeparationEnabled(): boolean {
+    return this.speakerSeparationEnabled;
+  }
+
+  public setSpeakerSeparationEnabled(enabled: boolean): void {
+    if (this.speakerSeparationEnabled === enabled) return;
+    this.speakerSeparationEnabled = enabled;
+    SettingsManager.getInstance().set('speakerSeparationEnabled', enabled);
+    this.clearPendingMicEchoTranscripts('speaker_separation_toggle', false);
+    this.transcriptRouter.reset();
+    this.broadcast('speaker-separation-changed', { enabled });
+    console.log(`[Main] Speaker separation ${enabled ? 'enabled' : 'disabled'} for live meeting routing`);
   }
 
   public isQuitting(): boolean {
@@ -1624,6 +1640,7 @@ export class AppState {
       // The mic channel (user) always stays as "user" regardless of provider.
       let effectiveSpeaker: string = speaker;
       const hasDiarizedSpeaker = speaker === 'interviewer'
+        && this.speakerSeparationEnabled
         && stt.supportsDiarization
         && segment.speakerId !== undefined;
       if (hasDiarizedSpeaker) {
@@ -3700,7 +3717,7 @@ function getOneShotSummaryRegenerationJob(): {
 
   return {
     meetingId,
-    model: String(process.env.NATIVELY_REGENERATE_MODEL || 'codex:gpt-5.5').trim() || 'codex:gpt-5.5',
+    model: String(process.env.NATIVELY_REGENERATE_MODEL || 'codex:gpt-5.6-terra').trim() || 'codex:gpt-5.6-terra',
     useAudioReplay: /^(1|true|yes)$/i.test(String(process.env.NATIVELY_REGENERATE_USE_AUDIO_REPLAY || '')),
     outputPath: String(process.env.NATIVELY_REGENERATE_OUTPUT_PATH || '').trim() || undefined,
   };

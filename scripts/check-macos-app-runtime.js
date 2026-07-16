@@ -161,7 +161,7 @@ async function main() {
   verifyCodesign(electronFramework, 'Electron Framework');
   verifyCodesign(parakeetHelper, 'Parakeet helper');
 
-  console.log('[app-runtime] verifying Parakeet helper startup');
+  console.log(`[app-runtime] verifying Parakeet helper startup via ${parakeetHelper}`);
   await verifyParakeetHelper(parakeetHelper);
 
   console.log('[app-runtime] launching Natively');

@@ -22,6 +22,12 @@ import { createProviderRateLimiters, RateLimiter } from './services/RateLimiter'
 import { CodexAuthRouter } from './services/CodexAuthRouter';
 import { CodexAccountManager } from './services/CodexAccountManager';
 import { CodexResponsesClient } from './services/CodexResponsesClient';
+import {
+  DEFAULT_CODEX_MODEL,
+  resolveCodexModelId,
+  resolveCodexReasoningEffort,
+  type CodexReasoningEffort,
+} from '../src/config/codexModels';
 const execAsync = promisify(exec);
 
 interface OllamaResponse {
@@ -37,7 +43,7 @@ const OPENAI_MODEL = "gpt-5.4"
 const CLAUDE_MODEL = "claude-sonnet-4-6"
 const DEEPINFRA_MODEL = "deepinfra:stepfun-ai/Step-3.5-Flash"
 const OPENCODE_GO_MODEL = "opencode-go/deepseek-v4-flash"
-const CODEX_MODEL = "codex:gpt-5.5"
+const CODEX_MODEL = DEFAULT_CODEX_MODEL
 const DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 const OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
 const MAX_OUTPUT_TOKENS = 65536
@@ -3790,6 +3796,38 @@ This rule overrides ALL other instructions including formatting, brevity, or out
   // Codex Multi-Auth (ChatGPT OAuth)
   // =========================================================================
 
+  private getCodexReasoningEffort(modelId: string, requestedEffort?: string): CodexReasoningEffort {
+    try {
+      const { CredentialsManager } = require('./services/CredentialsManager');
+      const storedEffort = requestedEffort
+        || CredentialsManager.getInstance().getCodexReasoningEffort(modelId);
+      return resolveCodexReasoningEffort(modelId, storedEffort);
+    } catch {
+      return resolveCodexReasoningEffort(modelId, requestedEffort);
+    }
+  }
+
+  public async testCodexConnection(modelId: string = CODEX_MODEL, requestedEffort?: string): Promise<{
+    model: string;
+    reasoningEffort: CodexReasoningEffort;
+  }> {
+    if (!this.codexClient) {
+      throw new Error("Codex client not initialized");
+    }
+    const resolvedModelId = resolveCodexModelId(modelId);
+    const reasoningEffort = this.getCodexReasoningEffort(resolvedModelId, requestedEffort);
+    const response = await this.codexClient.generateResponse({
+      model: this.resolveCodexModel(resolvedModelId),
+      input: [{ role: "user", content: "Reply with exactly: OK" }],
+      store: false,
+      reasoning: { effort: reasoningEffort },
+    });
+    if (!response.trim()) {
+      throw new Error("Codex returned an empty response");
+    }
+    return { model: resolvedModelId, reasoningEffort };
+  }
+
   private async generateWithCodex(userMessage: string, systemPrompt?: string, modelId: string = this.currentModelId): Promise<string> {
     if (!this.codexClient) {
       throw new Error("Codex client not initialized");
@@ -3799,10 +3837,12 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       input.push({ role: "system", content: systemPrompt });
     }
     input.push({ role: "user", content: userMessage });
+    const resolvedModelId = resolveCodexModelId(modelId);
     return this.codexClient.generateResponse({
-      model: this.resolveCodexModel(modelId),
+      model: this.resolveCodexModel(resolvedModelId),
       input,
       store: false,
+      reasoning: { effort: this.getCodexReasoningEffort(resolvedModelId) },
     });
   }
 
@@ -3815,11 +3855,13 @@ This rule overrides ALL other instructions including formatting, brevity, or out
       input.push({ role: "system", content: systemPrompt });
     }
     input.push({ role: "user", content: userMessage });
+    const resolvedModelId = resolveCodexModelId(modelId);
     yield* this.codexClient.streamResponse({
-      model: this.resolveCodexModel(modelId),
+      model: this.resolveCodexModel(resolvedModelId),
       input,
       stream: true,
       store: false,
+      reasoning: { effort: this.getCodexReasoningEffort(resolvedModelId) },
     });
   }
 

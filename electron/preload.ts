@@ -137,7 +137,7 @@ interface ElectronAPI {
   setClaudeApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   setNativelyApiKey: (apiKey: string) => Promise<{ success: boolean; error?: string }>
   getNativelyUsage: () => Promise<{ ok: boolean; plan?: string; quota?: { transcription: { used: number; limit: number; remaining: number }; ai: { used: number; limit: number; remaining: number }; search: { used: number; limit: number; remaining: number }; resets_at: string }; member_since?: string; error?: string; status?: number }>
-  getStoredCredentials: () => Promise<{ hasGeminiKey: boolean; hasGroqKey: boolean; hasDeepInfraKey?: boolean; hasOpenCodeGoKey?: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; hasNativelyKey: boolean; googleServiceAccountPath: string | null; sttProvider: string; groqSttModel?: string; localSttMode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; localSttEndpoint?: string; localSttModel?: string; localSttGlossary?: string; localSttWhisperCppModelPath?: string; localSttWhisperCppExecutablePath?: string; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; hasSonioxKey: boolean; deepinfraPreferredModel?: string; openCodeGoPreferredModel?: string; hasCodexAccounts?: boolean; codexPreferredModel?: string }>
+  getStoredCredentials: () => Promise<{ hasGeminiKey: boolean; hasGroqKey: boolean; hasDeepInfraKey?: boolean; hasOpenCodeGoKey?: boolean; hasOpenaiKey: boolean; hasClaudeKey: boolean; hasNativelyKey: boolean; googleServiceAccountPath: string | null; sttProvider: string; groqSttModel?: string; localSttMode?: 'server' | 'whisper_cpp' | 'parakeet_stream'; localSttEndpoint?: string; localSttModel?: string; localSttGlossary?: string; localSttWhisperCppModelPath?: string; localSttWhisperCppExecutablePath?: string; hasSttGroqKey: boolean; hasSttOpenaiKey: boolean; hasDeepgramKey: boolean; hasElevenLabsKey: boolean; hasAzureKey: boolean; azureRegion: string; hasIbmWatsonKey: boolean; ibmWatsonRegion: string; hasSonioxKey: boolean; deepinfraPreferredModel?: string; openCodeGoPreferredModel?: string; hasCodexAccounts?: boolean; codexPreferredModel?: string; codexReasoningEffort?: string }>
   // Free Trial
   startTrial:     () => Promise<{ ok: boolean; trial_token?: string; started_at?: string; expires_at?: string; expired?: boolean; already_used?: boolean; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: { duration_ms: number; ai_requests: number; stt_minutes: number; search_requests: number }; error?: string; status?: number }>
   getTrialStatus: () => Promise<{ ok: boolean; expired?: boolean; remaining_ms?: number; started_at?: string; expires_at?: string; converted_to?: string | null; usage?: { ai: number; stt_seconds: number; search: number }; limits?: object; error?: string }>
@@ -175,6 +175,7 @@ interface ElectronAPI {
   onNativeAudioDisconnected: (callback: () => void) => () => void
   onSystemAudioSilent: (callback: (data: { message: string; rms?: number; peak?: number }) => void) => () => void
   onSystemAudioActive: (callback: (data: { message: string; rms?: number; peak?: number }) => void) => () => void
+  onSpeakerSeparationChanged: (callback: (data: { enabled: boolean }) => void) => () => void
   onSuggestionGenerated: (callback: (data: { question: string; suggestion: string; confidence: number }) => void) => () => void
   onSuggestionProcessingStart: (callback: () => void) => () => void
   onSuggestionError: (callback: (error: { error: string }) => void) => () => void
@@ -209,6 +210,8 @@ interface ElectronAPI {
   clearMeetingBrief: () => Promise<{ success: boolean; error?: string }>
   endMeeting: () => Promise<{ success: boolean; error?: string }>
   finalizeMicSTT: () => Promise<void>
+  getSpeakerSeparationEnabled: () => Promise<{ enabled: boolean }>
+  setSpeakerSeparationEnabled: (enabled: boolean) => Promise<{ success: boolean; enabled?: boolean; error?: string }>
   getRecentMeetings: () => Promise<Array<{ id: string; title: string; date: string; duration: string; summary: string }>>
   getMeetingDetails: (id: string) => Promise<any>
   updateMeetingTitle: (id: string, title: string) => Promise<boolean>
@@ -236,6 +239,8 @@ interface ElectronAPI {
   getDefaultModel: () => Promise<{ model: string }>
   setModel: (modelId: string) => Promise<{ success: boolean; error?: string }>
   setDefaultModel: (modelId: string) => Promise<{ success: boolean; error?: string }>
+  getCodexReasoningEffort: (modelId?: string) => Promise<{ model: string; reasoningEffort: string }>
+  setCodexReasoningEffort: (effort: string, modelId?: string) => Promise<{ success: boolean; model: string; reasoningEffort: string }>
   toggleModelSelector: (coords: { x: number; y: number }) => Promise<void>
   hideModelSelector: () => Promise<void>
   forceRestartOllama: () => Promise<void>
@@ -771,6 +776,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener("system-audio-active", subscription)
     }
   },
+  onSpeakerSeparationChanged: (callback: (data: { enabled: boolean }) => void) => {
+    const subscription = (_: any, data: { enabled: boolean }) => callback(data)
+    ipcRenderer.on("speaker-separation-changed", subscription)
+    return () => {
+      ipcRenderer.removeListener("speaker-separation-changed", subscription)
+    }
+  },
   onSuggestionGenerated: (callback: (data: { question: string; suggestion: string; confidence: number }) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("suggestion-generated", subscription)
@@ -858,6 +870,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   clearMeetingBrief: () => ipcRenderer.invoke("meeting-brief:clear"),
   endMeeting: () => ipcRenderer.invoke("end-meeting"),
   finalizeMicSTT: () => ipcRenderer.invoke("finalize-mic-stt"),
+  getSpeakerSeparationEnabled: () => ipcRenderer.invoke("get-speaker-separation-enabled"),
+  setSpeakerSeparationEnabled: (enabled: boolean) => ipcRenderer.invoke("set-speaker-separation-enabled", enabled),
   getRecentMeetings: () => ipcRenderer.invoke("get-recent-meetings"),
   getMeetingDetails: (id: string) => ipcRenderer.invoke("get-meeting-details", id),
   updateMeetingTitle: (id: string, title: string) => ipcRenderer.invoke("update-meeting-title", { id, title }),
@@ -1045,6 +1059,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getDefaultModel: () => ipcRenderer.invoke('get-default-model'),
   setModel: (modelId: string) => ipcRenderer.invoke('set-model', modelId),
   setDefaultModel: (modelId: string) => ipcRenderer.invoke('set-default-model', modelId),
+  getCodexReasoningEffort: (modelId?: string) => ipcRenderer.invoke('get-codex-reasoning-effort', modelId),
+  setCodexReasoningEffort: (effort: string, modelId?: string) => ipcRenderer.invoke('set-codex-reasoning-effort', effort, modelId),
   toggleModelSelector: (coords: { x: number; y: number }) => ipcRenderer.invoke('toggle-model-selector', coords),
   hideModelSelector: () => ipcRenderer.invoke('hide-model-selector'),
   forceRestartOllama: () => ipcRenderer.invoke('force-restart-ollama'),

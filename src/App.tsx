@@ -152,6 +152,9 @@ const App: React.FC = () => {
   // Preview shortcuts — Ctrl/Cmd+Shift+1-5 force-show any ad card.
   // Uses e.code so Shift doesn't remap the digit to a symbol ('!' etc.).
   useEffect(() => {
+    const promoPreviewShortcutsEnabled = false;
+    if (!promoPreviewShortcutsEnabled) return;
+
     const CODE_MAP: Record<string, string> = {
       'Digit1': 'max_ultra_upgrade',
       'Digit2': 'promo',

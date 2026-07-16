@@ -104,6 +104,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
     };
 
     const getModelDisplayName = (model: string) => {
+        if (model.startsWith('codex:')) return prettifyModelId(model);
         if (model.startsWith('ollama-')) return model.replace('ollama-', '');
         if (model === 'gemini-3.5-flash') return 'Gemini 3.5 Flash';
         if (model === 'gemini-3.1-flash-lite-preview') return 'Gemini 3.1 Flash';
@@ -113,14 +114,6 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({ currentModel, onSe
         if (model === 'claude-sonnet-4-6') return 'Sonnet 4.6';
         if (model === 'gpt-5.2') return 'GPT 5.2 Codex';
         if (model === 'gpt-5.1') return 'GPT 5.1 Codex';
-        if (model === 'codex:gpt-5.5') return 'GPT 5.5 Codex';
-        if (model === 'codex:gpt-5.4') return 'GPT 5.4 Codex';
-        if (model === 'codex:gpt-5.4-mini') return 'GPT 5.4 Mini Codex';
-        if (model === 'codex:gpt-5.3') return 'GPT 5.3 Codex';
-        if (model === 'codex:gpt-5.3-codex-spark') return 'GPT 5.3 Codex Spark';
-        if (model === 'codex:gpt-5.2') return 'GPT 5.2 Codex';
-        if (model === 'codex:gpt-5.1') return 'GPT 5.1 Codex';
-        if (model === 'codex:gpt-5') return 'GPT 5 Codex';
         if (model === 'gpt-4o') return 'GPT 4o';
         if (model === 'gpt-4o-mini') return 'GPT 4o Mini';
 

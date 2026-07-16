@@ -33,8 +33,8 @@ if (!window.electronAPI) {
     getNativeAudioStatus: async () => ({ connected: false }),
     getKeybinds: async () => [],
     resetKeybinds: async () => [],
-    getDefaultModel: async () => ({ model: 'codex:gpt-5.5' }),
-    getCurrentLlmConfig: async () => ({ provider: 'codex', model: 'codex:gpt-5.5', isOllama: false }),
+    getDefaultModel: async () => ({ model: 'codex:gpt-5.6-terra' }),
+    getCurrentLlmConfig: async () => ({ provider: 'codex', model: 'codex:gpt-5.6-terra', isOllama: false }),
     getAvailableOllamaModels: async () => [],
     getStoredCredentials: async () => ({
       hasGeminiKey: false,

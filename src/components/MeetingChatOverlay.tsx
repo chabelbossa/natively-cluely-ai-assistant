@@ -5,6 +5,7 @@ import { motion } from 'framer-motion';
 import nativelyIcon from './icon.png';
 import { ModelSelector } from './ui/ModelSelector';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
+import { getCodexModelLabel } from '../config/codexModels';
 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -54,6 +55,8 @@ const formatResponseDuration = (ms?: number): string => {
 };
 
 const getModelDisplayName = (model: string): string => {
+    const codexLabel = getCodexModelLabel(model);
+    if (codexLabel) return codexLabel;
     const names: Record<string, string> = {
         'gemini-3.5-flash': 'Gemini 3.5 Flash',
         'gemini-3.1-flash-lite-preview': 'Gemini 3.1 Flash',
@@ -64,14 +67,6 @@ const getModelDisplayName = (model: string): string => {
         'gpt-4o-mini': 'GPT 4o Mini',
         'gpt-5.2': 'GPT 5.2 Codex',
         'gpt-5.1': 'GPT 5.1 Codex',
-        'codex:gpt-5.5': 'GPT 5.5 Codex',
-        'codex:gpt-5.4': 'GPT 5.4 Codex',
-        'codex:gpt-5.4-mini': 'GPT 5.4 Mini Codex',
-        'codex:gpt-5.3': 'GPT 5.3 Codex',
-        'codex:gpt-5.3-codex-spark': 'GPT 5.3 Codex Spark',
-        'codex:gpt-5.2': 'GPT 5.2 Codex',
-        'codex:gpt-5.1': 'GPT 5.1 Codex',
-        'codex:gpt-5': 'GPT 5 Codex',
         'claude-sonnet-4-6': 'Sonnet 4.6',
         natively: 'Natively',
     };

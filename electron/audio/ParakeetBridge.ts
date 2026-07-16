@@ -98,9 +98,15 @@ export class ParakeetBridge extends EventEmitter {
     }
 
     getHelperPath(): string {
+        const overridePath = process.env.NATIVELY_PARAKEET_HELPER_PATH || '';
+        if (overridePath && this.isExecutable(overridePath)) return overridePath;
+
+        const packagedHelperPath = path.join(process.resourcesPath || '', 'helpers', 'parakeet-stt-helper');
+        if (this.isExecutable(packagedHelperPath)) {
+            return packagedHelperPath;
+        }
+
         const candidates = [
-            process.env.NATIVELY_PARAKEET_HELPER_PATH || '',
-            path.join(process.resourcesPath || '', 'helpers', 'parakeet-stt-helper'),
             path.join(app.getAppPath(), 'native-helpers', 'parakeet-stt-helper', 'dist', 'parakeet-stt-helper'),
             path.join(app.getAppPath(), 'native-helpers', 'parakeet-stt-helper', '.build', 'release', 'parakeet-stt-helper'),
         ].filter(Boolean);
