@@ -37,6 +37,7 @@ const orchestratorPath = path.join(
   "meeting",
   "MeetingActionOrchestrator.ts",
 );
+const liveActionMessagesPath = path.join(repoRoot, "src", "lib", "liveActionMessages.ts");
 
 const engine = fs.readFileSync(enginePath, "utf8");
 const packet = fs.readFileSync(packetPath, "utf8");
@@ -51,6 +52,7 @@ const prompts = fs.readFileSync(promptsPath, "utf8");
 const promptProfileRegistry = fs.readFileSync(promptProfilePath, "utf8");
 const ragPrompts = fs.readFileSync(ragPromptsPath, "utf8");
 const llmHelper = fs.readFileSync(llmHelperPath, "utf8");
+const liveActionMessages = fs.readFileSync(liveActionMessagesPath, "utf8");
 
 const checks = [
   {
@@ -63,7 +65,7 @@ const checks = [
     name: "manual results settle the existing answer card",
     source: ui,
     pattern:
-      /onIntelligenceManualResult[\s\S]*settleActionMessage\(prev, "manual", data\.answer/,
+      /onIntelligenceManualResult[\s\S]*settleActionMessage\(prev, actionId, "manual", data\.answer/,
   },
   {
     name: "intelligence listeners are not rebound on hide/show",
@@ -239,6 +241,18 @@ const checks = [
       /result\.type === 'timeout'[\s\S]*this\.cancelActionStream\(stream\)[\s\S]*private cancelActionStream[\s\S]*Promise\.race/,
   },
   {
+    name: "a generation invalidated while stream.next is pending is rejected before done or token handling",
+    source: engine,
+    pattern:
+      /await Promise\.race\([\s\S]*if \(!this\.isGenerationCurrent\(mode, generationId\)\) \{[\s\S]*aborted: true[\s\S]*if \(result\.type === 'timeout'\)/,
+  },
+  {
+    name: "Codex service-tier telemetry is isolated per asynchronous action",
+    source: `${llmHelper}\n${fs.readFileSync(path.join(repoRoot, "electron", "services", "CodexResponsesClient.ts"), "utf8")}\n${fs.readFileSync(path.join(repoRoot, "electron", "IntelligenceManager.ts"), "utf8")}`,
+    pattern:
+      /AsyncLocalStorage[\s\S]*runWithServiceTierTracking[\s\S]*runWithCodexServiceTierTracking[\s\S]*runWhatShouldISay/,
+  },
+  {
     name: "live action tokens are held until quality validation finishes",
     source: engine,
     pattern:
@@ -249,6 +263,48 @@ const checks = [
     source: engine,
     pattern:
       /improveLiveActionOutput[\s\S]*reviewLiveActionQuality[\s\S]*repairLiveActionOutput[\s\S]*quality_repair_still_weak/,
+  },
+  {
+    name: "what-to-say cancels the action when a quality repair becomes stale",
+    source: engine,
+    pattern:
+      /improveLiveActionOutput\([\s\S]*if \(!this\.isGenerationCurrent\('what_to_say', generationId\)\) \{[\s\S]*this\.emit\('action_cancelled', 'what_to_say', resolvedActionId\)/,
+  },
+  {
+    name: "clarify cancels the action when a quality repair becomes stale",
+    source: engine,
+    pattern:
+      /runClarify[\s\S]*improveLiveActionOutput\([\s\S]*if \(!this\.isGenerationCurrent\('clarify', generationId\)\) \{[\s\S]*this\.emit\('action_cancelled', 'clarify', resolvedActionId\)/,
+  },
+  {
+    name: "manual answers are rejected when reset during quality repair",
+    source: engine,
+    pattern:
+      /runManualAnswer[\s\S]*improveLiveActionOutput\([\s\S]*if \(!this\.isGenerationCurrent\('manual', generationId\)\) \{[\s\S]*return null;[\s\S]*this\.session\.addAssistantMessage\(answer\)/,
+  },
+  {
+    name: "empty follow-up output fails instead of leaving a pending card",
+    source: engine,
+    pattern:
+      /runFollowUp[\s\S]*if \(!fullRefined\.trim\(\)\) \{[\s\S]*throw new Error\('Follow-up generation returned an empty response\.'\)/,
+  },
+  {
+    name: "operational action failures are rethrown after emitting their terminal error",
+    source: engine,
+    pattern:
+      /runWhatShouldISay[\s\S]*this\.emit\('error', error as Error, 'what_to_say', resolvedActionId\);[\s\S]*throw error;[\s\S]*runFollowUp[\s\S]*this\.emit\('error', error as Error, 'follow_up', resolvedActionId\);[\s\S]*throw error;[\s\S]*runRecap[\s\S]*this\.emit\('error', error as Error, 'recap', resolvedActionId\);[\s\S]*throw error;[\s\S]*runClarify[\s\S]*this\.emit\('error', error as Error, 'clarify', resolvedActionId\);[\s\S]*throw error;/,
+  },
+  {
+    name: "terminal live-action cards cannot be overwritten by late events",
+    source: liveActionMessages,
+    pattern:
+      /existingIsTerminal[\s\S]*if \(existingStatus !== status \|\| !meta\) return messages/,
+  },
+  {
+    name: "Fast-to-Standard fallback remains visible on completed answer cards",
+    source: ui,
+    pattern:
+      /getServiceTierMessageMeta[\s\S]*serviceTierFallback[\s\S]*Standard fallback/,
   },
   {
     name: "underdeveloped direct-question answers are treated as repairable",
@@ -311,10 +367,28 @@ const checks = [
       /postProcessLiveActionOutput[\s\S]*collapseRepeatedLiveActionOutput[\s\S]*extractRepeatedHalf[\s\S]*sameSubstantialText/,
   },
   {
-    name: "late duplicate final events coalesce with the last settled action card",
-    source: ui,
+    name: "live action cards are correlated by actionId rather than intent",
+    source: liveActionMessages,
     pattern:
-      /finalizeStreamingMessage[\s\S]*lastMessage\.intent === intent[\s\S]*lastMessage\.text\.trim\(\) === text\.trim\(\)[\s\S]*updated\[lastIndex\]/,
+      /findActionIndex[\s\S]*message\.actionId === actionId[\s\S]*finalizeStreamingMessage[\s\S]*actionStatus: status/,
+  },
+  {
+    name: "late tokens cannot reopen completed failed or cancelled action cards",
+    source: liveActionMessages,
+    pattern:
+      /appendStreamingMessage[\s\S]*actionStatus === 'completed'[\s\S]*actionStatus === 'failed'[\s\S]*actionStatus === 'cancelled'[\s\S]*return messages/,
+  },
+  {
+    name: "actionId crosses engine events IPC payloads and renderer reducers",
+    source: `${engine}\n${main}\n${preload}\n${ui}`,
+    pattern:
+      /resolvedActionId[\s\S]*suggested_answer[\s\S]*actionId[\s\S]*intelligence-suggested-answer[\s\S]*actionId[\s\S]*generateWhatToSay[\s\S]*actionId/,
+  },
+  {
+    name: "superseded live actions emit a terminal cancellation",
+    source: `${engine}\n${main}\n${preload}\n${ui}`,
+    pattern:
+      /action_cancelled[\s\S]*intelligence-action-cancelled[\s\S]*onIntelligenceActionCancelled[\s\S]*cancelActionMessage/,
   },
   {
     name: "clarify falls back from empty or generic unreliable answers",

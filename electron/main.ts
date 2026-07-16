@@ -2783,50 +2783,56 @@ export class AppState {
         sent.add(win.id);
       }
     };
+    const currentCodexServiceTier = () =>
+      this.processingHelper.getLLMHelper().getLastCodexServiceTierStatus();
 
     // Forward intelligence events to renderer
     this.intelligenceManager.on('assist_update', (insight: string) => {
       sendToRenderers('intelligence-assist-update', { insight });
     })
 
-    this.intelligenceManager.on('suggested_answer', (answer: string, question: string, confidence: number) => {
-      sendToRenderers('intelligence-suggested-answer', { answer, question, confidence });
+    this.intelligenceManager.on('suggested_answer', (answer: string, question: string, confidence: number, actionId: string) => {
+      sendToRenderers('intelligence-suggested-answer', { answer, question, confidence, actionId, serviceTier: currentCodexServiceTier() });
     })
 
-    this.intelligenceManager.on('suggested_answer_token', (token: string, question: string, confidence: number) => {
-      sendToRenderers('intelligence-suggested-answer-token', { token, question, confidence });
+    this.intelligenceManager.on('suggested_answer_token', (token: string, question: string, confidence: number, actionId: string) => {
+      sendToRenderers('intelligence-suggested-answer-token', { token, question, confidence, actionId });
     })
 
-    this.intelligenceManager.on('refined_answer_token', (token: string, intent: string) => {
-      sendToRenderers('intelligence-refined-answer-token', { token, intent });
+    this.intelligenceManager.on('refined_answer_token', (token: string, intent: string, actionId: string) => {
+      sendToRenderers('intelligence-refined-answer-token', { token, intent, actionId });
     })
 
-    this.intelligenceManager.on('refined_answer', (answer: string, intent: string) => {
-      sendToRenderers('intelligence-refined-answer', { answer, intent });
+    this.intelligenceManager.on('refined_answer', (answer: string, intent: string, actionId: string) => {
+      sendToRenderers('intelligence-refined-answer', { answer, intent, actionId, serviceTier: currentCodexServiceTier() });
     })
 
-    this.intelligenceManager.on('recap', (summary: string) => {
-      sendToRenderers('intelligence-recap', { summary });
+    this.intelligenceManager.on('recap', (summary: string, actionId: string) => {
+      sendToRenderers('intelligence-recap', { summary, actionId, serviceTier: currentCodexServiceTier() });
     })
 
-    this.intelligenceManager.on('recap_token', (token: string) => {
-      sendToRenderers('intelligence-recap-token', { token });
+    this.intelligenceManager.on('recap_token', (token: string, actionId: string) => {
+      sendToRenderers('intelligence-recap-token', { token, actionId });
     })
 
-    this.intelligenceManager.on('clarify', (clarification: string) => {
-      sendToRenderers('intelligence-clarify', { clarification });
+    this.intelligenceManager.on('clarify', (clarification: string, actionId: string) => {
+      sendToRenderers('intelligence-clarify', { clarification, actionId, serviceTier: currentCodexServiceTier() });
     })
 
-    this.intelligenceManager.on('clarify_token', (token: string) => {
-      sendToRenderers('intelligence-clarify-token', { token });
+    this.intelligenceManager.on('clarify_token', (token: string, actionId: string) => {
+      sendToRenderers('intelligence-clarify-token', { token, actionId });
     })
 
-    this.intelligenceManager.on('follow_up_questions_update', (questions: string) => {
-      sendToRenderers('intelligence-follow-up-questions-update', { questions });
+    this.intelligenceManager.on('follow_up_questions_update', (questions: string, actionId: string) => {
+      sendToRenderers('intelligence-follow-up-questions-update', { questions, actionId, serviceTier: currentCodexServiceTier() });
     })
 
-    this.intelligenceManager.on('follow_up_questions_token', (token: string) => {
-      sendToRenderers('intelligence-follow-up-questions-token', { token });
+    this.intelligenceManager.on('follow_up_questions_token', (token: string, actionId: string) => {
+      sendToRenderers('intelligence-follow-up-questions-token', { token, actionId });
+    })
+
+    this.intelligenceManager.on('action_cancelled', (mode: string, actionId: string) => {
+      sendToRenderers('intelligence-action-cancelled', { mode, actionId });
     })
 
     this.intelligenceManager.on('manual_answer_started', () => {
@@ -2841,9 +2847,14 @@ export class AppState {
       sendToRenderers('intelligence-mode-changed', { mode });
     })
 
-    this.intelligenceManager.on('error', (error: Error, mode: string) => {
+    this.intelligenceManager.on('error', (error: Error, mode: string, actionId?: string) => {
       console.error(`[IntelligenceManager] Error in ${mode}:`, error)
-      sendToRenderers('intelligence-error', { error: error.message, mode });
+      sendToRenderers('intelligence-error', {
+        error: error.message,
+        mode,
+        actionId,
+        code: (error as Error & { code?: string }).code,
+      });
     })
 
     this.intelligenceManager.on('copilot_suggestion', (decision: any) => {
@@ -3754,6 +3765,7 @@ async function maybeRunOneShotSummaryRegeneration(appState: AppState): Promise<b
     runtimeProvider: llmHelper.getCurrentProvider(),
     runtimeModel: llmHelper.getCurrentModel(),
     generationRoute: llmHelper.getLastMeetingSummaryRoute(),
+    serviceTier: llmHelper.getLastCodexServiceTierStatus(),
     useAudioReplay: job.useAudioReplay,
     overview: result.detailedSummary?.overview || meeting?.detailedSummary?.overview || '',
     quality: result.detailedSummary?.quality || meeting?.detailedSummary?.quality || null,

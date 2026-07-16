@@ -9,6 +9,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { insertEditableSummaryItemAfter, selectSupplementalSummaryItems, summaryItemsEquivalent } from '../lib/summaryPresentation';
 
 const formatTime = (ms: number) => {
     const date = new Date(ms);
@@ -91,6 +92,31 @@ const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting: initialMeeting
     const [activeTab, setActiveTab] = useState<'summary' | 'transcript' | 'usage'>('summary');
     const [isCopied, setIsCopied] = useState(false);
     const [isRegenerating, setIsRegenerating] = useState(false);
+    const [pendingSummaryFocus, setPendingSummaryFocus] = useState<
+        | { kind: 'action'; index: number }
+        | { kind: 'keyPoint'; index: number }
+        | { kind: 'section'; sectionIndex: number; bulletIndex: number }
+        | null
+    >(null);
+    const structuredSummaryBullets = meeting.detailedSummary?.sections?.flatMap(section => section.bullets || []) || [];
+    const supplementalActionItems = [
+        ...selectSupplementalSummaryItems(
+        meeting.detailedSummary?.actionItems,
+        structuredSummaryBullets,
+        ),
+        ...(meeting.detailedSummary?.actionItems || [])
+            .map((item, sourceIndex) => ({ item, sourceIndex }))
+            .filter(({ item }) => !item.trim()),
+    ].sort((left, right) => left.sourceIndex - right.sourceIndex);
+    const supplementalKeyPoints = [
+        ...selectSupplementalSummaryItems(
+        meeting.detailedSummary?.keyPoints,
+        [...structuredSummaryBullets, ...(meeting.detailedSummary?.actionItems || [])],
+        ),
+        ...(meeting.detailedSummary?.keyPoints || [])
+            .map((item, sourceIndex) => ({ item, sourceIndex }))
+            .filter(({ item }) => !item.trim()),
+    ].sort((left, right) => left.sourceIndex - right.sourceIndex);
 
     const copyTextToClipboard = async (text: string) => {
         try {
@@ -115,18 +141,21 @@ const MeetingDetails: React.FC<MeetingDetailsProps> = ({ meeting: initialMeeting
             const customSections = meeting.detailedSummary.sections
                 ?.map(section => `${section.title.toUpperCase()}:\n${section.bullets.map(item => `- ${item}`).join('\n') || 'None'}`)
                 .join('\n\n');
+            const supplementalSections = [
+                supplementalActionItems.some(({ item }) => item.trim())
+                    ? `ACTION ITEMS:\n${supplementalActionItems.filter(({ item }) => item.trim()).map(({ item }) => `- ${item}`).join('\n')}`
+                    : '',
+                supplementalKeyPoints.some(({ item }) => item.trim())
+                    ? `KEY POINTS:\n${supplementalKeyPoints.filter(({ item }) => item.trim()).map(({ item }) => `- ${item}`).join('\n')}`
+                    : '',
+            ].filter(Boolean).join('\n\n');
             textToCopy = `
 Meeting: ${meeting.title}
 Date: ${new Date(meeting.date).toLocaleDateString()}
 
 OVERVIEW:
 ${meeting.detailedSummary.overview || ''}
-
-ACTION ITEMS:
-${meeting.detailedSummary.actionItems?.map(item => `- ${item}`).join('\n') || 'None'}
-
-KEY POINTS:
-${meeting.detailedSummary.keyPoints?.map(item => `- ${item}`).join('\n') || 'None'}
+${supplementalSections ? `\n\n${supplementalSections}` : ''}
 ${customSections ? `\n\n${customSections}` : ''}
             `.trim();
         } else if (activeTab === 'transcript' && meeting.transcript) {
@@ -184,6 +213,7 @@ ${customSections ? `\n\n${customSections}` : ''}
             // Optional: Remove empty items? For now just keep empty or update
         }
         newItems[index] = newVal;
+        setPendingSummaryFocus(null);
 
         setMeeting(prev => ({
             ...prev,
@@ -201,6 +231,7 @@ ${customSections ? `\n\n${customSections}` : ''}
     const handleKeyPointSave = async (index: number, newVal: string) => {
         const newItems = [...(meeting.detailedSummary?.keyPoints || [])];
         newItems[index] = newVal;
+        setPendingSummaryFocus(null);
 
         setMeeting(prev => ({
             ...prev,
@@ -213,6 +244,43 @@ ${customSections ? `\n\n${customSections}` : ''}
         if (window.electronAPI?.updateMeetingSummary) {
             await window.electronAPI.updateMeetingSummary(meeting.id, { keyPoints: newItems });
         }
+    };
+
+    const handleSectionTitleSave = async (sectionIndex: number, newTitle: string) => {
+        const sections = (meeting.detailedSummary?.sections || []).map((section, index) =>
+            index === sectionIndex ? { ...section, title: newTitle } : section,
+        );
+        setMeeting(prev => ({
+            ...prev,
+            detailedSummary: { ...prev.detailedSummary!, sections },
+        }));
+        await window.electronAPI?.updateMeetingSummary(meeting.id, { sections });
+    };
+
+    const handleSectionBulletSave = async (sectionIndex: number, bulletIndex: number, newValue: string) => {
+        const currentSections = meeting.detailedSummary?.sections || [];
+        const previousValue = currentSections[sectionIndex]?.bullets?.[bulletIndex] || '';
+        const sections = currentSections.map((section, index) => {
+            if (index !== sectionIndex) return section;
+            const bullets = [...section.bullets];
+            bullets[bulletIndex] = newValue;
+            return { ...section, bullets };
+        });
+        const syncCoveredItem = (item: string) =>
+            summaryItemsEquivalent(item, previousValue) ? newValue : item;
+        const actionItems = (meeting.detailedSummary?.actionItems || []).map(syncCoveredItem);
+        const keyPoints = (meeting.detailedSummary?.keyPoints || []).map(syncCoveredItem);
+        setPendingSummaryFocus(null);
+        setMeeting(prev => ({
+            ...prev,
+            detailedSummary: {
+                ...prev.detailedSummary!,
+                sections,
+                actionItems,
+                keyPoints,
+            },
+        }));
+        await window.electronAPI?.updateMeetingSummary(meeting.id, { sections, actionItems, keyPoints });
     };
 
     const handleRegenerateSummary = async () => {
@@ -383,7 +451,7 @@ ${customSections ? `\n\n${customSections}` : ''}
                                 )}
 
                                 {/* Action Items - Only show if there are items */}
-                                {meeting.detailedSummary?.actionItems && meeting.detailedSummary.actionItems.length > 0 && (
+                                {supplementalActionItems.length > 0 && (
                                     <section className="mb-8">
                                         <div className="flex items-center justify-between mb-4">
                                             <EditableTextBlock
@@ -401,23 +469,31 @@ ${customSections ? `\n\n${customSections}` : ''}
                                             />
                                         </div>
                                         <ul className="space-y-3">
-                                            {meeting.detailedSummary.actionItems.map((item, i) => (
-                                                <li key={i} className="flex items-start gap-3 group">
+                                            {supplementalActionItems.map(({ item, sourceIndex }) => (
+                                                <li key={`action-${sourceIndex}-${item}`} className="flex items-start gap-3 group">
                                                     <div className="mt-2 w-1.5 h-1.5 rounded-full bg-text-secondary group-hover:bg-blue-500 transition-colors shrink-0" />
                                                     <div className="flex-1">
                                                         <EditableTextBlock
                                                             initialValue={item}
-                                                            onSave={(val) => handleActionItemSave(i, val)}
+                                                            onSave={(val) => handleActionItemSave(sourceIndex, val)}
                                                             tagName="p"
                                                             className="text-sm text-text-secondary leading-relaxed -ml-2 px-2 rounded-sm transition-colors"
                                                             placeholder="Type an action item..."
-                                                            onEnter={() => {
-                                                                const newItems = [...(meeting.detailedSummary?.actionItems || [])];
-                                                                newItems.splice(i + 1, 0, "");
+                                                            autoFocus={pendingSummaryFocus?.kind === 'action' && pendingSummaryFocus.index === sourceIndex}
+                                                            onEnter={(currentValue) => {
+                                                                const newIndex = sourceIndex + 1;
                                                                 setMeeting(prev => ({
                                                                     ...prev,
-                                                                    detailedSummary: { ...prev.detailedSummary!, actionItems: newItems }
+                                                                    detailedSummary: {
+                                                                        ...prev.detailedSummary!,
+                                                                        actionItems: insertEditableSummaryItemAfter(
+                                                                            prev.detailedSummary?.actionItems,
+                                                                            sourceIndex,
+                                                                            currentValue,
+                                                                        ),
+                                                                    }
                                                                 }));
+                                                                setPendingSummaryFocus({ kind: 'action', index: newIndex });
                                                             }}
                                                         />
                                                     </div>
@@ -428,7 +504,7 @@ ${customSections ? `\n\n${customSections}` : ''}
                                 )}
 
                                 {/* Key Points - Only show if there are items */}
-                                {meeting.detailedSummary?.keyPoints && meeting.detailedSummary.keyPoints.length > 0 && (
+                                {supplementalKeyPoints.length > 0 && (
                                     <section>
                                         <div className="flex items-center justify-between mb-4">
                                             <EditableTextBlock
@@ -446,23 +522,31 @@ ${customSections ? `\n\n${customSections}` : ''}
                                             />
                                         </div>
                                         <ul className="space-y-3">
-                                            {meeting.detailedSummary.keyPoints.map((item, i) => (
-                                                <li key={i} className="flex items-start gap-3 group">
+                                            {supplementalKeyPoints.map(({ item, sourceIndex }) => (
+                                                <li key={`key-point-${sourceIndex}-${item}`} className="flex items-start gap-3 group">
                                                     <div className="mt-2 w-1.5 h-1.5 rounded-full bg-text-secondary group-hover:bg-purple-500 transition-colors shrink-0" />
                                                     <div className="flex-1">
                                                         <EditableTextBlock
                                                             initialValue={item}
-                                                            onSave={(val) => handleKeyPointSave(i, val)}
+                                                            onSave={(val) => handleKeyPointSave(sourceIndex, val)}
                                                             tagName="p"
                                                             className="text-sm text-text-secondary leading-relaxed -ml-2 px-2 rounded-sm transition-colors"
                                                             placeholder="Type a key point..."
-                                                            onEnter={() => {
-                                                                const newItems = [...(meeting.detailedSummary?.keyPoints || [])];
-                                                                newItems.splice(i + 1, 0, "");
+                                                            autoFocus={pendingSummaryFocus?.kind === 'keyPoint' && pendingSummaryFocus.index === sourceIndex}
+                                                            onEnter={(currentValue) => {
+                                                                const newIndex = sourceIndex + 1;
                                                                 setMeeting(prev => ({
                                                                     ...prev,
-                                                                    detailedSummary: { ...prev.detailedSummary!, keyPoints: newItems }
+                                                                    detailedSummary: {
+                                                                        ...prev.detailedSummary!,
+                                                                        keyPoints: insertEditableSummaryItemAfter(
+                                                                            prev.detailedSummary?.keyPoints,
+                                                                            sourceIndex,
+                                                                            currentValue,
+                                                                        ),
+                                                                    }
                                                                 }));
+                                                                setPendingSummaryFocus({ kind: 'keyPoint', index: newIndex });
                                                             }}
                                                         />
                                                     </div>
@@ -479,13 +563,56 @@ ${customSections ? `\n\n${customSections}` : ''}
                                             section.bullets.length > 0 && (
                                                 <section key={si}>
                                                     <div className="flex items-center justify-between mb-4">
-                                                        <h2 className="text-lg font-semibold text-text-primary">{section.title}</h2>
+                                                        <EditableTextBlock
+                                                            initialValue={section.title}
+                                                            onSave={(value) => handleSectionTitleSave(si, value)}
+                                                            tagName="h2"
+                                                            className="text-lg font-semibold text-text-primary -ml-2 px-2 py-1 rounded-sm transition-colors"
+                                                            multiline={false}
+                                                        />
                                                     </div>
                                                     <ul className="space-y-3">
                                                         {section.bullets.map((bullet, bi) => (
-                                                            <li key={bi} className="flex items-start gap-3 group">
+                                                            <li key={`section-${si}-${bi}-${bullet}`} className="flex items-start gap-3 group">
                                                                 <div className="mt-2 w-1.5 h-1.5 rounded-full bg-text-secondary shrink-0" />
-                                                                <p className="text-sm text-text-secondary leading-relaxed">{bullet}</p>
+                                                                <div className="flex-1">
+                                                                    <EditableTextBlock
+                                                                        initialValue={bullet}
+                                                                        onSave={(value) => handleSectionBulletSave(si, bi, value)}
+                                                                        tagName="p"
+                                                                        className="text-sm text-text-secondary leading-relaxed -ml-2 px-2 rounded-sm transition-colors"
+                                                                        placeholder="Type a summary point..."
+                                                                        autoFocus={
+                                                                            pendingSummaryFocus?.kind === 'section'
+                                                                            && pendingSummaryFocus.sectionIndex === si
+                                                                            && pendingSummaryFocus.bulletIndex === bi
+                                                                        }
+                                                                        onEnter={(currentValue) => {
+                                                                            setMeeting(prev => ({
+                                                                                ...prev,
+                                                                                detailedSummary: {
+                                                                                    ...prev.detailedSummary!,
+                                                                                    sections: (prev.detailedSummary?.sections || []).map((candidate, index) => {
+                                                                                        if (index !== si) return candidate;
+                                                                                        return {
+                                                                                            ...candidate,
+                                                                                            bullets: insertEditableSummaryItemAfter(
+                                                                                                candidate.bullets,
+                                                                                                bi,
+                                                                                                currentValue,
+                                                                                            ),
+                                                                                        };
+                                                                                    }),
+                                                                                },
+                                                                            }));
+                                                                            setPendingSummaryFocus({
+                                                                                kind: 'section',
+                                                                                sectionIndex: si,
+                                                                                bulletIndex: bi + 1,
+                                                                            });
+                                                                        }}
+                                                                    />
+                                                                </div>
                                                             </li>
                                                         ))}
                                                     </ul>

@@ -1,3 +1,5 @@
+import type { LiveActionErrorPayload, LiveActionRequest } from './liveActions'
+
 export type CopilotFeedbackRating = 'useful' | 'too_early' | 'not_relevant' | 'already_discussed'
 
 export interface CopilotDecisionPayload {
@@ -236,13 +238,13 @@ export interface ElectronAPI {
 
   // Intelligence Mode IPC
   generateAssist: () => Promise<{ insight: string | null }>
-  generateWhatToSay: (question?: string, imagePaths?: string[]) => Promise<{ answer: string | null; question?: string; error?: string }>
-  generateClarify: () => Promise<{ clarification: string | null }>
-  generateCodeHint: (imagePaths?: string[], problemStatement?: string) => Promise<{ hint: string | null }>
-  generateBrainstorm: (imagePaths?: string[], problemStatement?: string) => Promise<{ script: string | null }>
-  generateFollowUp: (intent: string, userRequest?: string) => Promise<{ refined: string | null; intent: string }>
-  generateFollowUpQuestions: () => Promise<{ questions: string | null }>
-  generateRecap: () => Promise<{ summary: string | null }>
+  generateWhatToSay: (request: LiveActionRequest) => Promise<{ actionId: string; answer: string | null; question?: string; error?: string }>
+  generateClarify: (request?: LiveActionRequest) => Promise<{ actionId: string; clarification: string | null }>
+  generateCodeHint: (request?: LiveActionRequest) => Promise<{ actionId: string; hint: string | null }>
+  generateBrainstorm: (request?: LiveActionRequest) => Promise<{ actionId: string; script: string | null }>
+  generateFollowUp: (request: LiveActionRequest) => Promise<{ actionId: string; refined: string | null; intent: string }>
+  generateFollowUpQuestions: (request?: LiveActionRequest) => Promise<{ actionId: string; questions: string | null }>
+  generateRecap: (request?: LiveActionRequest) => Promise<{ actionId: string; summary: string | null }>
   submitManualQuestion: (question: string) => Promise<{ answer: string | null; question: string }>
   getIntelligenceContext: () => Promise<{ context: string; lastAssistantMessage: string | null; activeMode: string }>
   resetIntelligence: () => Promise<{ success: boolean; error?: string }>
@@ -317,20 +319,21 @@ export interface ElectronAPI {
 
   // Intelligence Mode Events
   onIntelligenceAssistUpdate: (callback: (data: { insight: string }) => void) => () => void
-  onIntelligenceSuggestedAnswerToken: (callback: (data: { token: string; question: string; confidence: number }) => void) => () => void
-  onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number }) => void) => () => void
-  onIntelligenceRefinedAnswerToken: (callback: (data: { token: string; intent: string }) => void) => () => void
-  onIntelligenceRefinedAnswer: (callback: (data: { answer: string; intent: string }) => void) => () => void
-  onIntelligenceFollowUpQuestionsUpdate: (callback: (data: { questions: string }) => void) => () => void
-  onIntelligenceFollowUpQuestionsToken: (callback: (data: { token: string }) => void) => () => void
-  onIntelligenceRecap: (callback: (data: { summary: string }) => void) => () => void
-  onIntelligenceRecapToken: (callback: (data: { token: string }) => void) => () => void
-  onIntelligenceClarify: (callback: (data: { clarification: string }) => void) => () => void
-  onIntelligenceClarifyToken: (callback: (data: { token: string }) => void) => () => void
+  onIntelligenceSuggestedAnswerToken: (callback: (data: { token: string; question: string; confidence: number; actionId: string }) => void) => () => void
+  onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number; actionId: string }) => void) => () => void
+  onIntelligenceRefinedAnswerToken: (callback: (data: { token: string; intent: string; actionId: string }) => void) => () => void
+  onIntelligenceRefinedAnswer: (callback: (data: { answer: string; intent: string; actionId: string }) => void) => () => void
+  onIntelligenceFollowUpQuestionsUpdate: (callback: (data: { questions: string; actionId: string }) => void) => () => void
+  onIntelligenceFollowUpQuestionsToken: (callback: (data: { token: string; actionId: string }) => void) => () => void
+  onIntelligenceActionCancelled: (callback: (data: { mode: string; actionId: string }) => void) => () => void
+  onIntelligenceRecap: (callback: (data: { summary: string; actionId: string }) => void) => () => void
+  onIntelligenceRecapToken: (callback: (data: { token: string; actionId: string }) => void) => () => void
+  onIntelligenceClarify: (callback: (data: { clarification: string; actionId: string }) => void) => () => void
+  onIntelligenceClarifyToken: (callback: (data: { token: string; actionId: string }) => void) => () => void
   onIntelligenceManualStarted: (callback: () => void) => () => void
   onIntelligenceManualResult: (callback: (data: { answer: string; question: string }) => void) => () => void
   onIntelligenceModeChanged: (callback: (data: { mode: string }) => void) => () => void
-  onIntelligenceError: (callback: (data: { error: string, mode: string }) => void) => () => void;
+  onIntelligenceError: (callback: (data: LiveActionErrorPayload) => void) => () => void;
   onCopilotDecision: (callback: (data: CopilotDecisionPayload) => void) => () => void
   onCopilotSuggestion: (callback: (data: CopilotDecisionPayload) => void) => () => void
   onCopilotError: (callback: (data: { error: string }) => void) => () => void

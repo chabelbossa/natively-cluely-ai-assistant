@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const { execFileSync, spawnSync } = require('child_process');
 const Module = require('module');
 
@@ -50,12 +51,23 @@ function queryJson(sql) {
   if (!fs.existsSync(dbPath)) {
     throw new Error(`DB not found: ${dbPath}`);
   }
-  const output = execFileSync(
-    'sqlite3',
-    ['-readonly', '-cmd', '.timeout 5000', '-json', dbPath, sql],
-    { encoding: 'utf8' },
-  ).trim();
-  return output ? JSON.parse(output) : [];
+  let lastError;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const output = execFileSync(
+        'sqlite3',
+        ['-cmd', '.timeout 5000', '-json', `${pathToFileURL(dbPath).href}?mode=ro`, sql],
+        { encoding: 'utf8' },
+      ).trim();
+      return output ? JSON.parse(output) : [];
+    } catch (error) {
+      lastError = error;
+      const detail = `${error?.message || ''}\n${error?.stderr || ''}`;
+      if (!/unable to open database|database is (?:locked|busy)/i.test(detail) || attempt === 4) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200 * (attempt + 1));
+    }
+  }
+  throw lastError;
 }
 
 function getInstallTimestampMs() {
@@ -174,7 +186,16 @@ const postInstallMeetings = installTimestampMs === null
       order by start_time desc
     `);
 const rows = queryJson(`
-  select ai.id, ai.meeting_id, ai.type, ai.user_query, ai.ai_response, ai.metadata_json
+  select
+    ai.id,
+    ai.meeting_id,
+    ai.type,
+    json_object(
+      'action', json_extract(ai.metadata_json, '$.action'),
+      'selectedSegments', json_extract(ai.metadata_json, '$.selectedSegments'),
+      'actionTarget', json_extract(ai.metadata_json, '$.actionTarget'),
+      'interlocutorFocus', json_extract(ai.metadata_json, '$.interlocutorFocus')
+    ) as metadata_json
   from ai_interactions ai
   ${sinceInstallOnly ? 'join meetings m on m.id = ai.meeting_id' : ''}
   where ai.metadata_json is not null and ai.metadata_json != ''

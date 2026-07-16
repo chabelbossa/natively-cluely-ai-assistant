@@ -7,7 +7,7 @@ interface EditableTextBlockProps {
     className?: string;
     placeholder?: string;
     multiline?: boolean;
-    onEnter?: () => void;
+    onEnter?: (currentValue: string) => void;
     autoFocus?: boolean;
 }
 
@@ -95,8 +95,9 @@ const EditableTextBlock: React.FC<EditableTextBlockProps> = ({
                     // Double-Enter detected!
                     e.preventDefault();
                     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
-                    if (contentRef.current) handleSave(contentRef.current.innerText);
-                    onEnter();
+                    const currentValue = contentRef.current?.innerText || localValue;
+                    handleSave(currentValue);
+                    onEnter(currentValue.trim());
                     lastEnterTime.current = 0; // Reset
                 } else {
                     // First Enter: Allow default (newline)

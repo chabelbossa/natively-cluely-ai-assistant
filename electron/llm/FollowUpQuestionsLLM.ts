@@ -1,5 +1,6 @@
 import { LLMHelper } from "../LLMHelper";
 import { UNIVERSAL_FOLLOW_UP_QUESTIONS_PROMPT } from "./prompts";
+import { isUserVisibleLiveLlmError } from "./LiveLlmError";
 
 export class FollowUpQuestionsLLM {
     private llmHelper: LLMHelper;
@@ -25,6 +26,7 @@ export class FollowUpQuestionsLLM {
             yield* this.llmHelper.streamChat(context, undefined, undefined, UNIVERSAL_FOLLOW_UP_QUESTIONS_PROMPT);
         } catch (e) {
             console.error("[FollowUpQuestionsLLM] Stream Failed:", e);
+            if (isUserVisibleLiveLlmError(e)) throw e;
         }
     }
 }

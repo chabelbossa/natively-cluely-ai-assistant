@@ -7,6 +7,7 @@
 
 import type { CodexAuthRouter, RouterErrorResult } from "./CodexAuthRouter";
 import type { CodexAccount } from "../types/codex-multi-auth";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 const RESPONSES_API_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_BETA_HEADER = "responses=2026-02-06";
@@ -22,21 +23,74 @@ export interface CodexResponsesParams {
   reasoning?: { effort?: "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" };
 }
 
-class CodexApiError extends Error {
-  public status: number;
+export type CodexApiErrorCode =
+  | "fast_unavailable"
+  | "auth_failure"
+  | "rate_limited"
+  | "server_unavailable"
+  | "request_failed";
 
-  constructor(status: number, message: string) {
+export interface CodexServiceTierStatus {
+  requested: "fast";
+  used: "fast" | "standard";
+  fallback: boolean;
+  model: string;
+  timestamp: number;
+}
+
+export class CodexApiError extends Error {
+  public status: number;
+  public code: CodexApiErrorCode;
+  public model?: string;
+  public accountAlias?: string;
+  public serviceTier?: string;
+  public detail?: string;
+
+  constructor(
+    status: number,
+    message: string,
+    metadata: {
+      code?: CodexApiErrorCode;
+      model?: string;
+      accountAlias?: string;
+      serviceTier?: string;
+      detail?: string;
+    } = {},
+  ) {
     super(`Codex API error ${status}: ${message}`);
     this.name = "CodexApiError";
     this.status = status;
+    this.code = metadata.code || "request_failed";
+    this.model = metadata.model;
+    this.accountAlias = metadata.accountAlias;
+    this.serviceTier = metadata.serviceTier;
+    this.detail = metadata.detail;
   }
 }
 
 export class CodexResponsesClient {
   private router: CodexAuthRouter;
+  private lastServiceTierStatus: CodexServiceTierStatus | null = null;
+  private serviceTierTracking = new AsyncLocalStorage<{ status: CodexServiceTierStatus | null }>();
 
   constructor(router: CodexAuthRouter) {
     this.router = router;
+  }
+
+  getLastServiceTierStatus(): CodexServiceTierStatus | null {
+    const tracked = this.serviceTierTracking.getStore();
+    const status = tracked ? tracked.status : this.lastServiceTierStatus;
+    return status ? { ...status } : null;
+  }
+
+  runWithServiceTierTracking<T>(operation: () => T): T {
+    return this.serviceTierTracking.run({ status: null }, operation);
+  }
+
+  private recordServiceTierStatus(status: CodexServiceTierStatus): void {
+    this.lastServiceTierStatus = status;
+    const tracked = this.serviceTierTracking.getStore();
+    if (tracked) tracked.status = status;
   }
 
   // =========================================================================
@@ -141,11 +195,65 @@ export class CodexResponsesClient {
   ): Promise<Response> {
     const fastResponse = await this.callResponsesApi(account, params, DEFAULT_SERVICE_TIER);
     if (fastResponse.ok) {
+      this.recordServiceTierStatus({
+        requested: "fast",
+        used: "fast",
+        fallback: false,
+        model: params.model,
+        timestamp: Date.now(),
+      });
       return fastResponse;
     }
 
     const message = await fastResponse.text().catch(() => "");
-    throw new CodexApiError(fastResponse.status, message);
+    const lowered = message.toLowerCase();
+    const fastRejected = (fastResponse.status === 400 || fastResponse.status === 422)
+      && (lowered.includes("service_tier") || lowered.includes("service tier") || lowered.includes("fast mode"));
+    if (fastRejected) {
+      console.warn(
+        `[CodexResponsesClient] Fast unavailable for ${params.model} on ${account.alias}; retrying explicitly in Standard mode.`,
+      );
+      const standardResponse = await this.callResponsesApi(account, params);
+      this.recordServiceTierStatus({
+        requested: "fast",
+        used: "standard",
+        fallback: true,
+        model: params.model,
+        timestamp: Date.now(),
+      });
+      if (standardResponse.ok) return standardResponse;
+
+      const standardMessage = await standardResponse.text().catch(() => "");
+      const standardCode: CodexApiErrorCode = standardResponse.status === 401 || standardResponse.status === 403
+        ? "auth_failure"
+        : standardResponse.status === 429
+          ? "rate_limited"
+          : standardResponse.status >= 500
+            ? "server_unavailable"
+            : "request_failed";
+      throw new CodexApiError(standardResponse.status, standardMessage, {
+        code: standardCode,
+        model: params.model,
+        accountAlias: account.alias,
+        serviceTier: "standard",
+        detail: `Fast rejection: ${message}\nStandard rejection: ${standardMessage}`,
+      });
+    }
+
+    const code: CodexApiErrorCode = fastResponse.status === 401 || fastResponse.status === 403
+        ? "auth_failure"
+        : fastResponse.status === 429
+          ? "rate_limited"
+          : fastResponse.status >= 500
+            ? "server_unavailable"
+            : "request_failed";
+    throw new CodexApiError(fastResponse.status, message, {
+      code,
+      model: params.model,
+      accountAlias: account.alias,
+      serviceTier: DEFAULT_SERVICE_TIER,
+      detail: message,
+    });
   }
 
   private async parseResponseText(res: Response): Promise<string> {
@@ -342,10 +450,12 @@ export class CodexResponsesClient {
   ): Promise<T> {
     const attemptedAliases = new Set<string>();
     let lastError: RouterErrorResult | null = null;
+    let lastStructuredError: Error | null = null;
 
     for (let attempt = 0; attempt < MAX_ROTATION_ATTEMPTS; attempt++) {
       const selection = this.router.selectAccount();
       if (!selection) {
+        if (lastStructuredError) throw lastStructuredError;
         throw new Error(
           lastError
             ? `All Codex accounts exhausted. Last error: ${lastError.message}`
@@ -371,6 +481,7 @@ export class CodexResponsesClient {
         );
         return result;
       } catch (error: any) {
+        if (error instanceof Error) lastStructuredError = error;
         const status = error.status ?? (error.message?.includes("429") ? 429 : 0);
         const message = error.message || String(error);
 
@@ -402,6 +513,8 @@ export class CodexResponsesClient {
         throw error;
       }
     }
+
+    if (lastStructuredError) throw lastStructuredError;
 
     throw new Error(
       lastError

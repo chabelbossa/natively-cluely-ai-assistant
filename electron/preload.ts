@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron"
+import type { LiveActionErrorPayload, LiveActionRequest } from "../src/types/liveActions"
 
 type CopilotFeedbackRating = 'useful' | 'too_early' | 'not_relevant' | 'already_discussed'
 
@@ -195,9 +196,13 @@ interface ElectronAPI {
 
   // Intelligence Mode IPC
   generateAssist: () => Promise<{ insight: string | null }>
-  generateWhatToSay: (question?: string, imagePaths?: string[]) => Promise<{ answer: string | null; question?: string; error?: string }>
-  generateFollowUp: (intent: string, userRequest?: string) => Promise<{ refined: string | null; intent: string }>
-  generateRecap: () => Promise<{ summary: string | null }>
+  generateWhatToSay: (request: LiveActionRequest) => Promise<{ actionId: string; answer: string | null; question?: string; error?: string }>
+  generateClarify: (request?: LiveActionRequest) => Promise<{ actionId: string; clarification: string | null }>
+  generateCodeHint: (request?: LiveActionRequest) => Promise<{ actionId: string; hint: string | null }>
+  generateBrainstorm: (request?: LiveActionRequest) => Promise<{ actionId: string; script: string | null }>
+  generateFollowUp: (request: LiveActionRequest) => Promise<{ actionId: string; refined: string | null; intent: string }>
+  generateFollowUpQuestions: (request?: LiveActionRequest) => Promise<{ actionId: string; questions: string | null }>
+  generateRecap: (request?: LiveActionRequest) => Promise<{ actionId: string; summary: string | null }>
   submitManualQuestion: (question: string) => Promise<{ answer: string | null; question: string }>
   getIntelligenceContext: () => Promise<{ context: string; lastAssistantMessage: string | null; activeMode: string }>
   resetIntelligence: () => Promise<{ success: boolean; error?: string }>
@@ -221,15 +226,21 @@ interface ElectronAPI {
 
   // Intelligence Mode Events
   onIntelligenceAssistUpdate: (callback: (data: { insight: string }) => void) => () => void
-  onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number }) => void) => () => void
-  onIntelligenceRefinedAnswer: (callback: (data: { answer: string; intent: string }) => void) => () => void
-  onIntelligenceRecap: (callback: (data: { summary: string }) => void) => () => void
-  onIntelligenceClarify: (callback: (data: { clarification: string }) => void) => () => void
-  onIntelligenceClarifyToken: (callback: (data: { token: string }) => void) => () => void
+  onIntelligenceSuggestedAnswerToken: (callback: (data: { token: string; question: string; confidence: number; actionId: string }) => void) => () => void
+  onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number; actionId: string }) => void) => () => void
+  onIntelligenceRefinedAnswerToken: (callback: (data: { token: string; intent: string; actionId: string }) => void) => () => void
+  onIntelligenceRefinedAnswer: (callback: (data: { answer: string; intent: string; actionId: string }) => void) => () => void
+  onIntelligenceRecapToken: (callback: (data: { token: string; actionId: string }) => void) => () => void
+  onIntelligenceRecap: (callback: (data: { summary: string; actionId: string }) => void) => () => void
+  onIntelligenceClarify: (callback: (data: { clarification: string; actionId: string }) => void) => () => void
+  onIntelligenceClarifyToken: (callback: (data: { token: string; actionId: string }) => void) => () => void
+  onIntelligenceFollowUpQuestionsToken: (callback: (data: { token: string; actionId: string }) => void) => () => void
+  onIntelligenceFollowUpQuestionsUpdate: (callback: (data: { questions: string; actionId: string }) => void) => () => void
+  onIntelligenceActionCancelled: (callback: (data: { mode: string; actionId: string }) => void) => () => void
   onIntelligenceManualStarted: (callback: () => void) => () => void
   onIntelligenceManualResult: (callback: (data: { answer: string; question: string }) => void) => () => void
   onIntelligenceModeChanged: (callback: (data: { mode: string }) => void) => () => void
-  onIntelligenceError: (callback: (data: { error: string; mode: string }) => void) => () => void
+  onIntelligenceError: (callback: (data: LiveActionErrorPayload) => void) => () => void
   onCopilotDecision: (callback: (data: CopilotDecisionPayload) => void) => () => void
   onCopilotSuggestion: (callback: (data: CopilotDecisionPayload) => void) => () => void
   onCopilotError: (callback: (data: { error: string }) => void) => () => void
@@ -835,13 +846,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   // Intelligence Mode IPC
   generateAssist: () => ipcRenderer.invoke("generate-assist"),
-  generateWhatToSay: (question?: string, imagePaths?: string[]) => ipcRenderer.invoke("generate-what-to-say", question, imagePaths),
-  generateClarify: () => ipcRenderer.invoke("generate-clarify"),
-  generateCodeHint: (imagePaths?: string[], problemStatement?: string) => ipcRenderer.invoke("generate-code-hint", imagePaths, problemStatement),
-  generateBrainstorm: (imagePaths?: string[], problemStatement?: string) => ipcRenderer.invoke("generate-brainstorm", imagePaths, problemStatement),
-  generateFollowUp: (intent: string, userRequest?: string) => ipcRenderer.invoke("generate-follow-up", intent, userRequest),
-  generateFollowUpQuestions: () => ipcRenderer.invoke("generate-follow-up-questions"),
-  generateRecap: () => ipcRenderer.invoke("generate-recap"),
+  generateWhatToSay: (request: LiveActionRequest) => ipcRenderer.invoke("generate-what-to-say", request),
+  generateClarify: (request?: LiveActionRequest) => ipcRenderer.invoke("generate-clarify", request),
+  generateCodeHint: (request?: LiveActionRequest) => ipcRenderer.invoke("generate-code-hint", request),
+  generateBrainstorm: (request?: LiveActionRequest) => ipcRenderer.invoke("generate-brainstorm", request),
+  generateFollowUp: (request: LiveActionRequest) => ipcRenderer.invoke("generate-follow-up", request),
+  generateFollowUpQuestions: (request?: LiveActionRequest) => ipcRenderer.invoke("generate-follow-up-questions", request),
+  generateRecap: (request?: LiveActionRequest) => ipcRenderer.invoke("generate-recap", request),
   submitManualQuestion: (question: string) => ipcRenderer.invoke("submit-manual-question", question),
   getIntelligenceContext: () => ipcRenderer.invoke("get-intelligence-context"),
   resetIntelligence: () => ipcRenderer.invoke("reset-intelligence"),
@@ -898,74 +909,81 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener("intelligence-assist-update", subscription)
     }
   },
-  onIntelligenceSuggestedAnswerToken: (callback: (data: { token: string; question: string; confidence: number }) => void) => {
+  onIntelligenceSuggestedAnswerToken: (callback: (data: { token: string; question: string; confidence: number; actionId: string }) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-suggested-answer-token", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-suggested-answer-token", subscription)
     }
   },
-  onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number }) => void) => {
+  onIntelligenceSuggestedAnswer: (callback: (data: { answer: string; question: string; confidence: number; actionId: string }) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-suggested-answer", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-suggested-answer", subscription)
     }
   },
-  onIntelligenceRefinedAnswerToken: (callback: (data: { token: string; intent: string }) => void) => {
+  onIntelligenceRefinedAnswerToken: (callback: (data: { token: string; intent: string; actionId: string }) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-refined-answer-token", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-refined-answer-token", subscription)
     }
   },
-  onIntelligenceRefinedAnswer: (callback: (data: { answer: string; intent: string }) => void) => {
+  onIntelligenceRefinedAnswer: (callback: (data: { answer: string; intent: string; actionId: string }) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-refined-answer", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-refined-answer", subscription)
     }
   },
-  onIntelligenceRecapToken: (callback: (data: { token: string }) => void) => {
+  onIntelligenceRecapToken: (callback: (data: { token: string; actionId: string }) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-recap-token", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-recap-token", subscription)
     }
   },
-  onIntelligenceRecap: (callback: (data: { summary: string }) => void) => {
+  onIntelligenceRecap: (callback: (data: { summary: string; actionId: string }) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-recap", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-recap", subscription)
     }
   },
-  onIntelligenceClarifyToken: (callback: (data: { token: string }) => void) => {
+  onIntelligenceClarifyToken: (callback: (data: { token: string; actionId: string }) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-clarify-token", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-clarify-token", subscription)
     }
   },
-  onIntelligenceClarify: (callback: (data: { clarification: string }) => void) => {
+  onIntelligenceClarify: (callback: (data: { clarification: string; actionId: string }) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-clarify", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-clarify", subscription)
     }
   },
-  onIntelligenceFollowUpQuestionsToken: (callback: (data: { token: string }) => void) => {
+  onIntelligenceFollowUpQuestionsToken: (callback: (data: { token: string; actionId: string }) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-follow-up-questions-token", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-follow-up-questions-token", subscription)
     }
   },
-  onIntelligenceFollowUpQuestionsUpdate: (callback: (data: { questions: string }) => void) => {
+  onIntelligenceFollowUpQuestionsUpdate: (callback: (data: { questions: string; actionId: string }) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-follow-up-questions-update", subscription)
     return () => {
       ipcRenderer.removeListener("intelligence-follow-up-questions-update", subscription)
+    }
+  },
+  onIntelligenceActionCancelled: (callback: (data: { mode: string; actionId: string }) => void) => {
+    const subscription = (_: any, data: any) => callback(data)
+    ipcRenderer.on("intelligence-action-cancelled", subscription)
+    return () => {
+      ipcRenderer.removeListener("intelligence-action-cancelled", subscription)
     }
   },
   onIntelligenceManualStarted: (callback: () => void) => {
@@ -989,7 +1007,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener("intelligence-mode-changed", subscription)
     }
   },
-  onIntelligenceError: (callback: (data: { error: string; mode: string }) => void) => {
+  onIntelligenceError: (callback: (data: LiveActionErrorPayload) => void) => {
     const subscription = (_: any, data: any) => callback(data)
     ipcRenderer.on("intelligence-error", subscription)
     return () => {

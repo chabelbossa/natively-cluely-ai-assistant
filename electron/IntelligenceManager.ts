@@ -30,6 +30,7 @@ export const GEMINI_FLASH_MODEL = "gemini-3.1-flash-lite-preview";
  * - MeetingPersistence: meeting stop/save/recovery
  */
 export class IntelligenceManager extends EventEmitter {
+    private llmHelper: LLMHelper;
     private session: SessionTracker;
     private engine: IntelligenceEngine;
     private persistence: MeetingPersistence;
@@ -37,6 +38,7 @@ export class IntelligenceManager extends EventEmitter {
 
     constructor(llmHelper: LLMHelper) {
         super();
+        this.llmHelper = llmHelper;
         this.session = new SessionTracker();
         this.copilot = new CopilotDecisionEngine(llmHelper);
         this.engine = new IntelligenceEngine(llmHelper, this.session, () => this.copilot.getMeetingStateContextBlock());
@@ -56,6 +58,7 @@ export class IntelligenceManager extends EventEmitter {
             'refined_answer', 'refined_answer_token',
             'recap', 'recap_token', 'clarify', 'clarify_token',
             'follow_up_questions_update', 'follow_up_questions_token',
+            'action_cancelled',
             'manual_answer_started', 'manual_answer_result',
             'mode_changed', 'error'
         ];
@@ -96,7 +99,7 @@ export class IntelligenceManager extends EventEmitter {
             this.session.addTranscript(segment);
         } else {
             // Let the engine handle transcript + refinement detection
-            this.engine.handleTranscript(segment, false);
+            this.llmHelper.runWithCodexServiceTierTracking(() => this.engine.handleTranscript(segment, false));
             this.processCopilotTranscript(segment);
         }
     }
@@ -134,7 +137,7 @@ export class IntelligenceManager extends EventEmitter {
     // ============================================
 
     handleTranscript(segment: import('./SessionTracker').TranscriptSegment): void {
-        this.engine.handleTranscript(segment);
+        this.llmHelper.runWithCodexServiceTierTracking(() => this.engine.handleTranscript(segment));
         this.processCopilotTranscript(segment);
     }
 
@@ -149,7 +152,9 @@ export class IntelligenceManager extends EventEmitter {
     }
 
     async handleSuggestionTrigger(trigger: import('./SessionTracker').SuggestionTrigger): Promise<void> {
-        return this.engine.handleSuggestionTrigger(trigger);
+        return this.llmHelper.runWithCodexServiceTierTracking(
+            () => this.engine.handleSuggestionTrigger(trigger),
+        );
     }
 
     submitCopilotFeedback(feedback: CopilotFeedback): void {
@@ -172,32 +177,40 @@ export class IntelligenceManager extends EventEmitter {
         return this.engine.runAssistMode();
     }
 
-    async runWhatShouldISay(question?: string, confidence?: number, imagePaths?: string[]): Promise<string | null> {
-        return this.engine.runWhatShouldISay(question, confidence, imagePaths);
+    async runWhatShouldISay(question?: string, confidence?: number, imagePaths?: string[], actionId?: string): Promise<string | null> {
+        return this.llmHelper.runWithCodexServiceTierTracking(
+            () => this.engine.runWhatShouldISay(question, confidence, imagePaths, actionId),
+        );
     }
 
-    async runFollowUp(intent: string, userRequest?: string): Promise<string | null> {
-        return this.engine.runFollowUp(intent, userRequest);
+    async runFollowUp(intent: string, userRequest?: string, actionId?: string): Promise<string | null> {
+        return this.llmHelper.runWithCodexServiceTierTracking(
+            () => this.engine.runFollowUp(intent, userRequest, actionId),
+        );
     }
 
-    async runRecap(): Promise<string | null> {
-        return this.engine.runRecap();
+    async runRecap(actionId?: string): Promise<string | null> {
+        return this.llmHelper.runWithCodexServiceTierTracking(() => this.engine.runRecap(actionId));
     }
 
-    async runClarify(): Promise<string | null> {
-        return this.engine.runClarify();
+    async runClarify(actionId?: string): Promise<string | null> {
+        return this.llmHelper.runWithCodexServiceTierTracking(() => this.engine.runClarify(actionId));
     }
 
-    async runFollowUpQuestions(): Promise<string | null> {
-        return this.engine.runFollowUpQuestions();
+    async runFollowUpQuestions(actionId?: string): Promise<string | null> {
+        return this.llmHelper.runWithCodexServiceTierTracking(
+            () => this.engine.runFollowUpQuestions(actionId),
+        );
     }
 
     async runManualAnswer(question: string): Promise<string | null> {
         return this.engine.runManualAnswer(question);
     }
 
-    async runCodeHint(imagePaths?: string[], problemStatement?: string): Promise<string | null> {
-        return this.engine.runCodeHint(imagePaths, problemStatement);
+    async runCodeHint(imagePaths?: string[], problemStatement?: string, actionId?: string): Promise<string | null> {
+        return this.llmHelper.runWithCodexServiceTierTracking(
+            () => this.engine.runCodeHint(imagePaths, problemStatement, actionId),
+        );
     }
 
     setCodingQuestion(question: string, source: 'screenshot' | 'transcript'): void {
@@ -212,8 +225,10 @@ export class IntelligenceManager extends EventEmitter {
         this.session.clearCodingQuestion();
     }
 
-    async runBrainstorm(imagePaths?: string[], problemStatement?: string): Promise<string | null> {
-        return this.engine.runBrainstorm(imagePaths, problemStatement);
+    async runBrainstorm(imagePaths?: string[], problemStatement?: string, actionId?: string): Promise<string | null> {
+        return this.llmHelper.runWithCodexServiceTierTracking(
+            () => this.engine.runBrainstorm(imagePaths, problemStatement, actionId),
+        );
     }
 
     // ============================================

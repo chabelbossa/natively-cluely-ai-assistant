@@ -3,6 +3,7 @@
 // Extracted from IntelligenceManager to decouple LLM logic from state management.
 
 import { EventEmitter } from 'events';
+import { randomUUID } from 'crypto';
 import { LLMHelper } from './LLMHelper';
 import { SessionTracker, TranscriptSegment, SuggestionTrigger, ContextItem } from './SessionTracker';
 import { ModesManager } from './services/ModesManager';
@@ -66,20 +67,26 @@ interface LiveActionQualityOptions {
 // Events emitted by IntelligenceEngine
 export interface IntelligenceModeEvents {
     'assist_update': (insight: string) => void;
-    'suggested_answer': (answer: string, question: string, confidence: number) => void;
-    'suggested_answer_token': (token: string, question: string, confidence: number) => void;
-    'refined_answer': (answer: string, intent: string) => void;
-    'refined_answer_token': (token: string, intent: string) => void;
-    'recap': (summary: string) => void;
-    'recap_token': (token: string) => void;
-    'clarify': (clarification: string) => void;
-    'clarify_token': (token: string) => void;
-    'follow_up_questions_update': (questions: string) => void;
-    'follow_up_questions_token': (token: string) => void;
+    'suggested_answer': (answer: string, question: string, confidence: number, actionId: string) => void;
+    'suggested_answer_token': (token: string, question: string, confidence: number, actionId: string) => void;
+    'refined_answer': (answer: string, intent: string, actionId: string) => void;
+    'refined_answer_token': (token: string, intent: string, actionId: string) => void;
+    'recap': (summary: string, actionId: string) => void;
+    'recap_token': (token: string, actionId: string) => void;
+    'clarify': (clarification: string, actionId: string) => void;
+    'clarify_token': (token: string, actionId: string) => void;
+    'follow_up_questions_update': (questions: string, actionId: string) => void;
+    'follow_up_questions_token': (token: string, actionId: string) => void;
+    'action_cancelled': (mode: IntelligenceMode, actionId: string) => void;
     'manual_answer_started': () => void;
     'manual_answer_result': (answer: string, question: string) => void;
     'mode_changed': (mode: IntelligenceMode) => void;
-    'error': (error: Error, mode: IntelligenceMode) => void;
+    'error': (error: Error, mode: IntelligenceMode, actionId?: string) => void;
+}
+
+function resolveLiveActionId(actionId?: string): string {
+    const normalized = String(actionId || '').trim();
+    return normalized.length > 0 && normalized.length <= 128 ? normalized : randomUUID();
 }
 
 export class IntelligenceEngine extends EventEmitter {
@@ -291,6 +298,13 @@ export class IntelligenceEngine extends EventEmitter {
                     setTimeout(() => resolve({ type: 'timeout' }), remainingMs),
                 ),
             ]);
+
+            // A reset or a newer action may arrive while stream.next() is pending.
+            // Never accept that late token/done signal after ownership changed.
+            if (!this.isGenerationCurrent(mode, generationId)) {
+                this.cancelActionStream(stream);
+                return { text, aborted: true, timedOut: false, latencyMs: Date.now() - startedAt, firstTokenMs };
+            }
 
             if (result.type === 'timeout') {
                 this.cancelActionStream(stream);
@@ -1087,13 +1101,15 @@ Goal:
      * Manual trigger - uses clean transcript pipeline for question inference
      * NEVER returns null - always provides a usable response
      */
-    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[]): Promise<string | null> {
+    async runWhatShouldISay(question?: string, confidence: number = 0.8, imagePaths?: string[], actionId?: string): Promise<string | null> {
+        const resolvedActionId = resolveLiveActionId(actionId);
         const now = Date.now();
 
         // Bypass cooldown when the user explicitly attached images (capture-and-process intent).
         // The cooldown exists to debounce auto-triggers, not explicit shortcuts with context.
         const hasImages = imagePaths && imagePaths.length > 0;
         if (!hasImages && now - this.lastTriggerTime < this.triggerCooldown) {
+            this.emit('action_cancelled', 'what_to_say', resolvedActionId);
             return null;
         }
 
@@ -1117,8 +1133,8 @@ Goal:
                 const answer = await this.answerLLM.generate(question || '', context);
                 if (answer) {
                     this.session.addAssistantMessage(answer);
-                    this.emit('suggested_answer', answer, question || 'inferred', confidence);
-                    this.recordActionResult('WHAT_TO_SAY', question || 'inferred', answer, { latencyMs: Date.now() - startedAt });
+                    this.emit('suggested_answer', answer, question || 'inferred', confidence, resolvedActionId);
+                    this.recordActionResult('WHAT_TO_SAY', question || 'inferred', answer, { latencyMs: Date.now() - startedAt, actionId: resolvedActionId });
                 }
                 this.setMode('idle');
                 return answer || "Could you repeat that? I want to make sure I address your question properly.";
@@ -1202,13 +1218,14 @@ Goal:
                 generationId,
                 this.liveActionTokenHandler(
                     'WHAT_TO_SAY',
-                    (token) => this.emit('suggested_answer_token', token, question || 'inferred', confidence),
+                    (token) => this.emit('suggested_answer_token', token, question || 'inferred', confidence, resolvedActionId),
                 ),
             );
             let fullAnswer = streamResult.text;
 
             if (streamResult.aborted) {
                 // Aborted mid-stream — don't update session or emit final event
+                this.emit('action_cancelled', 'what_to_say', resolvedActionId);
                 this.finishMode('what_to_say', generationId);
                 return null;
             }
@@ -1227,6 +1244,7 @@ Goal:
             fullAnswer = qualityResult.answer;
 
             if (!this.isGenerationCurrent('what_to_say', generationId)) {
+                this.emit('action_cancelled', 'what_to_say', resolvedActionId);
                 this.finishMode('what_to_say', generationId);
                 return null;
             }
@@ -1257,19 +1275,26 @@ Goal:
                 qualityReasons: qualityResult.review.reasons,
                 qualityRepaired: qualityResult.repaired,
                 fallback: streamResult.timedOut ? 'soft_timeout' : qualityResult.fallbackReason,
+                actionId: resolvedActionId,
             });
 
             // CQ-05 fix: only emit the "complete" event after a non-aborted stream.
             // The renderer already has all tokens — this is for metadata only (e.g. copying, history).
-            this.emit('suggested_answer', fullAnswer, question || 'What to Answer', confidence);
+            this.emit('suggested_answer', fullAnswer, question || 'What to Answer', confidence, resolvedActionId);
 
             this.finishMode('what_to_say', generationId);
             return fullAnswer;
 
         } catch (error) {
-            this.emit('error', error as Error, 'what_to_say');
+            const errorCode = String((error as { code?: string })?.code || 'generation_error');
+            this.recordActionResult('WHAT_TO_SAY', question || 'What to Answer', '', {
+                actionId: resolvedActionId,
+                error: (error as Error)?.message || String(error),
+                fallback: errorCode,
+            });
+            this.emit('error', error as Error, 'what_to_say', resolvedActionId);
             this.setMode('idle');
-            return "Could you repeat that? I want to make sure I address your question properly.";
+            throw error;
         }
     }
 
@@ -1277,21 +1302,22 @@ Goal:
      * MODE 3: Follow-Up (Refinement)
      * Modify the last assistant message
      */
-    async runFollowUp(intent: string, userRequest?: string): Promise<string | null> {
+    async runFollowUp(intent: string, userRequest?: string, actionId?: string): Promise<string | null> {
+        const resolvedActionId = resolveLiveActionId(actionId);
         console.log(`[IntelligenceEngine] runFollowUp called with intent: ${intent}`);
         const lastMsg = this.session.getLastAssistantMessage();
         if (!lastMsg) {
+            const error = new Error('No previous assistant answer is available to refine.');
             console.warn('[IntelligenceEngine] No lastAssistantMessage found for follow-up');
-            return null;
+            this.emit('error', error, 'follow_up', resolvedActionId);
+            throw error;
         }
 
         this.setMode('follow_up');
 
         try {
             if (!this.followUpLLM) {
-                console.error('[IntelligenceEngine] FollowUpLLM not initialized');
-                this.setMode('idle');
-                return null;
+                throw new Error('Follow-up generation is not initialized. Configure an AI provider in Settings.');
             }
 
             const actionPacket = this.buildActionContextPacket('FOLLOW_UP_QUESTION', 60);
@@ -1309,13 +1335,23 @@ Goal:
                 'FOLLOW_UP_QUESTION',
                 stream,
                 generationId,
-                (token) => this.emit('refined_answer_token', token, intent),
+                (token) => this.emit('refined_answer_token', token, intent, resolvedActionId),
             );
             const fullRefined = streamResult.text;
 
-            if (!streamResult.aborted && fullRefined) {
+            if (streamResult.aborted) {
+                this.emit('action_cancelled', 'follow_up', resolvedActionId);
+                this.finishMode('follow_up', generationId);
+                return null;
+            }
+
+            if (!fullRefined.trim()) {
+                throw new Error('Follow-up generation returned an empty response.');
+            }
+
+            if (fullRefined) {
                 this.session.addAssistantMessage(fullRefined);
-                this.emit('refined_answer', fullRefined, intent);
+                this.emit('refined_answer', fullRefined, intent, resolvedActionId);
 
                 const intentMap: Record<string, string> = {
                     'expand': 'Expand Answer',
@@ -1346,6 +1382,7 @@ Goal:
                     latencyMs: streamResult.latencyMs,
                     timedOut: streamResult.timedOut,
                     hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
+                    actionId: resolvedActionId,
                 });
             }
 
@@ -1353,9 +1390,9 @@ Goal:
             return fullRefined;
 
         } catch (error) {
-            this.emit('error', error as Error, 'follow_up');
+            this.emit('error', error as Error, 'follow_up', resolvedActionId);
             this.setMode('idle');
-            return null;
+            throw error;
         }
     }
 
@@ -1363,15 +1400,14 @@ Goal:
      * MODE 4: Recap (Summary)
      * Neutral conversation summary
      */
-    async runRecap(): Promise<string | null> {
+    async runRecap(actionId?: string): Promise<string | null> {
+        const resolvedActionId = resolveLiveActionId(actionId);
         console.log('[IntelligenceEngine] runRecap called');
         this.setMode('recap');
 
         try {
             if (!this.recapLLM) {
-                console.error('[IntelligenceEngine] RecapLLM not initialized');
-                this.setMode('idle');
-                return null;
+                throw new Error('Recap generation is not initialized. Configure an AI provider in Settings.');
             }
 
             const actionPacket = this.buildActionContextPacket(
@@ -1382,9 +1418,7 @@ Goal:
             );
             const context = actionPacket.context;
             if (!context) {
-                console.warn('[IntelligenceEngine] No context available for recap');
-                this.setMode('idle');
-                return null;
+                throw new Error('No meeting context is available for a recap yet.');
             }
 
             const generationId = this.nextGenerationId('recap');
@@ -1394,13 +1428,29 @@ Goal:
                 'RECAP',
                 stream,
                 generationId,
-                (token) => this.emit('recap_token', token),
+                (token) => this.emit('recap_token', token, resolvedActionId),
             );
             const fullSummary = streamResult.text;
 
+            if (streamResult.aborted) {
+                this.emit('action_cancelled', 'recap', resolvedActionId);
+                this.finishMode('recap', generationId);
+                return null;
+            }
+
+            if (!fullSummary.trim()) {
+                throw new Error('Recap generation returned an empty response.');
+            }
+
+            if (!this.isGenerationCurrent('recap', generationId)) {
+                this.emit('action_cancelled', 'recap', resolvedActionId);
+                this.finishMode('recap', generationId);
+                return null;
+            }
+
             // Only emit final if not aborted
-            if (!streamResult.aborted && fullSummary && this.isGenerationCurrent('recap', generationId)) {
-                this.emit('recap', fullSummary);
+            if (fullSummary && this.isGenerationCurrent('recap', generationId)) {
+                this.emit('recap', fullSummary, resolvedActionId);
 
                 this.session.pushUsage({
                     type: 'chat',
@@ -1417,15 +1467,16 @@ Goal:
                     latencyMs: streamResult.latencyMs,
                     timedOut: streamResult.timedOut,
                     hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
+                    actionId: resolvedActionId,
                 });
             }
             this.finishMode('recap', generationId);
             return fullSummary;
 
         } catch (error) {
-            this.emit('error', error as Error, 'recap');
+            this.emit('error', error as Error, 'recap', resolvedActionId);
             this.setMode('idle');
-            return null;
+            throw error;
         }
     }
 
@@ -1433,15 +1484,14 @@ Goal:
      * MODE: Clarify
      * Ask a clarifying question to the interviewer
      */
-    async runClarify(): Promise<string | null> {
+    async runClarify(actionId?: string): Promise<string | null> {
+        const resolvedActionId = resolveLiveActionId(actionId);
         console.log('[IntelligenceEngine] runClarify called');
         this.setMode('clarify');
 
         try {
             if (!this.clarifyLLM) {
-                console.error('[IntelligenceEngine] ClarifyLLM not initialized');
-                this.setMode('idle');
-                return null;
+                throw new Error('Clarification generation is not initialized. Configure an AI provider in Settings.');
             }
 
             const actionPacket = this.buildActionContextPacket('CLARIFY', 180);
@@ -1456,11 +1506,12 @@ Goal:
                 'CLARIFY',
                 stream,
                 generationId,
-                this.liveActionTokenHandler('CLARIFY', (token) => this.emit('clarify_token', token)),
+                this.liveActionTokenHandler('CLARIFY', (token) => this.emit('clarify_token', token, resolvedActionId)),
             );
             let fullClarification = streamResult.text;
 
             if (streamResult.aborted) {
+                this.emit('action_cancelled', 'clarify', resolvedActionId);
                 this.finishMode('clarify', generationId);
                 return null;
             }
@@ -1478,9 +1529,18 @@ Goal:
             );
             fullClarification = qualityResult.answer;
 
+            if (!this.isGenerationCurrent('clarify', generationId)) {
+                this.emit('action_cancelled', 'clarify', resolvedActionId);
+                this.finishMode('clarify', generationId);
+                return null;
+            }
+            if (!fullClarification.trim()) {
+                throw new Error('Clarification generation returned an empty response.');
+            }
+
             // Only update history and emit final if not aborted
             if (fullClarification && this.isGenerationCurrent('clarify', generationId)) {
-                this.emit('clarify', fullClarification);
+                this.emit('clarify', fullClarification, resolvedActionId);
                 this.session.addAssistantMessage(fullClarification);
 
                 const diagnostics = this.session.getActionContextDiagnostics(180);
@@ -1505,15 +1565,16 @@ Goal:
                     qualityReasons: qualityResult.review.reasons,
                     qualityRepaired: qualityResult.repaired,
                     fallback: streamResult.timedOut ? 'soft_timeout' : qualityResult.fallbackReason,
+                    actionId: resolvedActionId,
                 });
             }
             this.finishMode('clarify', generationId);
             return fullClarification;
 
         } catch (error) {
-            this.emit('error', error as Error, 'clarify');
+            this.emit('error', error as Error, 'clarify', resolvedActionId);
             this.setMode('idle');
-            return null;
+            throw error;
         }
     }
 
@@ -1521,15 +1582,14 @@ Goal:
      * MODE 6: Follow-Up Questions
      * Suggest strategic questions for the user to ask
      */
-    async runFollowUpQuestions(): Promise<string | null> {
+    async runFollowUpQuestions(actionId?: string): Promise<string | null> {
+        const resolvedActionId = resolveLiveActionId(actionId);
         console.log('[IntelligenceEngine] runFollowUpQuestions called');
         this.setMode('follow_up_questions');
 
         try {
             if (!this.followUpQuestionsLLM) {
-                console.error('[IntelligenceEngine] FollowUpQuestionsLLM not initialized');
-                this.setMode('idle');
-                return null;
+                throw new Error('Follow-up question generation is not initialized. Configure an AI provider in Settings.');
             }
 
             const actionPacket = this.buildActionContextPacket('FOLLOW_UP_QUESTION', 120);
@@ -1544,14 +1604,19 @@ Goal:
                 generationId,
                 this.liveActionTokenHandler(
                     'FOLLOW_UP_QUESTION',
-                    (token) => this.emit('follow_up_questions_token', token),
+                    (token) => this.emit('follow_up_questions_token', token, resolvedActionId),
                 ),
             );
             let fullQuestions = streamResult.text;
             let qualityResult: LiveActionQualityResult | undefined;
 
-            if (!streamResult.aborted) {
-                qualityResult = await this.improveLiveActionOutput(
+            if (streamResult.aborted) {
+                this.emit('action_cancelled', 'follow_up_questions', resolvedActionId);
+                this.finishMode('follow_up_questions', generationId);
+                return null;
+            }
+
+            qualityResult = await this.improveLiveActionOutput(
                     'follow_up_questions',
                     'FOLLOW_UP_QUESTION',
                     generationId,
@@ -1561,18 +1626,21 @@ Goal:
                         streamTimedOut: streamResult.timedOut,
                         sanitizeSingleQuestion: true,
                     },
-                );
-                fullQuestions = qualityResult.answer;
+            );
+            fullQuestions = qualityResult.answer;
 
-                if (!this.isGenerationCurrent('follow_up_questions', generationId)) {
-                    this.finishMode('follow_up_questions', generationId);
-                    return null;
-                }
-
+            if (!fullQuestions.trim()) {
+                throw new Error('Follow-up question generation returned an empty response.');
             }
 
-            if (!streamResult.aborted && fullQuestions && this.isGenerationCurrent('follow_up_questions', generationId)) {
-                this.emit('follow_up_questions_update', fullQuestions);
+            if (!this.isGenerationCurrent('follow_up_questions', generationId)) {
+                this.emit('action_cancelled', 'follow_up_questions', resolvedActionId);
+                this.finishMode('follow_up_questions', generationId);
+                return null;
+            }
+
+            if (fullQuestions && this.isGenerationCurrent('follow_up_questions', generationId)) {
+                this.emit('follow_up_questions_update', fullQuestions, resolvedActionId);
                 const diagnostics = this.session.getActionContextDiagnostics(120);
                 this.session.pushUsage({
                     type: 'followup_questions',
@@ -1595,15 +1663,16 @@ Goal:
                     qualityReasons: qualityResult?.review.reasons,
                     qualityRepaired: qualityResult?.repaired,
                     fallback: streamResult.timedOut ? 'soft_timeout' : qualityResult?.fallbackReason,
+                    actionId: resolvedActionId,
                 });
             }
             this.finishMode('follow_up_questions', generationId);
             return fullQuestions;
 
         } catch (error) {
-            this.emit('error', error as Error, 'follow_up_questions');
+            this.emit('error', error as Error, 'follow_up_questions', resolvedActionId);
             this.setMode('idle');
-            return null;
+            throw error;
         }
     }
 
@@ -1672,6 +1741,11 @@ Goal:
             );
             answer = qualityResult.answer;
             fallbackReason = streamResult.timedOut ? 'soft_timeout' : qualityResult.fallbackReason;
+
+            if (!this.isGenerationCurrent('manual', generationId)) {
+                this.finishMode('manual', generationId);
+                return null;
+            }
 
             if (qualityResult.fallbackReason) {
                 answer = this.buildManualAnswerFallback(question, actionPacket);
@@ -1921,7 +1995,8 @@ ${meetingQa ? '- This is a meeting Q&A request, not necessarily a phrase the use
      *   2. session.detectedCodingQuestion (detected from interviewer transcript)
      *   3. transcriptContext (last N seconds of conversation — fallback for inference)
      */
-    async runCodeHint(imagePaths?: string[], problemStatement?: string): Promise<string | null> {
+    async runCodeHint(imagePaths?: string[], problemStatement?: string, actionId?: string): Promise<string | null> {
+        const resolvedActionId = resolveLiveActionId(actionId);
         if (this.assistCancellationToken) {
             this.assistCancellationToken.abort();
             this.assistCancellationToken = null;
@@ -1962,11 +2037,12 @@ ${meetingQa ? '- This is a meeting Q&A request, not necessarily a phrase the use
                 'ANSWER',
                 stream,
                 generationId,
-                (token) => this.emit('suggested_answer_token', token, 'Code Hint', 1.0),
+                (token) => this.emit('suggested_answer_token', token, 'Code Hint', 1.0, resolvedActionId),
             );
             let fullHint = streamResult.text;
 
             if (streamResult.aborted) {
+                this.emit('action_cancelled', 'code_hint', resolvedActionId);
                 this.finishMode('code_hint', generationId);
                 return null;
             }
@@ -1991,16 +2067,17 @@ ${meetingQa ? '- This is a meeting Q&A request, not necessarily a phrase the use
                 latencyMs: streamResult.latencyMs,
                 timedOut: streamResult.timedOut,
                 hasReliableInterlocutor: transcriptPacket?.hasReliableInterlocutor,
+                actionId: resolvedActionId,
             });
 
-            this.emit('suggested_answer', fullHint, 'Code Hint', 1.0);
+            this.emit('suggested_answer', fullHint, 'Code Hint', 1.0, resolvedActionId);
             this.finishMode('code_hint', generationId);
             return fullHint;
 
         } catch (error) {
-            this.emit('error', error as Error, 'code_hint');
+            this.emit('error', error as Error, 'code_hint', resolvedActionId);
             this.setMode('idle');
-            return null;
+            throw error;
         }
     }
 
@@ -2008,7 +2085,8 @@ ${meetingQa ? '- This is a meeting Q&A request, not necessarily a phrase the use
      * MODE 8: Brainstorm (Strategic Approach Generator)
      * Generates a spoken script outlining 2-3 problem-solving approaches with trade-offs.
      */
-    async runBrainstorm(imagePaths?: string[], problemStatement?: string): Promise<string | null> {
+    async runBrainstorm(imagePaths?: string[], problemStatement?: string, actionId?: string): Promise<string | null> {
+        const resolvedActionId = resolveLiveActionId(actionId);
         if (this.assistCancellationToken) {
             this.assistCancellationToken.abort();
             this.assistCancellationToken = null;
@@ -2032,7 +2110,7 @@ ${meetingQa ? '- This is a meeting Q&A request, not necessarily a phrase the use
                 this.setMode('idle');
                 const msg = "There's nothing to brainstorm right now. Make sure your question is visible or spoken aloud, then try again.";
                 this.session.addAssistantMessage(msg);
-                this.emit('suggested_answer', msg, 'Brainstorming Approaches', 1.0);
+                this.emit('suggested_answer', msg, 'Brainstorming Approaches', 1.0, resolvedActionId);
                 return msg;
             }
 
@@ -2046,11 +2124,12 @@ ${meetingQa ? '- This is a meeting Q&A request, not necessarily a phrase the use
                 'ANSWER',
                 stream,
                 generationId,
-                (token) => this.emit('suggested_answer_token', token, 'Brainstorming Approaches', 1.0),
+                (token) => this.emit('suggested_answer_token', token, 'Brainstorming Approaches', 1.0, resolvedActionId),
             );
             let fullResult = streamResult.text;
 
             if (streamResult.aborted) {
+                this.emit('action_cancelled', 'brainstorm', resolvedActionId);
                 this.finishMode('brainstorm', generationId);
                 return null;
             }
@@ -2075,16 +2154,17 @@ ${meetingQa ? '- This is a meeting Q&A request, not necessarily a phrase the use
                 latencyMs: streamResult.latencyMs,
                 timedOut: streamResult.timedOut,
                 hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,
+                actionId: resolvedActionId,
             });
 
-            this.emit('suggested_answer', fullResult, 'Brainstorming Approaches', 1.0);
+            this.emit('suggested_answer', fullResult, 'Brainstorming Approaches', 1.0, resolvedActionId);
             this.finishMode('brainstorm', generationId);
             return fullResult;
 
         } catch (error) {
-            this.emit('error', error as Error, 'brainstorm');
+            this.emit('error', error as Error, 'brainstorm', resolvedActionId);
             this.setMode('idle');
-            return null;
+            throw error;
         }
     }
 

@@ -17,6 +17,7 @@ import { DatabaseManager } from "./db/DatabaseManager"; // Import Database Manag
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
+import { randomUUID } from "crypto";
 import { AudioDevices } from "./audio/AudioDevices";
 import { MeetingBriefManager } from "./meeting/MeetingBriefManager";
 
@@ -32,6 +33,15 @@ import {
   DEFAULT_CODEX_MODEL,
   resolveCodexModelId,
 } from "../src/config/codexModels";
+import type { LiveActionRequest } from "../src/types/liveActions";
+
+function normalizeLiveActionRequest(value?: LiveActionRequest | null): LiveActionRequest {
+  const candidate = String(value?.actionId || "").trim();
+  return {
+    ...(value || { actionId: "" }),
+    actionId: candidate.length > 0 && candidate.length <= 128 ? candidate : randomUUID(),
+  };
+}
 
 export function initializeIpcHandlers(appState: AppState): void {
   const safeHandle = (
@@ -3157,42 +3167,39 @@ export function initializeIpcHandlers(appState: AppState): void {
   // MODE 2: What Should I Say (Primary auto-answer)
   safeHandle(
     "generate-what-to-say",
-    async (_, question?: string, imagePaths?: string[]) => {
+    async (_, requestOrQuestion?: LiveActionRequest | string, legacyImagePaths?: string[]) => {
+      const requestInput: LiveActionRequest = requestOrQuestion && typeof requestOrQuestion === "object"
+        ? requestOrQuestion
+        : { actionId: "", question: typeof requestOrQuestion === "string" ? requestOrQuestion : undefined, imagePaths: legacyImagePaths };
+      const request = normalizeLiveActionRequest(requestInput);
       try {
         await appState.flushPendingSttTranscripts?.("what_to_say");
         const intelligenceManager = appState.getIntelligenceManager();
         // Question and imagePaths are now optional - IntelligenceManager infers from transcript
         const answer = await intelligenceManager.runWhatShouldISay(
-          question,
+          request.question,
           0.8,
-          imagePaths,
+          request.imagePaths,
+          request.actionId,
         );
-        return { answer, question: question || "inferred from context" };
+        return { actionId: request.actionId, answer, question: request.question || "inferred from context" };
       } catch (error: any) {
-        // Return graceful fallback instead of throwing
         return {
-          question: question || "unknown",
+          actionId: request.actionId,
+          question: request.question || "unknown",
+          error: error?.message || String(error),
         };
       }
     },
   );
 
-  safeHandle("generate-clarify", async () => {
+  safeHandle("generate-clarify", async (_, rawRequest?: LiveActionRequest) => {
+    const request = normalizeLiveActionRequest(rawRequest);
     try {
       await appState.flushPendingSttTranscripts?.("clarify");
       const intelligenceManager = appState.getIntelligenceManager();
-      const clarification = await intelligenceManager.runClarify();
-      // If null returned without throwing, the engine already set mode to idle.
-      // We must still ensure the frontend un-sticks — emit an error so onIntelligenceError fires.
-      if (clarification === null) {
-        const win = appState.getMainWindow();
-        win?.webContents.send("intelligence-error", {
-          error:
-            "Could not generate a clarifying question. Try again after some audio context is available.",
-          mode: "clarify",
-        });
-      }
-      return { clarification };
+      const clarification = await intelligenceManager.runClarify(request.actionId);
+      return { actionId: request.actionId, clarification };
     } catch (error: any) {
       throw error;
     }
@@ -3200,25 +3207,31 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle(
     "generate-code-hint",
-    async (_, imagePaths?: string[], problemStatement?: string) => {
+    async (_, requestOrImages?: LiveActionRequest | string[], legacyProblemStatement?: string) => {
+      const request = normalizeLiveActionRequest(
+        requestOrImages && !Array.isArray(requestOrImages) && typeof requestOrImages === "object"
+          ? requestOrImages
+          : { actionId: "", imagePaths: requestOrImages as string[] | undefined, problemStatement: legacyProblemStatement },
+      );
       try {
         // If no explicit images were passed from the frontend, fall back to the
         // screenshot queue so the AI can always "see" the user's screen.
         const resolvedImagePaths: string[] =
-          imagePaths && imagePaths.length > 0
-            ? imagePaths
+          request.imagePaths && request.imagePaths.length > 0
+            ? request.imagePaths
             : appState.getScreenshotQueue();
 
         console.log(
-          `[IPC] generate-code-hint: using ${resolvedImagePaths.length} image(s) (${imagePaths?.length ? "explicit" : "queue fallback"})`,
+          `[IPC] generate-code-hint: using ${resolvedImagePaths.length} image(s) (${request.imagePaths?.length ? "explicit" : "queue fallback"})`,
         );
 
         const intelligenceManager = appState.getIntelligenceManager();
         const hint = await intelligenceManager.runCodeHint(
           resolvedImagePaths.length > 0 ? resolvedImagePaths : undefined,
-          problemStatement,
+          request.problemStatement,
+          request.actionId,
         );
-        return { hint };
+        return { actionId: request.actionId, hint };
       } catch (error: any) {
         throw error;
       }
@@ -3227,25 +3240,31 @@ export function initializeIpcHandlers(appState: AppState): void {
 
   safeHandle(
     "generate-brainstorm",
-    async (_, imagePaths?: string[], problemStatement?: string) => {
+    async (_, requestOrImages?: LiveActionRequest | string[], legacyProblemStatement?: string) => {
+      const request = normalizeLiveActionRequest(
+        requestOrImages && !Array.isArray(requestOrImages) && typeof requestOrImages === "object"
+          ? requestOrImages
+          : { actionId: "", imagePaths: requestOrImages as string[] | undefined, problemStatement: legacyProblemStatement },
+      );
       try {
         // If no explicit images were passed from the frontend, fall back to the
         // screenshot queue so the AI can always "see" the user's screen.
         const resolvedImagePaths: string[] =
-          imagePaths && imagePaths.length > 0
-            ? imagePaths
+          request.imagePaths && request.imagePaths.length > 0
+            ? request.imagePaths
             : appState.getScreenshotQueue();
 
         console.log(
-          `[IPC] generate-brainstorm: using ${resolvedImagePaths.length} image(s) (${imagePaths?.length ? "explicit" : "queue fallback"})`,
+          `[IPC] generate-brainstorm: using ${resolvedImagePaths.length} image(s) (${request.imagePaths?.length ? "explicit" : "queue fallback"})`,
         );
 
         const intelligenceManager = appState.getIntelligenceManager();
         const script = await intelligenceManager.runBrainstorm(
           resolvedImagePaths.length > 0 ? resolvedImagePaths : undefined,
-          problemStatement,
+          request.problemStatement,
+          request.actionId,
         );
-        return { script };
+        return { actionId: request.actionId, script };
       } catch (error: any) {
         throw error;
       }
@@ -3276,14 +3295,20 @@ export function initializeIpcHandlers(appState: AppState): void {
   // MODE 3: Follow-Up (Refinement)
   safeHandle(
     "generate-follow-up",
-    async (_, intent: string, userRequest?: string) => {
+    async (_, requestOrIntent: LiveActionRequest | string, legacyUserRequest?: string) => {
+      const requestInput: LiveActionRequest = requestOrIntent && typeof requestOrIntent === "object"
+        ? requestOrIntent
+        : { actionId: "", intent: typeof requestOrIntent === "string" ? requestOrIntent : undefined, userRequest: legacyUserRequest };
+      const request = normalizeLiveActionRequest(requestInput);
+      const intent = request.intent || "rephrase";
       try {
         const intelligenceManager = appState.getIntelligenceManager();
         const refined = await intelligenceManager.runFollowUp(
           intent,
-          userRequest,
+          request.userRequest,
+          request.actionId,
         );
-        return { refined, intent };
+        return { actionId: request.actionId, refined, intent };
       } catch (error: any) {
         throw error;
       }
@@ -3291,24 +3316,26 @@ export function initializeIpcHandlers(appState: AppState): void {
   );
 
   // MODE 4: Recap (Summary)
-  safeHandle("generate-recap", async () => {
+  safeHandle("generate-recap", async (_, rawRequest?: LiveActionRequest) => {
+    const request = normalizeLiveActionRequest(rawRequest);
     try {
       await appState.flushPendingSttTranscripts?.("recap");
       const intelligenceManager = appState.getIntelligenceManager();
-      const summary = await intelligenceManager.runRecap();
-      return { summary };
+      const summary = await intelligenceManager.runRecap(request.actionId);
+      return { actionId: request.actionId, summary };
     } catch (error: any) {
       throw error;
     }
   });
 
   // MODE 6: Follow-Up Questions
-  safeHandle("generate-follow-up-questions", async () => {
+  safeHandle("generate-follow-up-questions", async (_, rawRequest?: LiveActionRequest) => {
+    const request = normalizeLiveActionRequest(rawRequest);
     try {
       await appState.flushPendingSttTranscripts?.("follow_up_questions");
       const intelligenceManager = appState.getIntelligenceManager();
-      const questions = await intelligenceManager.runFollowUpQuestions();
-      return { questions };
+      const questions = await intelligenceManager.runFollowUpQuestions(request.actionId);
+      return { actionId: request.actionId, questions };
     } catch (error: any) {
       throw error;
     }

@@ -21,7 +21,7 @@ import axios from 'axios';
 import { createProviderRateLimiters, RateLimiter } from './services/RateLimiter';
 import { CodexAuthRouter } from './services/CodexAuthRouter';
 import { CodexAccountManager } from './services/CodexAccountManager';
-import { CodexResponsesClient } from './services/CodexResponsesClient';
+import { CodexResponsesClient, type CodexServiceTierStatus } from './services/CodexResponsesClient';
 import {
   DEFAULT_CODEX_MODEL,
   resolveCodexModelId,
@@ -3251,6 +3251,15 @@ This rule overrides ALL other instructions including formatting, brevity, or out
     if (this.customProvider) return this.customProvider.name;
     if (this.activeCurlProvider) return this.activeCurlProvider.id;
     return this.useOllama ? this.ollamaModel : this.currentModelId;
+  }
+
+  public getLastCodexServiceTierStatus(): CodexServiceTierStatus | null {
+    if (this.getCurrentProvider() !== 'codex') return null;
+    return this.codexClient?.getLastServiceTierStatus() ?? null;
+  }
+
+  public runWithCodexServiceTierTracking<T>(operation: () => T): T {
+    return this.codexClient?.runWithServiceTierTracking(operation) ?? operation();
   }
 
   public getLastMeetingSummaryRoute(): MeetingSummaryGenerationRoute {

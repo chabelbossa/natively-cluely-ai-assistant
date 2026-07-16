@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const { execFileSync, spawnSync } = require('child_process');
 const Module = require('module');
 
@@ -300,7 +301,7 @@ function checkPromptEngineeringContract(failures) {
 function queryJson(sql) {
   const output = execFileSync(
     'sqlite3',
-    ['-readonly', '-cmd', '.timeout 5000', '-json', dbPath, sql],
+    ['-cmd', '.timeout 5000', '-json', `${pathToFileURL(dbPath).href}?mode=ro`, sql],
     { encoding: 'utf8' },
   ).trim();
   return output ? JSON.parse(output) : [];

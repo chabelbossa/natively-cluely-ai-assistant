@@ -5,6 +5,14 @@ import { spawn } from 'child_process';
 import type { LLMHelper } from '../LLMHelper';
 import type { Meeting } from '../db/DatabaseManager';
 import type { TranscriptSegment } from '../SessionTracker';
+import {
+  collapseRepeatedTextBlock,
+  countDuplicateSummaryItems,
+  deduplicateSummaryItems,
+  getSummarySectionBulletLimit,
+  summaryNeedsReview,
+  summaryItemKey,
+} from './MeetingSummaryQuality';
 
 export interface MeetingSummaryQuality {
   score: number;
@@ -112,13 +120,15 @@ export class MeetingSummaryAgent {
     summary: MeetingDetailedSummary,
     quality: MeetingSummaryQuality,
   ): Promise<MeetingDetailedSummary | null> {
-    const missing = quality.checks.filter((check) => check.startsWith('missing_'));
+    const issues = quality.checks;
     const prompt = `${this.buildGenerationPrompt(input, evidence, summary)}
 
 REPAIR PASS:
-- The previous note was not rich enough.
-- Fix these specific gaps: ${missing.length > 0 ? missing.join(', ') : 'coverage, specificity, and actionability'}.
-- Preserve all useful previous bullets, but add concrete decisions, questions, risks, numbers, and follow-up checks that are present in the evidence.
+- The previous note needs a focused quality repair.
+- Fix these specific issues: ${issues.length > 0 ? issues.join(', ') : 'coverage, specificity, concision, and actionability'}.
+- Rewrite, merge, replace, or remove weak and redundant bullets. Do not preserve an item merely because it existed previously.
+- Keep only evidence-backed decisions, questions, risks, numbers, and follow-up checks.
+- Respect every item limit below and prefer fewer high-signal bullets over exhaustive repetition.
 - Return the full JSON object again.`;
 
     const response = await this.safeGenerate(prompt, evidence.digest);
@@ -150,11 +160,13 @@ SOURCE CONTRACT:
 - Prefer reconstructed meaning over noisy ASR fragments.
 
 QUALITY BAR:
-- Be specific, operational, and useful for implementation work after the meeting.
+- Be specific, concise, operational, and useful for implementation work after the meeting.
 - Capture decisions, concrete actions, ambiguous business rules, risks, numbers, provider names, and follow-up checks.
 - Do not flatten important ambiguities. If the meeting leaves a tradeoff unresolved, put it in "Questions ouvertes" or "Points à vérifier".
 - Do not copy raw transcript lines. Synthesize clean meaning.
 - Avoid filler such as "the meeting covered".
+- Do not repeat one fact across multiple sections unless its role genuinely changes.
+- Prefer 18-28 total section bullets. Never exceed 28.
 
 SECTION RULES:
 - "Décisions": each bullet must state an explicit decision, orientation retenue, or arbitrage.
@@ -162,6 +174,12 @@ SECTION RULES:
 - "Questions ouvertes": each bullet must preserve a real ambiguity, pending confirmation, or unresolved tradeoff.
 - "Risques": each bullet must state a concrete failure mode, stability concern, or business risk.
 - "Points à vérifier": each bullet must name a validation, measurement, or follow-up check.
+- "Résumé exécutif": 2-3 bullets maximum.
+- "Décisions": 6 bullets maximum.
+- "Plan d'action": 6 bullets maximum.
+- "Questions ouvertes": 4 bullets maximum; use [] when none remain.
+- "Risques": 4 bullets maximum; use [] when none are supported.
+- "Points à vérifier": 5 bullets maximum.
 - Use explicit wording such as "Décision retenue :", "Action :", "Question ouverte :", "Risque :", and "À vérifier :" when it fits naturally.
 - Mention priorities or sequencing when the evidence implies them ("priorité immédiate", "avant", "ensuite", "d'abord").
 
@@ -170,12 +188,12 @@ ${previous ? `PREVIOUS SUMMARY TO IMPROVE:\n${previous}\n` : ''}
 
 Return ONLY valid JSON, no markdown fences:
 {
-  "overview": "2-4 sentence executive summary with the actual scope and outcome.",
+  "overview": "2-3 sentence executive summary, no more than 650 characters.",
   "sections": [
 ${sectionShape}
   ],
-  "actionItems": ["High-signal next steps only."],
-  "keyPoints": ["High-signal decisions, constraints, numbers, or risks."]
+  "actionItems": ["3-6 high-signal next steps for exports and follow-up email; no duplicates."],
+  "keyPoints": ["4-8 high-signal decisions, constraints, numbers, or risks; no duplicates."]
 }`;
   }
 
@@ -221,12 +239,14 @@ ${sectionShape}
         : [];
 
     return {
-      overview: typeof parsed?.overview === 'string' ? parsed.overview.trim() : '',
+      overview: typeof parsed?.overview === 'string'
+        ? collapseRepeatedTextBlock(parsed.overview).slice(0, 700).trim()
+        : '',
       actionItems: Array.isArray(parsed?.actionItems)
-        ? parsed.actionItems.map((item: any) => String(item).trim()).filter(Boolean)
+        ? deduplicateSummaryItems(parsed.actionItems, 6)
         : [],
       keyPoints: Array.isArray(parsed?.keyPoints)
-        ? parsed.keyPoints.map((item: any) => String(item).trim()).filter(Boolean)
+        ? deduplicateSummaryItems(parsed.keyPoints, 8)
         : [],
       sections: this.ensureAgentSections(sections),
     };
@@ -238,9 +258,9 @@ ${sectionShape}
   ): MeetingDetailedSummary {
     const base = generated || fallback || this.buildFallbackSummary();
     return {
-      overview: base.overview || fallback?.overview || '',
-      actionItems: base.actionItems || [],
-      keyPoints: base.keyPoints || [],
+      overview: collapseRepeatedTextBlock(base.overview || fallback?.overview || '').slice(0, 700).trim(),
+      actionItems: deduplicateSummaryItems(base.actionItems || [], 6),
+      keyPoints: deduplicateSummaryItems(base.keyPoints || [], 8),
       sections: this.ensureAgentSections(base.sections || fallback?.sections || []),
     };
   }
@@ -258,9 +278,16 @@ ${sectionShape}
       );
     }
 
+    const seen = new Set<string>();
     return AGENT_SECTION_TITLES.map((title) => {
       const exact = byTitle.get(this.normalize(title));
-      return { title, bullets: exact || [] };
+      const bullets = (exact || []).filter((bullet) => {
+        const key = summaryItemKey(bullet);
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      return { title, bullets };
     });
   }
 
@@ -507,9 +534,21 @@ ${sectionShape}
     const actionLikeCount = (summary.actionItems || []).length + planActionBullets;
     const numbersInSummary = new Set(summaryText.match(/\b\d{1,4}\b/g) || []);
     const numbersInEvidence = new Set(evidenceText.match(/\b\d{1,4}\b/g) || []);
+    const allItems = [
+      ...(summary.actionItems || []),
+      ...(summary.keyPoints || []),
+      ...(summary.sections || []).flatMap((section) => section.bullets || []),
+    ];
+    const duplicateItems = countDuplicateSummaryItems(allItems);
+    const overlyLongItems = allItems.filter((item) => String(item || '').length > 320).length;
 
     if ((summary.overview || '').length < 140) checks.push('overview_too_short');
+    if ((summary.overview || '').length > 700) checks.push('overview_too_long');
     if (bullets < 12) checks.push('too_few_bullets');
+    if (bullets > 28) checks.push('too_many_section_bullets');
+    if (allItems.length > 42) checks.push('too_many_summary_items');
+    if (duplicateItems > 0) checks.push(`duplicate_summary_items:${duplicateItems}`);
+    if (overlyLongItems > 0) checks.push(`overly_long_summary_items:${overlyLongItems}`);
     if (populatedSections < 4) checks.push('too_few_populated_sections');
     if (actionLikeCount < 3) checks.push('too_few_action_items');
     if (numbersInEvidence.size >= 2 && numbersInSummary.size === 0) checks.push('missing_numeric_facts');
@@ -547,6 +586,7 @@ ${sectionShape}
     let score = 100;
     for (const check of checks) {
       if (check.startsWith('missing_')) score -= 14;
+      else if (check.startsWith('duplicate_') || check.startsWith('too_many_')) score -= 12;
       else score -= 8;
     }
     if (bullets >= 16) score += 5;
@@ -557,7 +597,7 @@ ${sectionShape}
       score,
       checks,
       sourcesUsed: evidence.sourcesUsed,
-      needsReview: score < 72 || checks.some((check) => check.startsWith('missing_')),
+      needsReview: summaryNeedsReview(score, checks),
     };
   }
 
@@ -666,7 +706,7 @@ ${sectionShape}
 
   private formatSectionBullets(title: string, bullets: string[]): string[] {
     const normalizedTitle = this.normalize(title);
-    return (bullets || [])
+    const formatted = (bullets || [])
       .map((bullet) => this.cleanText(bullet))
       .filter(Boolean)
       .map((bullet) => {
@@ -687,6 +727,7 @@ ${sectionShape}
         }
         return bullet;
       });
+    return deduplicateSummaryItems(formatted, getSummarySectionBulletLimit(title));
   }
 
   private prefixBullet(bullet: string, label: string): string {

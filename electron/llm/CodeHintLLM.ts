@@ -1,5 +1,6 @@
 import { LLMHelper } from "../LLMHelper";
 import { CODE_HINT_PROMPT, buildCodeHintMessage } from "./prompts";
+import { isUserVisibleLiveLlmError } from "./LiveLlmError";
 
 export class CodeHintLLM {
     private llmHelper: LLMHelper;
@@ -29,6 +30,7 @@ export class CodeHintLLM {
             );
         } catch (error) {
             console.error("[CodeHintLLM] Stream failed:", error);
+            if (isUserVisibleLiveLlmError(error)) throw error;
             yield "I couldn't analyze the screenshot. Make sure your code is visible and try again.";
         }
     }

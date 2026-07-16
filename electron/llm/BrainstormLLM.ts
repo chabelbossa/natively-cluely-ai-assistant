@@ -1,5 +1,6 @@
 import { LLMHelper } from "../LLMHelper";
 import { BRAINSTORM_MODE_PROMPT } from "./prompts";
+import { isUserVisibleLiveLlmError } from "./LiveLlmError";
 
 export class BrainstormLLM {
     private llmHelper: LLMHelper;
@@ -18,6 +19,7 @@ export class BrainstormLLM {
             yield* this.llmHelper.streamChat(context, imagePaths, undefined, BRAINSTORM_MODE_PROMPT);
         } catch (error) {
             console.error("[BrainstormLLM] Stream failed:", error);
+            if (isUserVisibleLiveLlmError(error)) throw error;
             yield "I couldn't generate brainstorm approaches. Make sure your question is visible and try again.";
         }
     }

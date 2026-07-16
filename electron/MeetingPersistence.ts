@@ -8,6 +8,7 @@ import { DatabaseManager, Meeting } from './db/DatabaseManager';
 import { GROQ_TITLE_PROMPT, GROQ_SUMMARY_JSON_PROMPT } from './llm';
 import { MeetingBriefManager } from './meeting/MeetingBriefManager';
 import { MeetingSummaryAgent, type MeetingDetailedSummary } from './meeting/MeetingSummaryAgent';
+import { sanitizeMeetingTitle } from './meeting/MeetingSummaryQuality';
 const crypto = require('crypto');
 
 export class MeetingPersistence {
@@ -122,7 +123,7 @@ Rules:
                 const titleContext = this.compactContextForLLM(meetingContextForLLM, 12000);
 
                 const generatedTitle = await this.llmHelper.generateMeetingSummary(titlePrompt, titleContext, groqTitlePrompt);
-                const cleanedTitle = generatedTitle?.replace(/["*]/g, '').trim();
+                const cleanedTitle = sanitizeMeetingTitle(generatedTitle || '');
                 title = cleanedTitle && !this.isGenericTitle(cleanedTitle)
                     ? cleanedTitle
                     : this.buildLocalTitle(data.transcript);
@@ -287,7 +288,8 @@ Return ONLY valid JSON (no markdown code blocks):
             }
         }
 
-        if (title === "Untitled Session" && data.transcript.length > 0) {
+        title = sanitizeMeetingTitle(title);
+        if ((!title || title === "Untitled Session") && data.transcript.length > 0) {
             title = this.buildLocalTitle(data.transcript);
         }
 

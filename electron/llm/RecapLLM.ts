@@ -1,5 +1,6 @@
 import { LLMHelper } from "../LLMHelper";
 import { UNIVERSAL_RECAP_PROMPT } from "./prompts";
+import { isUserVisibleLiveLlmError } from "./LiveLlmError";
 
 export class RecapLLM {
     private llmHelper: LLMHelper;
@@ -34,6 +35,7 @@ export class RecapLLM {
             yield* this.llmHelper.streamChat(context, undefined, undefined, UNIVERSAL_RECAP_PROMPT);
         } catch (error) {
             console.error("[RecapLLM] Streaming generation failed:", error);
+            if (isUserVisibleLiveLlmError(error)) throw error;
         }
     }
 

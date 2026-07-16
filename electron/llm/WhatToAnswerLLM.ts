@@ -2,6 +2,7 @@ import { LLMHelper } from "../LLMHelper";
 import { UNIVERSAL_WHAT_TO_ANSWER_PROMPT } from "./prompts";
 import { TemporalContext } from "./TemporalContextBuilder";
 import { IntentResult } from "./IntentClassifier";
+import { isUserVisibleLiveLlmError } from "./LiveLlmError";
 
 export class WhatToAnswerLLM {
     private llmHelper: LLMHelper;
@@ -59,6 +60,7 @@ ANSWER SHAPE: ${intentResult.answerShape}
 
         } catch (error) {
             console.error("[WhatToAnswerLLM] Stream failed:", error);
+            if (isUserVisibleLiveLlmError(error)) throw error;
             yield "Could you repeat that? I want to make sure I address your question properly.";
         }
     }

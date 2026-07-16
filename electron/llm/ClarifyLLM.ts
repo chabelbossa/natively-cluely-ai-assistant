@@ -1,5 +1,6 @@
 import { LLMHelper } from "../LLMHelper";
 import { CLARIFY_MODE_PROMPT } from "./prompts";
+import { isUserVisibleLiveLlmError } from "./LiveLlmError";
 
 export class ClarifyLLM {
     private llmHelper: LLMHelper;
@@ -33,6 +34,7 @@ export class ClarifyLLM {
             yield* this.llmHelper.streamChat(context, undefined, undefined, CLARIFY_MODE_PROMPT);
         } catch (error) {
             console.error("[ClarifyLLM] Streaming generation failed:", error);
+            if (isUserVisibleLiveLlmError(error)) throw error;
         }
     }
 }

@@ -944,14 +944,46 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
   }
 
   private isQuestionContinuation(questionText: string, newerText: string): boolean {
+    return this.scoreQuestionContinuation(questionText, newerText) >= 0.5;
+  }
+
+  private scoreQuestionContinuation(questionText: string, newerText: string): number {
     const normalizedNewerText = this.normalize(newerText);
     const hasContinuationMarker = /\b(autrement dit|en d autres termes|je reformule|pour preciser|pour etre clair|ce que je veux dire|je prends un exemple|par exemple|la raison est|to rephrase|in other words|to clarify|what i mean|let me explain|for example)\b/i.test(normalizedNewerText);
-    if (hasContinuationMarker) return true;
+    const hasTopicShiftMarker = /\b(passons a|passons au|autre sujet|sur un autre point|maintenant concernant|independamment|indépendamment|separement|séparément|next topic|moving on|on another subject|separately)\b/i.test(normalizedNewerText);
+    if (hasTopicShiftMarker && !hasContinuationMarker) return 0;
+    if (hasContinuationMarker) return 0.9;
 
-    const questionKeywords = new Set(this.extractEvidenceKeywords(questionText));
-    const newerKeywords = this.extractEvidenceKeywords(newerText);
-    const sharedKeywords = newerKeywords.filter((keyword) => questionKeywords.has(keyword));
-    return sharedKeywords.length >= 2;
+    const hasAnaphoricReference = /\b(ce point|cette partie|dans ce cas|cette situation|cela|ca veut dire|ça veut dire|la dessus|là dessus|the same point|in that case|that means|this situation)\b/i.test(normalizedNewerText);
+    const genericTerms = new Set([
+      'projet', 'project', 'sujet', 'subject', 'point', 'chose', 'thing',
+      'question', 'exemple', 'example', 'besoin', 'need', 'solution', 'systeme', 'système',
+      'allez', 'aller', 'entre', 'pouvoir', 'peuvent', 'apres', 'après',
+    ].map((term) => this.stemContinuityToken(term)));
+    const questionKeywords = this.extractEvidenceKeywords(questionText)
+      .map((keyword) => this.stemContinuityToken(keyword))
+      .filter((keyword) => keyword.length >= 3 && !genericTerms.has(keyword));
+    const newerKeywords = this.extractEvidenceKeywords(newerText)
+      .map((keyword) => this.stemContinuityToken(keyword))
+      .filter((keyword) => keyword.length >= 3 && !genericTerms.has(keyword));
+    const questionSet = new Set(questionKeywords);
+    const newerSet = new Set(newerKeywords);
+    const sharedKeywords = [...newerSet].filter((keyword) => questionSet.has(keyword));
+    if (sharedKeywords.length < 2) {
+      return hasAnaphoricReference && sharedKeywords.length === 1 ? 0.15 : 0;
+    }
+
+    const containment = sharedKeywords.length / Math.max(1, Math.min(questionSet.size, newerSet.size));
+    return Math.min(1, 0.46 + containment * 0.25 + (hasAnaphoricReference ? 0.15 : 0));
+  }
+
+  private stemContinuityToken(token: string): string {
+    const normalized = this.normalize(token);
+    if (/^\d+$/.test(normalized) || normalized.length <= 4) return normalized;
+    return normalized
+      .replace(/(ements|ement|ations|ation|iques|ique)$/i, '')
+      .replace(/(ées|ée|es|s)$/i, '')
+      .replace(/(ing|ed)$/i, '');
   }
 
   private deriveLocalUserFocus(selectedItems: ContextItem[]): InterlocutorFocus {

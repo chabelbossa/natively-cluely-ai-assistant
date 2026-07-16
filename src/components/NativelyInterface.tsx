@@ -75,13 +75,24 @@ import {
   getOverlayAppearance,
   OVERLAY_OPACITY_DEFAULT,
 } from "../lib/overlayAppearance";
+import type { LiveActionMessageBase, LiveActionMessageMeta } from "../lib/liveActionMessages";
+import {
+  appendStreamingMessage,
+  cancelActionMessage,
+  createLiveActionId,
+  finalizePendingActionMessage,
+  finalizeStreamingMessage,
+  settleActionMessage,
+  upsertPendingActionMessage,
+} from "../lib/liveActionMessages";
 
-interface Message {
+interface Message extends LiveActionMessageBase {
   id: string;
   role: "user" | "system" | "interviewer";
   text: string;
   isStreaming?: boolean;
   pendingAction?: boolean;
+  actionId?: string;
   hasScreenshot?: boolean;
   screenshotPreview?: string;
   isCode?: boolean;
@@ -311,155 +322,21 @@ const getMessageIntentForMode = (mode?: string) => {
   return map[mode || ""] || mode || "what_to_answer";
 };
 
-const upsertPendingActionMessage = (
-  messages: Message[],
-  intent: string,
-  text: string,
-): Message[] => {
-  const existingIndex = [...messages]
-    .reverse()
-    .findIndex((msg) => msg.isStreaming && msg.intent === intent);
-  if (existingIndex !== -1) {
-    const index = messages.length - 1 - existingIndex;
-    const updated = [...messages];
-    updated[index] = {
-      ...updated[index],
-      text,
-      pendingAction: true,
-      isStreaming: true,
-    };
-    return updated;
-  }
-
-  return [
-    ...messages,
-    {
-      id: `${Date.now()}-${intent}-pending`,
-      role: "system",
-      text,
-      intent,
-      isStreaming: true,
-      pendingAction: true,
-    },
-  ];
+const formatLiveActionError = (error: unknown, mode?: string): string => {
+  const raw = (error instanceof Error ? error.message : String(error || "Unknown error"))
+    .replace(/^Error:\s*/i, "")
+    .replace(/^Codex API error \d+:\s*/i, "")
+    .trim();
+  if (/^Codex Fast is unavailable/i.test(raw)) return raw;
+  return mode ? `Error (${mode}): ${raw}` : `Error: ${raw}`;
 };
 
-const finalizePendingActionMessage = (
-  messages: Message[],
-  intent: string,
-  text: string,
-  meta?: { modelUsed?: string; tokensUsed?: number; durationMs?: number },
-): Message[] => {
-  const existingIndex = [...messages]
-    .reverse()
-    .findIndex((msg) => msg.isStreaming && msg.intent === intent);
-  if (existingIndex === -1) return messages;
-
-  const index = messages.length - 1 - existingIndex;
-  const updated = [...messages];
-  updated[index] = {
-    ...updated[index],
-    text,
-    isStreaming: false,
-    pendingAction: false,
-    ...(meta || {}),
+const getServiceTierMessageMeta = (data: unknown): Pick<LiveActionMessageMeta, "serviceTierUsed" | "serviceTierFallback"> => {
+  const serviceTier = (data as { serviceTier?: { used?: "fast" | "standard"; fallback?: boolean } } | null)?.serviceTier;
+  return {
+    serviceTierUsed: serviceTier?.used,
+    serviceTierFallback: serviceTier?.fallback === true,
   };
-  return updated;
-};
-
-const settleActionMessage = (
-  messages: Message[],
-  intent: string,
-  text: string,
-  meta?: { modelUsed?: string; tokensUsed?: number; durationMs?: number },
-): Message[] => {
-  const updated = finalizePendingActionMessage(messages, intent, text, meta);
-  if (updated !== messages) return updated;
-  return finalizeStreamingMessage(messages, intent, text, meta);
-};
-
-const appendStreamingMessage = (
-  messages: Message[],
-  intent: string,
-  token: string,
-): Message[] => {
-  const existingIndex = [...messages]
-    .reverse()
-    .findIndex((msg) => msg.isStreaming && msg.intent === intent);
-  if (existingIndex !== -1) {
-    const index = messages.length - 1 - existingIndex;
-    const updated = [...messages];
-    const existing = updated[index];
-    updated[index] = {
-      ...existing,
-      text: existing.pendingAction ? token : existing.text + token,
-      pendingAction: false,
-    };
-    return updated;
-  }
-
-  return [
-    ...messages,
-    {
-      id: `${Date.now()}-${intent}`,
-      role: "system",
-      text: token,
-      intent,
-      isStreaming: true,
-      pendingAction: false,
-    },
-  ];
-};
-
-const finalizeStreamingMessage = (
-  messages: Message[],
-  intent: string,
-  text: string,
-  meta?: { modelUsed?: string; tokensUsed?: number; durationMs?: number },
-): Message[] => {
-  const existingIndex = [...messages]
-    .reverse()
-    .findIndex((msg) => msg.isStreaming && msg.intent === intent);
-  if (existingIndex !== -1) {
-    const index = messages.length - 1 - existingIndex;
-    const updated = [...messages];
-    updated[index] = {
-      ...updated[index],
-      text,
-      isStreaming: false,
-      pendingAction: false,
-      ...(meta || {}),
-    };
-    return updated;
-  }
-
-  const lastIndex = messages.length - 1;
-  const lastMessage = messages[lastIndex];
-  if (
-    lastMessage &&
-    !lastMessage.isStreaming &&
-    !lastMessage.pendingAction &&
-    lastMessage.intent === intent &&
-    lastMessage.text.trim() === text.trim()
-  ) {
-    const updated = [...messages];
-    updated[lastIndex] = {
-      ...lastMessage,
-      text,
-      ...(meta || {}),
-    };
-    return updated;
-  }
-
-  return [
-    ...messages,
-    {
-      id: `${Date.now()}-${intent}`,
-      role: "system",
-      text,
-      intent,
-    },
-  ];
 };
 
 interface NativelyInterfaceProps {
@@ -722,6 +599,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const [actionLoading, setActionLoading] = useState<Record<string, boolean>>(
     {},
   );
+  const activeActionIdsRef = useRef<Record<string, string>>({});
+  const streamStartTimesRef = useRef<Record<string, number>>({});
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [conversationContext, setConversationContext] = useState<string>("");
   const [isManualRecording, setIsManualRecording] = useState(false);
@@ -809,9 +688,22 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     });
   };
 
-  const queueActionMessage = (intent: string, text: string) => {
-    setMessages((prev) => upsertPendingActionMessage(prev, intent, text));
+  const queueActionMessage = (intent: string, text: string, loadingKey?: string): string => {
+    const actionId = createLiveActionId();
+    streamStartTimesRef.current[actionId] = Date.now();
+    if (loadingKey) {
+      activeActionIdsRef.current[loadingKey] = actionId;
+      setActionLoading((prev) => ({ ...prev, [loadingKey]: true }));
+    }
+    setMessages((prev) => upsertPendingActionMessage(prev, actionId, intent, text));
     scrollMessagesToBottom("smooth");
+    return actionId;
+  };
+
+  const finishActionLoading = (loadingKey: string, actionId?: string) => {
+    if (actionId && activeActionIdsRef.current[loadingKey] !== actionId) return;
+    delete activeActionIdsRef.current[loadingKey];
+    setActionLoading((prev) => ({ ...prev, [loadingKey]: false }));
   };
 
   // Latent Context State (Screenshots attached but not sent)
@@ -891,8 +783,6 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   useEffect(() => {
     currentModelRef.current = currentModel;
   }, [currentModel]);
-
-  const streamStartTimesRef = useRef<Record<string, number>>({});
 
   // Dynamic Action Button Mode (Recap vs Brainstorm)
   const [actionButtonMode, setActionButtonMode] = useState<
@@ -1557,25 +1447,33 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     cleanups.push(
       window.electronAPI.onIntelligenceSuggestedAnswerToken((data) => {
         const intent = getSuggestedAnswerIntent(data.question);
-        if (!streamStartTimesRef.current[intent]) {
-          streamStartTimesRef.current[intent] = Date.now();
+        const actionId = data.actionId || createLiveActionId();
+        if (!streamStartTimesRef.current[actionId]) {
+          streamStartTimesRef.current[actionId] = Date.now();
         }
-        setMessages((prev) => appendStreamingMessage(prev, intent, data.token));
+        setMessages((prev) => appendStreamingMessage(prev, actionId, intent, data.token));
       }),
     );
 
     cleanups.push(
       window.electronAPI.onIntelligenceSuggestedAnswer((data) => {
-        setActionLoading((prev) => ({ ...prev, whatToSay: false }));
         const intent = getSuggestedAnswerIntent(data.question);
+        const actionId = data.actionId || createLiveActionId();
+        const loadingKey = intent === "code_hint"
+          ? "codeHint"
+          : intent === "brainstorm"
+            ? "brainstorm"
+            : "whatToSay";
+        finishActionLoading(loadingKey, actionId);
         const durationMs =
-          Date.now() - (streamStartTimesRef.current[intent] || Date.now());
-        delete streamStartTimesRef.current[intent];
+          Date.now() - (streamStartTimesRef.current[actionId] || Date.now());
+        delete streamStartTimesRef.current[actionId];
         setMessages((prev) =>
-          finalizeStreamingMessage(prev, intent, data.answer, {
+          finalizeStreamingMessage(prev, actionId, intent, data.answer, {
             modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(data.answer),
             durationMs,
+            ...getServiceTierMessageMeta(data),
           }),
         );
       }),
@@ -1584,25 +1482,28 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // STREAMING: Refinement
     cleanups.push(
       window.electronAPI.onIntelligenceRefinedAnswerToken((data) => {
-        if (!streamStartTimesRef.current[data.intent]) {
-          streamStartTimesRef.current[data.intent] = Date.now();
+        const actionId = data.actionId || createLiveActionId();
+        if (!streamStartTimesRef.current[actionId]) {
+          streamStartTimesRef.current[actionId] = Date.now();
         }
         setMessages((prev) =>
-          appendStreamingMessage(prev, data.intent, data.token),
+          appendStreamingMessage(prev, actionId, data.intent, data.token),
         );
       }),
     );
 
     cleanups.push(
       window.electronAPI.onIntelligenceRefinedAnswer((data) => {
+        const actionId = data.actionId || createLiveActionId();
         const durationMs =
-          Date.now() - (streamStartTimesRef.current[data.intent] || Date.now());
-        delete streamStartTimesRef.current[data.intent];
+          Date.now() - (streamStartTimesRef.current[actionId] || Date.now());
+        delete streamStartTimesRef.current[actionId];
         setMessages((prev) =>
-          finalizeStreamingMessage(prev, data.intent, data.answer, {
+          finalizeStreamingMessage(prev, actionId, data.intent, data.answer, {
             modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(data.answer),
             durationMs,
+            ...getServiceTierMessageMeta(data),
           }),
         );
       }),
@@ -1611,26 +1512,29 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // STREAMING: Recap
     cleanups.push(
       window.electronAPI.onIntelligenceRecapToken((data) => {
-        if (!streamStartTimesRef.current["recap"]) {
-          streamStartTimesRef.current["recap"] = Date.now();
+        const actionId = data.actionId || createLiveActionId();
+        if (!streamStartTimesRef.current[actionId]) {
+          streamStartTimesRef.current[actionId] = Date.now();
         }
         setMessages((prev) =>
-          appendStreamingMessage(prev, "recap", data.token),
+          appendStreamingMessage(prev, actionId, "recap", data.token),
         );
       }),
     );
 
     cleanups.push(
       window.electronAPI.onIntelligenceRecap((data) => {
-        setActionLoading((prev) => ({ ...prev, recap: false }));
+        const actionId = data.actionId || createLiveActionId();
+        finishActionLoading("recap", actionId);
         const durationMs =
-          Date.now() - (streamStartTimesRef.current["recap"] || Date.now());
-        delete streamStartTimesRef.current["recap"];
+          Date.now() - (streamStartTimesRef.current[actionId] || Date.now());
+        delete streamStartTimesRef.current[actionId];
         setMessages((prev) =>
-          finalizeStreamingMessage(prev, "recap", data.summary, {
+          finalizeStreamingMessage(prev, actionId, "recap", data.summary, {
             modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(data.summary),
             durationMs,
+            ...getServiceTierMessageMeta(data),
           }),
         );
       }),
@@ -1650,35 +1554,39 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
     cleanups.push(
       window.electronAPI.onIntelligenceFollowUpQuestionsToken((data) => {
-        if (!streamStartTimesRef.current["follow_up_questions"]) {
-          streamStartTimesRef.current["follow_up_questions"] = Date.now();
+        const actionId = data.actionId || createLiveActionId();
+        if (!streamStartTimesRef.current[actionId]) {
+          streamStartTimesRef.current[actionId] = Date.now();
         }
         setMessages((prev) =>
-          appendStreamingMessage(prev, "follow_up_questions", data.token),
+          appendStreamingMessage(prev, actionId, "follow_up_questions", data.token),
         );
       }),
     );
 
     cleanups.push(
       window.electronAPI.onIntelligenceFollowUpQuestionsUpdate((data) => {
-        setActionLoading((prev) => ({ ...prev, followUpQuestions: false }));
+        const actionId = data.actionId || createLiveActionId();
+        finishActionLoading("followUpQuestions", actionId);
         const text =
           typeof data.questions === "string"
             ? data.questions
             : JSON.stringify(data.questions);
         const durationMs =
           Date.now() -
-          (streamStartTimesRef.current["follow_up_questions"] || Date.now());
-        delete streamStartTimesRef.current["follow_up_questions"];
+          (streamStartTimesRef.current[actionId] || Date.now());
+        delete streamStartTimesRef.current[actionId];
         setMessages((prev) =>
           finalizeStreamingMessage(
             prev,
+            actionId,
             "follow_up_questions",
             data.questions,
             {
               modelUsed: shortenModelName(currentModelRef.current),
               tokensUsed: estimateTokens(text),
               durationMs,
+              ...getServiceTierMessageMeta(data),
             },
           ),
         );
@@ -1688,16 +1596,36 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     cleanups.push(
       window.electronAPI.onIntelligenceManualResult((data) => {
         decrementPending();
+        const actionId = activeActionIdsRef.current.manual || "manual";
         const durationMs =
-          Date.now() - (streamStartTimesRef.current["manual"] || Date.now());
-        delete streamStartTimesRef.current["manual"];
+          Date.now() - (streamStartTimesRef.current[actionId] || Date.now());
+        delete streamStartTimesRef.current[actionId];
         setMessages((prev) =>
-          settleActionMessage(prev, "manual", data.answer, {
+          settleActionMessage(prev, actionId, "manual", data.answer, {
             modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(data.answer),
             durationMs,
           }),
         );
+      }),
+    );
+
+    cleanups.push(
+      window.electronAPI.onIntelligenceActionCancelled((data) => {
+        const intent = getMessageIntentForMode(data.mode);
+        const modeToKey: Record<string, string> = {
+          what_to_say: "whatToSay",
+          follow_up: "followUp",
+          recap: "recap",
+          clarify: "clarify",
+          follow_up_questions: "followUpQuestions",
+          code_hint: "codeHint",
+          brainstorm: "brainstorm",
+        };
+        const loadingKey = modeToKey[data.mode];
+        if (loadingKey) finishActionLoading(loadingKey, data.actionId);
+        delete streamStartTimesRef.current[data.actionId];
+        setMessages((prev) => cancelActionMessage(prev, data.actionId, intent));
       }),
     );
 
@@ -1717,11 +1645,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         };
         const key = modeToKey[data.mode];
         if (key) {
-          setActionLoading((prev) => ({ ...prev, [key]: false }));
+          finishActionLoading(key, data.actionId);
         }
         const intent = getMessageIntentForMode(data.mode);
+        const actionId = data.actionId || activeActionIdsRef.current[key || intent] || createLiveActionId();
+        delete streamStartTimesRef.current[actionId];
         setMessages((prev) =>
-          settleActionMessage(prev, intent, `Error (${data.mode}): ${data.error}`),
+          settleActionMessage(prev, actionId, intent, formatLiveActionError(data.error, data.mode), undefined, "failed"),
         );
       }),
     );
@@ -1760,25 +1690,28 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   useEffect(() => {
     const cleanupToken = window.electronAPI.onIntelligenceClarifyToken(
       (data) => {
-        if (!streamStartTimesRef.current["clarify"]) {
-          streamStartTimesRef.current["clarify"] = Date.now();
+        const actionId = data.actionId || createLiveActionId();
+        if (!streamStartTimesRef.current[actionId]) {
+          streamStartTimesRef.current[actionId] = Date.now();
         }
         setMessages((prev) =>
-          appendStreamingMessage(prev, "clarify", data.token),
+          appendStreamingMessage(prev, actionId, "clarify", data.token),
         );
       },
     );
 
     const cleanupFinal = window.electronAPI.onIntelligenceClarify((data) => {
-      setActionLoading((prev) => ({ ...prev, clarify: false }));
+      const actionId = data.actionId || createLiveActionId();
+      finishActionLoading("clarify", actionId);
       const durationMs =
-        Date.now() - (streamStartTimesRef.current["clarify"] || Date.now());
-      delete streamStartTimesRef.current["clarify"];
+        Date.now() - (streamStartTimesRef.current[actionId] || Date.now());
+      delete streamStartTimesRef.current[actionId];
       setMessages((prev) =>
-        finalizeStreamingMessage(prev, "clarify", data.clarification, {
+        finalizeStreamingMessage(prev, actionId, "clarify", data.clarification, {
           modelUsed: shortenModelName(currentModelRef.current),
           tokensUsed: estimateTokens(data.clarification),
           durationMs,
+          ...getServiceTierMessageMeta(data),
         }),
       );
     });
@@ -1801,8 +1734,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const handleWhatToSay = async () => {
     const intent = "what_to_answer";
     setIsExpanded(true);
-    setActionLoading((prev) => ({ ...prev, whatToSay: true }));
-    queueActionMessage(intent, "Preparing what you can say...");
+    const actionId = queueActionMessage(intent, "Preparing what you can say...", "whatToSay");
     incrementPending();
     analytics.trackCommandExecuted("what_to_say");
 
@@ -1833,56 +1765,48 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
     try {
       // Pass imagePath if attached
-      const result = await window.electronAPI.generateWhatToSay(
-        undefined,
-        currentAttachments.length > 0
+      const result = await window.electronAPI.generateWhatToSay({
+        actionId,
+        imagePaths: currentAttachments.length > 0
           ? currentAttachments.map((s) => s.path)
           : undefined,
-      );
+      });
+      if (result?.error) throw new Error(result.error);
       const answer = result?.answer || "";
       if (answer) {
         setMessages((prev) =>
-          finalizePendingActionMessage(prev, intent, answer, {
+          finalizePendingActionMessage(prev, actionId, intent, answer, {
             modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(answer),
           }),
         );
-      } else {
-        setMessages((prev) =>
-          settleActionMessage(
-            prev,
-            intent,
-            "I could not generate a reliable suggestion from the current meeting context.",
-          ),
-        );
       }
     } catch (err) {
       setMessages((prev) =>
-        settleActionMessage(prev, intent, `Error: ${err}`),
+        settleActionMessage(prev, actionId, intent, formatLiveActionError(err), undefined, "failed"),
       );
     } finally {
-      setActionLoading((prev) => ({ ...prev, whatToSay: false }));
+      finishActionLoading("whatToSay", actionId);
       decrementPending();
     }
   };
 
   const handleFollowUp = async (intent: string = "rephrase") => {
     setIsExpanded(true);
+    const actionId = queueActionMessage(intent, "Refining the previous answer...", "followUp");
     incrementPending();
     analytics.trackCommandExecuted("follow_up_" + intent);
 
     try {
-      await window.electronAPI.generateFollowUp(intent);
+      const result = await window.electronAPI.generateFollowUp({ actionId, intent });
+      const refined = result?.refined || "";
+      if (refined) {
+        setMessages((prev) => finalizePendingActionMessage(prev, actionId, intent, refined));
+      }
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          role: "system",
-          text: `Error: ${err}`,
-        },
-      ]);
+      setMessages((prev) => settleActionMessage(prev, actionId, intent, formatLiveActionError(err), undefined, "failed"));
     } finally {
+      finishActionLoading("followUp", actionId);
       decrementPending();
     }
   };
@@ -1890,36 +1814,27 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const handleRecap = async () => {
     const intent = "recap";
     setIsExpanded(true);
-    setActionLoading((prev) => ({ ...prev, recap: true }));
-    queueActionMessage(intent, "Preparing a short recap...");
+    const actionId = queueActionMessage(intent, "Preparing a short recap...", "recap");
     incrementPending();
     analytics.trackCommandExecuted("recap");
 
     try {
-      const result = await window.electronAPI.generateRecap();
+      const result = await window.electronAPI.generateRecap({ actionId });
       const summary = result?.summary;
       if (summary) {
         setMessages((prev) =>
-          finalizePendingActionMessage(prev, intent, summary, {
+          finalizePendingActionMessage(prev, actionId, intent, summary, {
             modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(summary),
           }),
         );
-      } else {
-        setMessages((prev) =>
-          settleActionMessage(
-            prev,
-            intent,
-            "I could not produce a useful recap from the current context.",
-          ),
-        );
       }
     } catch (err) {
       setMessages((prev) =>
-        settleActionMessage(prev, intent, `Error: ${err}`),
+        settleActionMessage(prev, actionId, intent, formatLiveActionError(err), undefined, "failed"),
       );
     } finally {
-      setActionLoading((prev) => ({ ...prev, recap: false }));
+      finishActionLoading("recap", actionId);
       decrementPending();
     }
   };
@@ -1927,13 +1842,12 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const handleFollowUpQuestions = async () => {
     const intent = "follow_up_questions";
     setIsExpanded(true);
-    setActionLoading((prev) => ({ ...prev, followUpQuestions: true }));
-    queueActionMessage(intent, "Finding a useful follow-up question...");
+    const actionId = queueActionMessage(intent, "Finding a useful follow-up question...", "followUpQuestions");
     incrementPending();
     analytics.trackCommandExecuted("suggest_questions");
 
     try {
-      const result = await window.electronAPI.generateFollowUpQuestions();
+      const result = await window.electronAPI.generateFollowUpQuestions({ actionId });
       const questions =
         typeof result?.questions === "string"
           ? result.questions
@@ -1942,26 +1856,18 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
             : "";
       if (questions) {
         setMessages((prev) =>
-          finalizePendingActionMessage(prev, intent, questions, {
+          finalizePendingActionMessage(prev, actionId, intent, questions, {
             modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(questions),
           }),
         );
-      } else {
-        setMessages((prev) =>
-          settleActionMessage(
-            prev,
-            intent,
-            "I could not find a reliable follow-up question from the current context.",
-          ),
-        );
       }
     } catch (err) {
       setMessages((prev) =>
-        settleActionMessage(prev, intent, `Error: ${err}`),
+        settleActionMessage(prev, actionId, intent, formatLiveActionError(err), undefined, "failed"),
       );
     } finally {
-      setActionLoading((prev) => ({ ...prev, followUpQuestions: false }));
+      finishActionLoading("followUpQuestions", actionId);
       decrementPending();
     }
   };
@@ -1969,36 +1875,27 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const handleClarify = async () => {
     const intent = "clarify";
     setIsExpanded(true);
-    setActionLoading((prev) => ({ ...prev, clarify: true }));
-    queueActionMessage(intent, "Preparing one clarifying question...");
+    const actionId = queueActionMessage(intent, "Preparing one clarifying question...", "clarify");
     incrementPending();
     analytics.trackCommandExecuted("clarify");
 
     try {
-      const result = await window.electronAPI.generateClarify();
+      const result = await window.electronAPI.generateClarify({ actionId });
       const clarification = result?.clarification || "";
       if (clarification) {
         setMessages((prev) =>
-          finalizePendingActionMessage(prev, intent, clarification, {
+          finalizePendingActionMessage(prev, actionId, intent, clarification, {
             modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(clarification),
           }),
         );
-      } else {
-        setMessages((prev) =>
-          settleActionMessage(
-            prev,
-            intent,
-            "I could not generate a reliable clarifying question from the current context.",
-          ),
-        );
       }
     } catch (err) {
       setMessages((prev) =>
-        settleActionMessage(prev, intent, `Error: ${err}`),
+        settleActionMessage(prev, actionId, intent, formatLiveActionError(err), undefined, "failed"),
       );
     } finally {
-      setActionLoading((prev) => ({ ...prev, clarify: false }));
+      finishActionLoading("clarify", actionId);
       decrementPending();
     }
   };
@@ -2006,8 +1903,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const handleCodeHint = async () => {
     const intent = "code_hint";
     setIsExpanded(true);
-    setActionLoading((prev) => ({ ...prev, codeHint: true }));
-    queueActionMessage(intent, "Preparing a concise code hint...");
+    const actionId = queueActionMessage(intent, "Preparing a concise code hint...", "codeHint");
     incrementPending();
     analytics.trackCommandExecuted("code_hint");
 
@@ -2029,34 +1925,27 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     }
 
     try {
-      const result = await window.electronAPI.generateCodeHint(
-        currentAttachments.length > 0
+      const result = await window.electronAPI.generateCodeHint({
+        actionId,
+        imagePaths: currentAttachments.length > 0
           ? currentAttachments.map((s) => s.path)
           : undefined,
-      );
+      });
       const hint = result?.hint || "";
       if (hint) {
         setMessages((prev) =>
-          finalizePendingActionMessage(prev, intent, hint, {
+          finalizePendingActionMessage(prev, actionId, intent, hint, {
             modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(hint),
           }),
         );
-      } else {
-        setMessages((prev) =>
-          settleActionMessage(
-            prev,
-            intent,
-            "I could not generate a reliable code hint from the current context.",
-          ),
-        );
       }
     } catch (err) {
       setMessages((prev) =>
-        settleActionMessage(prev, intent, `Error: ${err}`),
+        settleActionMessage(prev, actionId, intent, formatLiveActionError(err), undefined, "failed"),
       );
     } finally {
-      setActionLoading((prev) => ({ ...prev, codeHint: false }));
+      finishActionLoading("codeHint", actionId);
       decrementPending();
     }
   };
@@ -2064,8 +1953,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const handleBrainstorm = async () => {
     const intent = "brainstorm";
     setIsExpanded(true);
-    setActionLoading((prev) => ({ ...prev, brainstorm: true }));
-    queueActionMessage(intent, "Preparing useful options...");
+    const actionId = queueActionMessage(intent, "Preparing useful options...", "brainstorm");
     incrementPending();
     analytics.trackCommandExecuted("brainstorm");
 
@@ -2087,34 +1975,27 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     }
 
     try {
-      const result = await window.electronAPI.generateBrainstorm(
-        currentAttachments.length > 0
+      const result = await window.electronAPI.generateBrainstorm({
+        actionId,
+        imagePaths: currentAttachments.length > 0
           ? currentAttachments.map((s) => s.path)
           : undefined,
-      );
+      });
       const script = result?.script || "";
       if (script) {
         setMessages((prev) =>
-          finalizePendingActionMessage(prev, intent, script, {
+          finalizePendingActionMessage(prev, actionId, intent, script, {
             modelUsed: shortenModelName(currentModelRef.current),
             tokensUsed: estimateTokens(script),
           }),
         );
-      } else {
-        setMessages((prev) =>
-          settleActionMessage(
-            prev,
-            intent,
-            "I could not generate reliable options from the current context.",
-          ),
-        );
       }
     } catch (err) {
       setMessages((prev) =>
-        settleActionMessage(prev, intent, `Error: ${err}`),
+        settleActionMessage(prev, actionId, intent, formatLiveActionError(err), undefined, "failed"),
       );
     } finally {
-      setActionLoading((prev) => ({ ...prev, brainstorm: false }));
+      finishActionLoading("brainstorm", actionId);
       decrementPending();
     }
   };
@@ -2411,6 +2292,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
     setPendingCount(0);
     setActionLoading({});
+    activeActionIdsRef.current = {};
     requestStartTimeRef.current = null;
     streamStartTimesRef.current = {};
     geminiStreamBufferRef.current = "";
@@ -4374,6 +4256,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
                   {messages.map((msg) => (
                     <div
                       key={msg.id}
+                      data-action-id={msg.actionId || undefined}
+                      data-action-status={msg.actionStatus || undefined}
+                      data-action-intent={msg.intent || undefined}
+                      data-service-tier={msg.serviceTierUsed || undefined}
+                      data-service-tier-fallback={msg.serviceTierFallback ? "true" : undefined}
                       className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"} animate-fade-in-up`}
                     >
                       <div
@@ -4435,6 +4322,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
                               <span className="flex items-center gap-1.5">
                                 <Sparkles className="w-3 h-3" />
                                 {msg.modelUsed}
+                                {msg.serviceTierFallback
+                                  ? " · Standard fallback"
+                                  : msg.serviceTierUsed === "fast"
+                                    ? " · Fast"
+                                    : ""}
                               </span>
                               {msg.durationMs != null ? (
                                 <span className="tabular-nums">

@@ -2,9 +2,14 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const { execFileSync } = require('child_process');
 
 const args = parseArgs(process.argv.slice(2));
+if (args['self-test']) {
+  runSelfTest();
+  process.exit(0);
+}
 const meetingId = args['meeting-id'];
 if (!meetingId) {
   fail('Usage: pnpm run meeting:summary:guard -- --meeting-id <id> [--reference summary_chatgpt.txt] [--db path]');
@@ -27,18 +32,25 @@ const summaryJson = safeJson(meeting.summary_json || '{}');
 const detailed = summaryJson.detailedSummary || {};
 const summaryText = renderSummaryText(detailed);
 const referenceText = referencePath ? fs.readFileSync(referencePath, 'utf8') : '';
-const report = evaluateSummary(summaryText, detailed, referenceText);
+const transcriptText = referenceText || queryJson(dbPath, `
+  select content
+  from transcripts
+  where meeting_id = '${escapeSql(meetingId)}'
+  order by timestamp_ms asc
+`).map(row => row.content || '').filter(Boolean).join('\n');
+const report = evaluateSummary(summaryText, detailed, transcriptText, meeting.title);
 
 console.log(JSON.stringify({
   meetingId,
   title: meeting.title,
   referencePath,
+  evidenceSource: referenceText ? 'reference_file' : transcriptText ? 'persisted_transcript' : 'none',
   ...report,
 }, null, 2));
 
 if (report.failures.length > 0) process.exit(1);
 
-function evaluateSummary(summaryText, detailed, referenceText) {
+function evaluateSummary(summaryText, detailed, referenceText, meetingTitle = '') {
   const normalizedSummary = normalize(summaryText);
   const normalizedReference = normalize(referenceText);
   const failures = [];
@@ -51,11 +63,26 @@ function evaluateSummary(summaryText, detailed, referenceText) {
     .reduce((count, section) => count + (Array.isArray(section.bullets) ? section.bullets.length : 0), 0);
   const actionLikeCount = (Array.isArray(detailed.actionItems) ? detailed.actionItems.length : 0) + planActionBullets;
   const quality = detailed.quality || {};
+  const summaryItems = [
+    ...(Array.isArray(detailed.actionItems) ? detailed.actionItems : []),
+    ...(Array.isArray(detailed.keyPoints) ? detailed.keyPoints : []),
+    ...sections.flatMap(section => Array.isArray(section.bullets) ? section.bullets : []),
+  ].filter(Boolean);
+  const duplicateItems = countDuplicateItems(summaryItems);
+  const overlyLongItems = summaryItems.filter(item => String(item).length > 320).length;
 
-  if (summaryText.length < 1800) failures.push(`summary_too_short:${summaryText.length}`);
+  if (isRepeatedTitle(meetingTitle)) failures.push('duplicate_title');
+  if (normalize(meetingTitle).length > 140) failures.push(`title_too_long:${meetingTitle.length}`);
+  if (summaryText.length < 700) failures.push(`summary_too_short:${summaryText.length}`);
+  if (summaryText.length > 7500) failures.push(`summary_too_long:${summaryText.length}`);
+  else if (summaryText.length > 6000) warnings.push(`summary_length_warning:${summaryText.length}`);
   if (populatedSections.length < 4) failures.push(`too_few_populated_sections:${populatedSections.length}`);
-  if (bullets < 12) failures.push(`too_few_section_bullets:${bullets}`);
-  if (actionLikeCount < 3) failures.push(`too_few_action_items:${actionLikeCount}`);
+  if (bullets < 8) failures.push(`too_few_section_bullets:${bullets}`);
+  if (bullets > 28) failures.push(`too_many_section_bullets:${bullets}`);
+  if (summaryItems.length > 42) failures.push(`too_many_summary_items:${summaryItems.length}`);
+  if (actionLikeCount < 2) failures.push(`too_few_action_items:${actionLikeCount}`);
+  if (duplicateItems > 0) failures.push(`duplicate_summary_items:${duplicateItems}`);
+  if (overlyLongItems > 0) failures.push(`overly_long_summary_items:${overlyLongItems}`);
   if (!quality || typeof quality.score !== 'number') failures.push('summary_quality_metadata_missing');
   if (typeof quality.score === 'number' && quality.score < 72) failures.push(`summary_quality_score_low:${quality.score}`);
   if (quality.needsReview === true) failures.push('summary_marked_needs_review');
@@ -76,7 +103,7 @@ function evaluateSummary(summaryText, detailed, referenceText) {
     if (!pattern.test(normalizedSummary)) failures.push(`missing_category:${name}`);
   }
 
-  const requiredSignals = buildRequiredSignals(normalizedReference || normalizedSummary);
+  const requiredSignals = buildRequiredSignals(normalizedReference);
   for (const [name, pattern] of requiredSignals) {
     if (!pattern.test(normalizedSummary)) failures.push(`missing_signal:${name}`);
   }
@@ -92,17 +119,110 @@ function evaluateSummary(summaryText, detailed, referenceText) {
     sections: sections.length,
     populatedSections: populatedSections.length,
     bullets,
+    summaryItems: summaryItems.length,
+    duplicateItems,
     quality,
     failures,
     warnings,
   };
 }
 
+function isRepeatedTitle(title) {
+  const clean = String(title || '').replace(/\s+/g, ' ').trim();
+  if (clean.length < 8) return false;
+  for (let separatorLength = 0; separatorLength <= 3; separatorLength += 1) {
+    const contentLength = clean.length - separatorLength;
+    if (contentLength <= 0 || contentLength % 2 !== 0) continue;
+    const half = contentLength / 2;
+    const first = clean.slice(0, half).trim();
+    const second = clean.slice(half + separatorLength).trim();
+    if (first.length >= 4 && normalize(first) === normalize(second)) return true;
+  }
+  return false;
+}
+
+function summaryItemKey(item) {
+  return normalize(String(item || '').replace(/^(?:decision retenue|décision retenue|action|question ouverte|risque|a verifier|à vérifier)\s*:\s*/i, ''));
+}
+
+function countDuplicateItems(items) {
+  const kept = [];
+  let duplicates = 0;
+  for (const item of items) {
+    const key = summaryItemKey(item);
+    if (!key) continue;
+    const duplicate = kept.some(existing => {
+      if (existing === key) return true;
+      const shorter = existing.length <= key.length ? existing : key;
+      const longer = existing.length > key.length ? existing : key;
+      return shorter.length >= 48 && longer.includes(shorter) && shorter.length / longer.length >= 0.82;
+    });
+    if (duplicate) duplicates += 1;
+    else kept.push(key);
+  }
+  return duplicates;
+}
+
+function runSelfTest() {
+  const assert = require('node:assert/strict');
+  const sectionTitles = ['Résumé exécutif', 'Décisions', "Plan d'action", 'Questions ouvertes', 'Risques', 'Points à vérifier'];
+  const detailed = {
+    overview: 'La réunion a défini une décision prioritaire et un plan concret. Les risques, questions ouvertes et validations à effectuer avant la mise en œuvre ont été clarifiés de manière opérationnelle.',
+    actionItems: ['Action : vérifier le déploiement avant vendredi', 'Action : envoyer le rapport final'],
+    keyPoints: ['Décision retenue : conserver le service actuel', 'Risque : surveiller la stabilité du compte'],
+    sections: sectionTitles.map((title, index) => ({
+      title,
+      bullets: [
+        `${title} : élément opérationnel unique ${index + 1} à vérifier avant la suite du projet`,
+        `${title} : second élément concret ${index + 1} avec une priorité et une action définie`,
+      ],
+    })),
+    quality: { score: 92, checks: [], sourcesUsed: ['fixture'], needsReview: false },
+  };
+  const text = renderSummaryText(detailed);
+  const clean = evaluateSummary(text, detailed, '', 'Revue du déploiement produit');
+  assert.equal(clean.failures.includes('duplicate_title'), false);
+
+  const duplicateTitle = evaluateSummary(text, detailed, '', 'Revue produitRevue produit');
+  assert.equal(duplicateTitle.failures.includes('duplicate_title'), true);
+
+  const duplicated = structuredClone(detailed);
+  duplicated.sections[1].bullets.push(duplicated.sections[0].bullets[0]);
+  const duplicateItems = evaluateSummary(renderSummaryText(duplicated), duplicated, '', 'Revue produit');
+  assert.equal(duplicateItems.failures.some(failure => failure.startsWith('duplicate_summary_items:')), true);
+
+  const bloated = structuredClone(detailed);
+  bloated.sections = bloated.sections.map((section, sectionIndex) => ({
+    ...section,
+    bullets: Array.from({ length: 6 }, (_, bulletIndex) => `${section.title} fait unique ${sectionIndex}-${bulletIndex} avec décision action risque question priorité vérification.`),
+  }));
+  const bloatReport = evaluateSummary(renderSummaryText(bloated), bloated, '', 'Revue produit');
+  assert.equal(bloatReport.failures.some(failure => failure.startsWith('too_many_section_bullets:')), true);
+  assert.deepEqual(buildRequiredSignals('une notification de connexion a ete envoyee'), []);
+  assert.deepEqual(buildRequiredSignals('il faut ecrire une entreprise dans le formulaire'), []);
+  assert.equal(buildRequiredSignals('saisie typing puis recording audio').some(([name]) => name === 'typing_recording'), true);
+  assert.equal(buildRequiredSignals('abonnement en expiration avec notification de renouvellement').some(([name]) => name === 'subscription_expiry'), true);
+  console.log('Meeting summary quality self-test passed (8 scenarios).');
+}
+
 function buildRequiredSignals(source) {
-  const signals = [
-    ['typing_recording', /\b(typing|ecrire|enregistrer|recording|audio)\b/],
-    ['subscription_expiry', /\b(abonnement|expiration|renouvel|notification)\b/],
-  ];
+  const signals = [];
+  const typingSignal = /\b(typing|ecrire|saisie)\b/;
+  const recordingSignal = /\b(enregistrer|enregistrement|recording|audio)\b/;
+  if (typingSignal.test(source) && recordingSignal.test(source)) {
+    signals.push([
+      'typing_recording',
+      /(?=.*\b(?:typing|ecrire|saisie)\b)(?=.*\b(?:enregistrer|enregistrement|recording|audio)\b)/,
+    ]);
+  }
+  const subscriptionSignal = /\b(abonnement|subscription)\b/;
+  const expirySignal = /\b(expiration|expir|renouvel|notification)\b/;
+  if (subscriptionSignal.test(source) && expirySignal.test(source)) {
+    signals.push([
+      'subscription_expiry',
+      /(?=.*\b(?:abonnement|subscription)\b)(?=.*\b(?:expiration|expir|renouvel|notification)\b)/,
+    ]);
+  }
   const proxyMeetingSource = /\b(wachap|proxy|proxies|adresse ip|adresses ip|webshare|qr|pin|compte connecte|comptes connectes)\b/.test(source);
   if (proxyMeetingSource) {
     signals.push(
@@ -113,7 +233,7 @@ function buildRequiredSignals(source) {
       ['capacity_ambiguity', /\b(utilisateur|utilisateurs|compte|comptes)\b/],
     );
   }
-  return signals.filter(([, pattern]) => pattern.test(source));
+  return signals;
 }
 
 function referenceCoverage(summary, reference) {
@@ -156,8 +276,23 @@ function renderSummaryText(detailed) {
 }
 
 function queryJson(dbPath, sql) {
-  const output = execFileSync('sqlite3', ['-readonly', '-json', dbPath, sql], { encoding: 'utf8' }).trim();
-  return output ? JSON.parse(output) : [];
+  let lastError;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const output = execFileSync(
+        'sqlite3',
+        ['-cmd', '.timeout 5000', '-json', `${pathToFileURL(dbPath).href}?mode=ro`, sql],
+        { encoding: 'utf8' },
+      ).trim();
+      return output ? JSON.parse(output) : [];
+    } catch (error) {
+      lastError = error;
+      const detail = `${error?.message || ''}\n${error?.stderr || ''}`;
+      if (!/unable to open database|database is (?:locked|busy)/i.test(detail) || attempt === 4) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200 * (attempt + 1));
+    }
+  }
+  throw lastError;
 }
 
 function safeJson(text) {
