@@ -2,7 +2,6 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { pathToFileURL } = require('url');
 const { execFileSync } = require('child_process');
 
 const args = parseArgs(process.argv.slice(2));
@@ -36,6 +35,7 @@ const transcriptText = referenceText || queryJson(dbPath, `
   select content
   from transcripts
   where meeting_id = '${escapeSql(meetingId)}'
+    and lower(coalesce(speaker, '')) not in ('assistant', 'ai', 'model', 'system')
   order by timestamp_ms asc
 `).map(row => row.content || '').filter(Boolean).join('\n');
 const report = evaluateSummary(summaryText, detailed, transcriptText, meeting.title);
@@ -200,9 +200,11 @@ function runSelfTest() {
   assert.equal(bloatReport.failures.some(failure => failure.startsWith('too_many_section_bullets:')), true);
   assert.deepEqual(buildRequiredSignals('une notification de connexion a ete envoyee'), []);
   assert.deepEqual(buildRequiredSignals('il faut ecrire une entreprise dans le formulaire'), []);
+  assert.deepEqual(buildRequiredSignals('wachap utilise un espace de travail par defaut et des roles limites'), []);
   assert.equal(buildRequiredSignals('saisie typing puis recording audio').some(([name]) => name === 'typing_recording'), true);
   assert.equal(buildRequiredSignals('abonnement en expiration avec notification de renouvellement').some(([name]) => name === 'subscription_expiry'), true);
-  console.log('Meeting summary quality self-test passed (8 scenarios).');
+  assert.equal(buildRequiredSignals('tester des proxies webshare statiques avec 25 ou 50 adresses ip').some(([name]) => name === 'proxy_ip'), true);
+  console.log('Meeting summary quality self-test passed (10 scenarios).');
 }
 
 function buildRequiredSignals(source) {
@@ -223,15 +225,21 @@ function buildRequiredSignals(source) {
       /(?=.*\b(?:abonnement|subscription)\b)(?=.*\b(?:expiration|expir|renouvel|notification)\b)/,
     ]);
   }
-  const proxyMeetingSource = /\b(wachap|proxy|proxies|adresse ip|adresses ip|webshare|qr|pin|compte connecte|comptes connectes)\b/.test(source);
+  const proxyMeetingSource = /\b(proxy|proxies|adresse ip|adresses ip|webshare)\b/.test(source);
   if (proxyMeetingSource) {
-    signals.push(
-      ['proxy_ip', /\b(proxy|proxies|ip|adresse|adresses)\b/],
-      ['provider_test_strategy', /\b(webshare|gratuit|statique|test)\b/],
-      ['ip_purchase_tradeoff', /\b(25|50)\b/],
-      ['account_audit_numbers', /\b(196|200|qr|pin|connecte|connectes)\b/],
-      ['capacity_ambiguity', /\b(utilisateur|utilisateurs|compte|comptes)\b/],
-    );
+    signals.push(['proxy_ip', /\b(proxy|proxies|ip|adresse|adresses)\b/]);
+    if (/\b(webshare|gratuit|gratuits|statique|statiques|test)\b/.test(source)) {
+      signals.push(['provider_test_strategy', /\b(webshare|gratuit|statique|test)\b/]);
+    }
+    if (/\b(25|50)\b/.test(source)) {
+      signals.push(['ip_purchase_tradeoff', /\b(25|50)\b/]);
+    }
+    if (/\b(196|200|qr|pin|compte connecte|comptes connectes)\b/.test(source)) {
+      signals.push(['account_audit_numbers', /\b(196|200|qr|pin|connecte|connectes)\b/]);
+    }
+    if (/\b(utilisateur|utilisateurs|compte|comptes)\b/.test(source)) {
+      signals.push(['capacity_ambiguity', /\b(utilisateur|utilisateurs|compte|comptes)\b/]);
+    }
   }
   return signals;
 }
@@ -276,23 +284,41 @@ function renderSummaryText(detailed) {
 }
 
 function queryJson(dbPath, sql) {
-  let lastError;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    try {
-      const output = execFileSync(
-        'sqlite3',
-        ['-cmd', '.timeout 5000', '-json', `${pathToFileURL(dbPath).href}?mode=ro`, sql],
-        { encoding: 'utf8' },
-      ).trim();
-      return output ? JSON.parse(output) : [];
-    } catch (error) {
-      lastError = error;
-      const detail = `${error?.message || ''}\n${error?.stderr || ''}`;
-      if (!/unable to open database|database is (?:locked|busy)/i.test(detail) || attempt === 4) throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200 * (attempt + 1));
+  let bridgeDir;
+  let queryPath = dbPath;
+  if (process.platform === 'darwin') {
+    bridgeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'natively-summary-db-'));
+    queryPath = path.join(bridgeDir, 'database.db');
+    fs.copyFileSync(dbPath, queryPath);
+    for (const suffix of ['-wal', '-shm']) {
+      const sidecarPath = `${dbPath}${suffix}`;
+      if (fs.existsSync(sidecarPath)) fs.copyFileSync(sidecarPath, `${queryPath}${suffix}`);
     }
   }
-  throw lastError;
+
+  let lastError;
+  try {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        const output = execFileSync(
+          'sqlite3',
+          process.platform === 'darwin'
+            ? ['-cmd', `.open ${queryPath}`, '-cmd', '.timeout 5000', '-json', ':memory:', sql]
+            : ['-cmd', '.timeout 5000', '-readonly', '-json', queryPath, sql],
+          { encoding: 'utf8' },
+        ).trim();
+        return output ? JSON.parse(output) : [];
+      } catch (error) {
+        lastError = error;
+        const detail = `${error?.message || ''}\n${error?.stderr || ''}`;
+        if (!/unable to open database|database is (?:locked|busy)/i.test(detail) || attempt === 4) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200 * (attempt + 1));
+      }
+    }
+    throw lastError;
+  } finally {
+    if (bridgeDir) fs.rmSync(bridgeDir, { recursive: true, force: true });
+  }
 }
 
 function safeJson(text) {

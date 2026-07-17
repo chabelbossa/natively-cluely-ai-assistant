@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { pathToFileURL } = require('url');
 const { execFileSync, spawnSync } = require('child_process');
 const Module = require('module');
 
@@ -299,12 +299,30 @@ function checkPromptEngineeringContract(failures) {
 }
 
 function queryJson(sql) {
-  const output = execFileSync(
-    'sqlite3',
-    ['-cmd', '.timeout 5000', '-json', `${pathToFileURL(dbPath).href}?mode=ro`, sql],
-    { encoding: 'utf8' },
-  ).trim();
-  return output ? JSON.parse(output) : [];
+  let snapshotDir;
+  let queryPath = dbPath;
+  try {
+    if (process.platform === 'darwin') {
+      snapshotDir = fs.mkdtempSync(path.join(os.tmpdir(), 'natively-runtime-db-'));
+      queryPath = path.join(snapshotDir, 'database.db');
+      fs.copyFileSync(dbPath, queryPath);
+      for (const suffix of ['-wal', '-shm']) {
+        const sidecarPath = `${dbPath}${suffix}`;
+        if (fs.existsSync(sidecarPath)) fs.copyFileSync(sidecarPath, `${queryPath}${suffix}`);
+      }
+    }
+
+    const output = execFileSync(
+      'sqlite3',
+      process.platform === 'darwin'
+        ? ['-cmd', `.open ${queryPath}`, '-cmd', '.timeout 5000', '-json', ':memory:', sql]
+        : ['-cmd', '.timeout 5000', '-readonly', '-json', queryPath, sql],
+      { encoding: 'utf8' },
+    ).trim();
+    return output ? JSON.parse(output) : [];
+  } finally {
+    if (snapshotDir) fs.rmSync(snapshotDir, { recursive: true, force: true });
+  }
 }
 
 function readJsonl(filePath) {

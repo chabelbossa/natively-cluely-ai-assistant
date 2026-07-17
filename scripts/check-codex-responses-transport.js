@@ -57,7 +57,7 @@ async function main() {
     const client = new CodexResponsesClient(makeRouter());
     assert.equal(await client.generateResponse({ ...params, stream: false }), 'OK');
     assert.equal(requests.length, 1);
-    assert.equal(requests[0].service_tier, 'fast');
+    assert.equal(requests[0].service_tier, 'priority');
     assert.equal(requests[0].model, 'gpt-5.6-terra');
     assert.deepEqual(client.getLastServiceTierStatus(), {
       requested: 'fast',
@@ -72,7 +72,7 @@ async function main() {
       const body = JSON.parse(options.body);
       requests.push(body);
       return body.service_tier
-        ? new Response('Fast mode unavailable: service_tier fast is not enabled', {
+        ? new Response('Priority processing unavailable: service_tier priority is not enabled', {
             status: 400,
             headers: { 'content-type': 'text/plain' },
           })
@@ -87,12 +87,12 @@ async function main() {
       'STANDARD_OK',
     );
     assert.equal(requests.length, 2, 'a Fast capability rejection must retry once in Standard mode');
-    assert.equal(requests[0].service_tier, 'fast');
+    assert.equal(requests[0].service_tier, 'priority');
     assert.equal(requests[1].service_tier, undefined);
     assert.equal(client.getLastServiceTierStatus().used, 'standard');
     assert.equal(client.getLastServiceTierStatus().fallback, true);
 
-    const assertStructuredFailure = async (status, body, expectedCode, expectedTier = 'fast') => {
+    const assertStructuredFailure = async (status, body, expectedCode, expectedTier = 'priority') => {
       requests.length = 0;
       global.fetch = async (_url, options) => {
         requests.push(JSON.parse(options.body));
@@ -120,7 +120,7 @@ async function main() {
       requests.push(JSON.parse(options.body));
       requestIndex += 1;
       return requestIndex === 1
-        ? new Response('Fast mode unavailable: service_tier fast is not enabled', { status: 400 })
+        ? new Response('Priority processing unavailable: service_tier priority is not enabled', { status: 400 })
         : new Response('OAuth token expired', { status: 401 });
     };
     const standardFailureClient = new CodexResponsesClient(makeRouter());
@@ -168,7 +168,7 @@ async function main() {
     }
     assert.equal(streamed, 'Réponse unique.');
     assert.equal(requests.length, 1);
-    assert.equal(requests[0].service_tier, 'fast');
+    assert.equal(requests[0].service_tier, 'priority');
 
     requests.length = 0;
     global.fetch = async (_url, options) => {
@@ -182,7 +182,7 @@ async function main() {
     const nonStreamingSse = await client.generateResponse({ ...params, stream: false });
     assert.equal(nonStreamingSse, 'Réponse unique.');
     assert.equal(requests.length, 1);
-    assert.equal(requests[0].service_tier, 'fast');
+    assert.equal(requests[0].service_tier, 'priority');
 
     let releaseFastRequest;
     const fastRequestGate = new Promise((resolve) => {
@@ -199,7 +199,7 @@ async function main() {
         });
       }
       if (body.service_tier) {
-        return new Response('Fast mode unavailable: service_tier fast is not enabled', { status: 400 });
+        return new Response('Priority processing unavailable: service_tier priority is not enabled', { status: 400 });
       }
       return new Response(JSON.stringify({ output_text: 'STANDARD_OK' }), {
         status: 200,

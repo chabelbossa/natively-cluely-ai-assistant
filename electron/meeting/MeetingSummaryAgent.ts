@@ -44,6 +44,7 @@ interface GenerateSummaryInput {
 
 interface EvidenceBundle {
   digest: string;
+  factDigest: string;
   sourcesUsed: string[];
   debugPath?: string;
   audioManifestPath?: string;
@@ -304,15 +305,19 @@ ${sectionShape}
     const diagnostics: string[] = [];
     const sourcesUsed = new Set<string>();
     const parts: string[] = [];
+    const factParts: string[] = [];
 
     const transcriptDigest = this.buildTranscriptDigest(input.transcript);
     if (transcriptDigest) {
-      parts.push(`[PERSISTED TRANSCRIPT]\n${transcriptDigest}`);
+      const transcriptBlock = `[PERSISTED TRANSCRIPT]\n${transcriptDigest}`;
+      parts.push(transcriptBlock);
+      factParts.push(transcriptBlock);
       sourcesUsed.add('persisted_transcript');
     }
 
     if (input.fallbackContext?.trim()) {
-      parts.push(`[SESSION CONTEXT]\n${this.compact(input.fallbackContext, 8000)}`);
+      const contextBlock = `[SESSION CONTEXT]\n${this.compact(input.fallbackContext, 8000)}`;
+      parts.push(contextBlock);
       sourcesUsed.add('session_context');
     }
 
@@ -353,6 +358,7 @@ ${sectionShape}
 
     return {
       digest: this.compact(parts.join('\n\n'), MAX_DIGEST_CHARS),
+      factDigest: this.compact(factParts.join('\n\n'), MAX_DIGEST_CHARS),
       sourcesUsed: Array.from(sourcesUsed),
       debugPath,
       audioManifestPath,
@@ -523,7 +529,10 @@ ${sectionShape}
       ...(summary.keyPoints || []),
       ...(summary.sections || []).flatMap((section) => section.bullets || []),
     ].join(' '));
-    const evidenceText = this.normalize(evidence.digest);
+    const factualEvidence = evidence.factDigest
+      .replace(/\[\d{4}-\d{2}-\d{2}T[^\]]+\]/g, ' ')
+      .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, ' ');
+    const evidenceText = this.normalize(factualEvidence);
     const checks: string[] = [];
 
     const bullets = (summary.sections || []).reduce((count, section) => count + (section.bullets?.length || 0), 0);
@@ -557,7 +566,7 @@ ${sectionShape}
       [/\b(typing|en train d ecrire|en train d enregistrer|recording)\b/, /\b(typing|ecrire|enregistrer|recording|audio)\b/, 'missing_typing_recording'],
       [/\b(abonnement|expiration|expire|renouvel)\b/, /\b(abonnement|expiration|renouvel|notification)\b/, 'missing_subscription_expiry'],
     ];
-    const proxyMeetingEvidence = /\b(wachap|proxy|proxies|adresse ip|adresses ip|webshare|qr|pin|compte connecte|comptes connectes)\b/.test(evidenceText);
+    const proxyMeetingEvidence = /\b(proxy|proxies|adresse ip|adresses ip|webshare)\b/.test(evidenceText);
     if (proxyMeetingEvidence) {
       signalChecks.push(
         [/\b(proxy|proxies|adresse ip|adresses ip|webshare)\b/, /\b(proxy|proxies|ip|webshare|adresse)\b/, 'missing_proxy_ip'],

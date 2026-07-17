@@ -140,14 +140,14 @@ const checks = [
     pattern: /\{copilotQuality && !hasActionConversation && \(/,
   },
   {
-    name: "free-form text questions use the meeting context action pipeline",
+    name: "free-form text questions use the agentic pipeline with refreshed meeting context",
     pattern:
-      /const useMeetingContextAnswer = currentAttachments\.length === 0[\s\S]*window\.electronAPI\.submitManualQuestion/,
+      /const runAgenticResponse =[\s\S]*window\.electronAPI\.getIntelligenceContext[\s\S]*buildAgenticAnswerContext[\s\S]*const handleManualSubmit =[\s\S]*runAgenticResponse\([\s\S]*source: currentAttachments\.length > 0 \? "screenshot" : "manual"/,
   },
   {
     name: "manual meeting answers settle the existing input card instead of appending duplicates",
     pattern:
-      /onIntelligenceManualResult[\s\S]*settleActionMessage\(prev, "manual", data\.answer/,
+      /onIntelligenceManualResult[\s\S]*const actionId = activeActionIdsRef\.current\.manual \|\| "manual"[\s\S]*settleActionMessage\(prev, actionId, "manual", data\.answer/,
   },
   {
     name: "intelligence listeners survive hide/show while actions are in flight",

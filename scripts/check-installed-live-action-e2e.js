@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { _electron: electron } = require('playwright');
 
@@ -11,6 +12,8 @@ const executablePath = path.join(appPath, 'Contents', 'MacOS', 'Natively');
 const timeoutMs = Number(process.env.NATIVELY_INSTALLED_E2E_TIMEOUT_MS || 180_000);
 const requestedModel = String(process.env.NATIVELY_E2E_MODEL || 'codex:gpt-5.6-terra').trim();
 const playwrightElectronLoader = path.join(__dirname, 'playwright-electron-autostart-loader.js');
+const codexAuthPath = path.join(os.homedir(), '.codex', 'auth.json');
+const isolatedCredentialsPath = path.join(os.tmpdir(), `natively-installed-e2e-credentials-${process.pid}.enc`);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -39,7 +42,11 @@ function installedProcessIds() {
 
 async function stopInstalledApp() {
   try {
-    execFileSync('osascript', ['-e', 'tell application id "com.electron.meeting-notes" to quit'], { stdio: 'ignore' });
+    execFileSync('osascript', ['-e', 'tell application id "com.electron.meeting-notes" to quit'], {
+      stdio: 'ignore',
+      timeout: 3_000,
+      killSignal: 'SIGKILL',
+    });
   } catch {}
 
   const gracefulDeadline = Date.now() + 8_000;
@@ -56,6 +63,15 @@ async function stopInstalledApp() {
   const forcedDeadline = Date.now() + 4_000;
   while (Date.now() < forcedDeadline && installedProcessIds().length > 0) {
     await sleep(200);
+  }
+  for (const pid of installedProcessIds()) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {}
+  }
+  const killDeadline = Date.now() + 2_000;
+  while (Date.now() < killDeadline && installedProcessIds().length > 0) {
+    await sleep(100);
   }
   if (installedProcessIds().length > 0) {
     throw new Error(`Could not stop the installed Natively process at ${executablePath}`);
@@ -84,9 +100,9 @@ async function waitForActionStatus(page, actionId, acceptedStatuses) {
   );
 }
 
-async function injectTranscriptAndStartTrace(electronApp) {
+async function injectTranscriptAndStartTrace(electronApp, scenario = 'direct-question') {
   const now = Date.now();
-  const segments = [
+  const directQuestionSegments = [
     {
       speaker: 'Interviewer',
       text: 'Comment allez-vous garantir la cohérence des stocks entre les pharmacies ?',
@@ -118,6 +134,41 @@ async function injectTranscriptAndStartTrace(electronApp) {
       qualityFlags: ['system_audio', 'speaker_stable', 'trusted_interlocutor'],
     },
   ];
+  const workspaceExplanationSegments = [
+    {
+      speaker: 'Interviewer',
+      text: 'Les données existantes seront rattachées à un espace de travail par défaut. Chaque nouvel espace isolera ses comptes WhatsApp, ses conversations et ses paramètres.',
+      timestamp: now - 44_000,
+      final: true,
+      confidence: 0.99,
+      canonicalRole: 'interlocutor',
+      source: 'system',
+      qualityFlags: ['system_audio', 'speaker_stable', 'trusted_interlocutor'],
+    },
+    {
+      speaker: 'Interviewer',
+      text: 'Chaque organisation pourra inviter des utilisateurs avec des rôles et permissions différents. Un freelance pourra être limité à un seul compte WhatsApp ou à une partie des fonctions.',
+      timestamp: now - 21_000,
+      final: true,
+      confidence: 0.99,
+      canonicalRole: 'interlocutor',
+      source: 'system',
+      qualityFlags: ['system_audio', 'speaker_stable', 'trusted_interlocutor'],
+    },
+    {
+      speaker: 'Interviewer',
+      text: 'Les agents de support pourront gérer uniquement les chats autorisés. Essayez de préparer un petit document qui explique comment on va gérer tout ça.',
+      timestamp: now - 3_000,
+      final: true,
+      confidence: 0.99,
+      canonicalRole: 'interlocutor',
+      source: 'system',
+      qualityFlags: ['system_audio', 'speaker_stable', 'trusted_interlocutor'],
+    },
+  ];
+  const segments = scenario === 'workspace-document'
+    ? workspaceExplanationSegments
+    : directQuestionSegments;
 
   return electronApp.evaluate(({ app }, payload) => {
     const appRoot = app.getAppPath();
@@ -125,14 +176,44 @@ async function injectTranscriptAndStartTrace(electronApp) {
     const pathModule = nodeRequire('node:path');
     const { AppState } = nodeRequire(pathModule.join(appRoot, 'dist-electron/electron/main.js'));
     const { MeetingDebugRecorder } = nodeRequire(pathModule.join(appRoot, 'dist-electron/electron/diagnostics/MeetingDebugRecorder.js'));
+    const { CredentialsManager } = nodeRequire(pathModule.join(appRoot, 'dist-electron/electron/services/CredentialsManager.js'));
     const state = AppState.getInstance();
     const manager = state.getIntelligenceManager();
     const recorder = MeetingDebugRecorder.getInstance();
     const llmHelper = state.processingHelper.getLLMHelper();
 
+    const fsModule = nodeRequire('node:fs');
+    const auth = JSON.parse(fsModule.readFileSync(payload.codexAuthPath, 'utf8'));
+    const tokens = auth.tokens || {};
+    const decodeJwtPayload = (token) => {
+      try {
+        return JSON.parse(Buffer.from(String(token).split('.')[1] || '', 'base64url').toString('utf8'));
+      } catch {
+        return {};
+      }
+    };
+    const identityClaims = decodeJwtPayload(tokens.id_token || tokens.access_token);
+    const accessClaims = decodeJwtPayload(tokens.access_token);
+    const credentialsManager = CredentialsManager.getInstance();
+    credentialsManager.saveCredentials = () => {};
+    credentialsManager.credentials.codexAccounts = [{
+      alias: 'installed-e2e',
+      email: String(identityClaims.email || identityClaims['https://api.openai.com/profile']?.email || 'codex-e2e@local').toLowerCase(),
+      enabled: true,
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token,
+      idToken: tokens.id_token,
+      expiresAt: new Date(Number(accessClaims.exp || 0) * 1000 || Date.now() + 3_600_000).toISOString(),
+      obtainedAt: auth.last_refresh || new Date().toISOString(),
+      consecutiveErrors: 0,
+      requestCount: 0,
+      weight: 1,
+    }];
+    llmHelper.initializeCodexAuth();
+
     manager.reset();
     if (payload.model) llmHelper.setModel(payload.model);
-    recorder.startSession({ test: 'installed-live-action-e2e' });
+    recorder.startSession({ test: 'installed-live-action-e2e', scenario: payload.scenario });
     for (const segment of payload.segments) manager.recordTranscriptOnly(segment);
 
     return {
@@ -142,7 +223,7 @@ async function injectTranscriptAndStartTrace(electronApp) {
       model: llmHelper.getCurrentModel(),
       tracePath: recorder.getCurrentFilePath(),
     };
-  }, { segments, model: requestedModel });
+  }, { segments, model: requestedModel, scenario, codexAuthPath });
 }
 
 async function finishTrace(electronApp, success) {
@@ -168,6 +249,8 @@ function readTrace(tracePath) {
 
 async function main() {
   assert.ok(fs.existsSync(executablePath), `Installed Natively executable missing: ${executablePath}`);
+  assert.ok(fs.existsSync(codexAuthPath), `Codex CLI authentication missing: ${codexAuthPath}`);
+  fs.rmSync(isolatedCredentialsPath, { force: true });
   await stopInstalledApp();
 
   let electronApp;
@@ -177,23 +260,29 @@ async function main() {
   const rendererErrors = [];
 
   try {
+    console.log('[installed-live-action-e2e] launching packaged app');
     electronApp = await electron.launch({
       executablePath,
       args: ['-r', playwrightElectronLoader],
       env: {
         ...process.env,
         NATIVELY_MEETING_DEBUG: '1',
+        NATIVELY_CREDENTIALS_PATH: isolatedCredentialsPath,
       },
       timeout: 60_000,
     });
 
+    console.log('[installed-live-action-e2e] waiting for overlay');
     const overlay = await waitForOverlay(electronApp);
+    console.log(`[installed-live-action-e2e] overlay ready: ${overlay.url()}`);
     overlay.on('pageerror', (error) => rendererErrors.push(error.message));
     await overlay.waitForLoadState('domcontentloaded');
     const actionButton = overlay.locator('[data-testid="natively-action-what-to-answer"]');
     await actionButton.waitFor({ state: 'attached', timeout: 45_000 });
 
+    console.log('[installed-live-action-e2e] injecting direct-question context');
     const appInfo = await injectTranscriptAndStartTrace(electronApp);
+    console.log('[installed-live-action-e2e] direct-question context injected');
     tracePath = appInfo.tracePath;
     traceStarted = true;
     assert.equal(appInfo.isPackaged, true, 'The E2E must run against a packaged application');
@@ -202,24 +291,22 @@ async function main() {
     assert.match(appInfo.model, /^codex:gpt-5\.6-(sol|terra|luna)$/, `Installed live action model is not GPT-5.6: ${appInfo.model}`);
 
     await actionButton.click({ force: true });
+    console.log('[installed-live-action-e2e] direct-question action clicked');
     const actionCard = overlay.locator('[data-action-intent="what_to_answer"]').last();
     await actionCard.waitFor({ state: 'attached', timeout: 15_000 });
     const actionId = await actionCard.getAttribute('data-action-id');
     assert.ok(actionId, 'The clicked action did not create an actionId-tagged card');
 
     await waitForActionStatus(overlay, actionId, ['completed', 'failed']);
+    console.log('[installed-live-action-e2e] direct-question action reached terminal state');
     const terminalCard = overlay.locator(`[data-action-id="${actionId}"]`);
     const status = await terminalCard.getAttribute('data-action-status');
     const answer = (await terminalCard.innerText()).trim();
     assert.equal(status, 'completed', `Installed What to say failed: ${answer}`);
-    assert.ok(answer.length >= 40, `Installed What to say returned an implausibly short answer: ${answer}`);
+    assert.ok(answer.length >= 120, `Installed What to say returned an underdeveloped answer: ${answer}`);
     assert.equal(await terminalCard.count(), 1, 'A single actionId must render exactly one terminal card');
     const serviceTier = await terminalCard.getAttribute('data-service-tier');
-    assert.match(String(serviceTier || ''), /^(fast|standard)$/, `Missing service-tier telemetry on the terminal card: ${serviceTier}`);
-    if (serviceTier === 'standard') {
-      assert.equal(await terminalCard.getAttribute('data-service-tier-fallback'), 'true');
-      assert.match(answer, /Standard fallback/, 'Standard fallback must be visible in the installed UI');
-    }
+    assert.equal(serviceTier, 'fast', `Installed GPT-5.6 action did not use Fast: ${serviceTier}`);
 
     const lateToken = ' __LATE_TOKEN_MUST_BE_IGNORED__';
     await electronApp.evaluate(({ BrowserWindow }, payload) => {
@@ -268,16 +355,57 @@ async function main() {
       /cohérence des stocks.*pharmacies/i,
       `The action targeted the wrong turn: ${JSON.stringify(actionTarget)}`,
     );
-    assert.ok(String(actionResult.payload?.answer || '').length >= 40, 'The packaged trace does not contain a real answer');
+    const directAnswer = String(actionResult.payload?.answer || '');
+    assert.ok(directAnswer.length >= 120, 'The packaged trace does not contain a substantive answer');
+    const directAnswerNormalized = directAnswer.toLocaleLowerCase('fr-FR');
+    const coveredStockFacts = ['stock', 'hors ligne', 'conflit', 'idempotent', 'version', 'transaction', 'négatif', 'synchron']
+      .filter((term) => directAnswerNormalized.includes(term)).length;
+    assert.ok(coveredStockFacts >= 2, `The direct answer ignored the stock-consistency constraints: ${directAnswer}`);
     assert.equal(actionResult.payload?.provider, 'codex', `The packaged action used ${actionResult.payload?.provider}`);
     assert.match(String(actionResult.payload?.model || ''), /gpt-5\.6-(sol|terra|luna)/, `The packaged action used ${actionResult.payload?.model}`);
 
     await sleep(3_250);
+    console.log('[installed-live-action-e2e] injecting workspace-document context');
+    const workspaceInfo = await injectTranscriptAndStartTrace(electronApp, 'workspace-document');
+    tracePath = workspaceInfo.tracePath;
+    traceStarted = true;
     await actionButton.click({ force: true });
+    console.log('[installed-live-action-e2e] workspace-document action clicked');
     const secondCard = overlay.locator('[data-action-intent="what_to_answer"]').last();
     await secondCard.waitFor({ state: 'attached', timeout: 15_000 });
-    const errorActionId = await secondCard.getAttribute('data-action-id');
-    assert.ok(errorActionId && errorActionId !== actionId, 'A second click must receive a new actionId');
+    const workspaceActionId = await secondCard.getAttribute('data-action-id');
+    assert.ok(workspaceActionId && workspaceActionId !== actionId, 'A second click must receive a new actionId');
+    await waitForActionStatus(overlay, workspaceActionId, ['completed', 'failed']);
+    console.log('[installed-live-action-e2e] workspace-document action reached terminal state');
+    const workspaceCard = overlay.locator(`[data-action-id="${workspaceActionId}"]`);
+    const workspaceStatus = await workspaceCard.getAttribute('data-action-status');
+    const workspaceAnswer = (await workspaceCard.innerText()).trim();
+    assert.equal(workspaceStatus, 'completed', `Installed multi-turn answer failed: ${workspaceAnswer}`);
+    assert.ok(workspaceAnswer.length >= 120, `Installed multi-turn answer is underdeveloped: ${workspaceAnswer}`);
+    assert.equal(await workspaceCard.getAttribute('data-service-tier'), 'fast', 'Multi-turn GPT-5.6 action did not use Fast');
+
+    tracePath = await finishTrace(electronApp, true);
+    traceStarted = false;
+    const workspaceEvents = readTrace(tracePath);
+    const workspaceContexts = workspaceEvents.filter((event) => event.type === 'action_context');
+    const workspaceResults = workspaceEvents.filter((event) => event.type === 'action_result' && event.payload?.actionId === workspaceActionId);
+    assert.equal(workspaceContexts.length, 1, `Expected one workspace action_context, found ${workspaceContexts.length}`);
+    assert.equal(workspaceResults.length, 1, `Expected one workspace action_result, found ${workspaceResults.length}`);
+    const workspaceTarget = workspaceContexts[0].payload?.actionTarget || {};
+    assert.equal(workspaceTarget.kind, 'implicit_request', `Workspace request was not recognized: ${JSON.stringify(workspaceTarget)}`);
+    assert.match(String(workspaceTarget.text || ''), /préparer un petit document/i, `Wrong workspace request target: ${JSON.stringify(workspaceTarget)}`);
+    assert.equal(workspaceContexts[0].payload?.languageHint, 'fr', 'Workspace request language was not detected as French');
+    const workspaceAnswerNormalized = workspaceAnswer.toLocaleLowerCase('fr-FR');
+    const coveredWorkspaceFacts = ['espace', 'whatsapp', 'rôle', 'freelance', 'support', 'document']
+      .filter((term) => workspaceAnswerNormalized.includes(term)).length;
+    assert.ok(coveredWorkspaceFacts >= 4, `Multi-turn answer did not synthesize enough of the explanation: ${workspaceAnswer}`);
+
+    await sleep(3_250);
+    await actionButton.click({ force: true });
+    const thirdCard = overlay.locator('[data-action-intent="what_to_answer"]').last();
+    await thirdCard.waitFor({ state: 'attached', timeout: 15_000 });
+    const errorActionId = await thirdCard.getAttribute('data-action-id');
+    assert.ok(errorActionId && errorActionId !== workspaceActionId, 'A third click must receive a new actionId');
     const fastMessage = 'Codex Fast is unavailable for codex:gpt-5.6-terra on account "e2e". No standard-mode fallback was used.';
     await electronApp.evaluate(({ app, BrowserWindow }, payload) => {
       const appRoot = app.getAppPath();
@@ -317,6 +445,11 @@ async function main() {
       model: actionResult.payload?.model,
       serviceTier,
       answerCharacters: String(actionResult.payload?.answer || '').length,
+      stockFactsCovered: coveredStockFacts,
+      workspaceActionId,
+      workspaceTarget,
+      workspaceAnswerCharacters: workspaceAnswer.length,
+      workspaceFactsCovered: coveredWorkspaceFacts,
       fastUnavailableUi: 'passed',
       tracePath,
     }, null, 2));
@@ -332,6 +465,7 @@ async function main() {
       } catch {}
     }
     await stopInstalledApp().catch(() => undefined);
+    fs.rmSync(isolatedCredentialsPath, { force: true });
   }
 }
 

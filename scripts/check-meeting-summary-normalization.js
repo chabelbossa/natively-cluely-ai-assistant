@@ -9,9 +9,15 @@ const { buildSync } = require('esbuild');
 
 const repoRoot = path.resolve(__dirname, '..');
 const sourcePath = path.join(repoRoot, 'electron/meeting/MeetingSummaryQuality.ts');
+const sourceAgentPath = path.join(repoRoot, 'electron/meeting/MeetingSummaryAgent.ts');
 const compiledPath = path.join(repoRoot, 'dist-electron/electron/meeting/MeetingSummaryQuality.js');
+const compiledAgentPath = path.join(repoRoot, 'dist-electron/electron/meeting/MeetingSummaryAgent.js');
 
-if (!fs.existsSync(compiledPath) || fs.statSync(sourcePath).mtimeMs > fs.statSync(compiledPath).mtimeMs) {
+if (
+  !fs.existsSync(compiledPath)
+  || !fs.existsSync(compiledAgentPath)
+  || Math.max(fs.statSync(sourcePath).mtimeMs, fs.statSync(sourceAgentPath).mtimeMs) > Math.min(fs.statSync(compiledPath).mtimeMs, fs.statSync(compiledAgentPath).mtimeMs)
+) {
   const build = spawnSync('npm', ['run', 'build:electron'], { cwd: repoRoot, encoding: 'utf8' });
   if (build.status !== 0) {
     process.stderr.write(build.stdout || '');
@@ -29,6 +35,7 @@ const {
   sanitizeMeetingTitle,
   summaryNeedsReview,
 } = require(compiledPath);
+const { MeetingSummaryAgent } = require(compiledAgentPath);
 
 const presentationBuild = buildSync({
   entryPoints: [path.join(repoRoot, 'src/lib/summaryPresentation.ts')],
@@ -89,4 +96,28 @@ assert.deepEqual(
   ['Puce modifiée', '', 'Puce suivante'],
 );
 
-console.log('Meeting summary normalization tests passed (16 assertions).');
+const summaryAgent = new MeetingSummaryAgent({});
+const factualSummary = {
+  overview: 'La réunion a défini une décision prioritaire sur les espaces de travail, ainsi que les rôles à limiter et les validations nécessaires avant le déploiement.',
+  actionItems: ['Action : vérifier les permissions avant le déploiement', 'Action : envoyer le document explicatif'],
+  keyPoints: ['Décision retenue : isoler les données de chaque espace', 'Risque : éviter un accès trop large aux comptes'],
+  sections: [
+    { title: 'Résumé exécutif', bullets: ['Priorité : documenter le fonctionnement avant la mise en œuvre', 'Les espaces isolent comptes, conversations et paramètres'] },
+    { title: 'Décisions', bullets: ['Décision retenue : rattacher les données existantes à un espace par défaut', 'Décision retenue : limiter chaque rôle aux fonctions autorisées'] },
+    { title: "Plan d'action", bullets: ['Action : préparer le document demandé', 'Action : tester les permissions de chaque rôle', 'Action : vérifier ensuite les accès des agents'] },
+    { title: 'Questions ouvertes', bullets: ['Question ouverte : clarifier le périmètre exact du freelance', 'À vérifier : définir les accès de support'] },
+    { title: 'Risques', bullets: ['Risque : exposer des conversations à un rôle non autorisé', 'Risque : mélanger les paramètres de deux espaces'] },
+    { title: 'Points à vérifier', bullets: ['À vérifier : valider l’isolation des comptes', 'À vérifier : confirmer les règles avant le déploiement'] },
+  ],
+};
+const technicalEvidence = {
+  digest: '[PERSISTED TRANSCRIPT]\n[2026-07-17T12:57:59.868Z] INTERLOCUTOR: Les espaces de travail isolent les comptes.\n[AI USAGE HISTORY]\nL’abonnement expire dans 30 jours.',
+  factDigest: '[PERSISTED TRANSCRIPT]\n[2026-07-17T12:57:59.868Z] INTERLOCUTOR: Les espaces de travail isolent les comptes.',
+  sourcesUsed: ['persisted_transcript', 'ai_usage_history'],
+  diagnostics: [],
+};
+const technicalEvidenceQuality = summaryAgent.evaluateSummary(factualSummary, technicalEvidence);
+assert.equal(technicalEvidenceQuality.checks.includes('missing_numeric_facts'), false);
+assert.equal(technicalEvidenceQuality.checks.includes('missing_subscription_expiry'), false);
+
+console.log('Meeting summary normalization tests passed (18 assertions).');

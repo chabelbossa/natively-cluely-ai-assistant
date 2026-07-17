@@ -110,12 +110,17 @@ function inspectFile(filePath) {
       additionalItems: event.payload.additionalItems || [],
     });
 
+    const implicitSupportCount = (packet.context.match(/^support_\d+=/gm) || []).length;
     const weak =
       packet.hasReliableInterlocutor &&
       (
         (packet.interlocutorFocus.kind === 'topic' && isWeakTopic(packet.interlocutorFocus.text)) ||
         (packet.interlocutorFocus.kind === 'direct_question' && isWeakDirectQuestion(packet.interlocutorFocus.text)) ||
-        (packet.interlocutorFocus.kind === 'implicit_request' && isWeakImplicitRequest(packet.interlocutorFocus.text))
+        (
+          packet.interlocutorFocus.kind === 'implicit_request' &&
+          isWeakImplicitRequest(packet.interlocutorFocus.text) &&
+          implicitSupportCount < 2
+        )
       );
 
     const failed =
@@ -164,6 +169,7 @@ function inspectSyntheticCase(testCase) {
 
   const failed = Boolean(
     testCase.expectKind && packet.interlocutorFocus.kind !== testCase.expectKind ||
+    testCase.expectLanguage && packet.languageHint !== testCase.expectLanguage ||
     testCase.expectTargetSource && packet.actionTarget?.source !== testCase.expectTargetSource ||
     testCase.expectTargetKind && packet.actionTarget?.kind !== testCase.expectTargetKind ||
     testCase.mustInclude && !testCase.mustInclude.every((term) => normalize(packet.interlocutorFocus.text).includes(normalize(term))) ||
@@ -182,6 +188,7 @@ function inspectSyntheticCase(testCase) {
     focusKind: packet.interlocutorFocus.kind,
     focusConfidence: Number(packet.interlocutorFocus.confidence.toFixed(2)),
     focusText: packet.interlocutorFocus.text,
+    languageHint: packet.languageHint,
     targetSource: packet.actionTarget?.source,
     targetKind: packet.actionTarget?.kind,
     targetText: packet.actionTarget?.text,
@@ -645,6 +652,74 @@ const syntheticCases = [
     expectKind: 'topic',
     targetMustInclude: ['client desktop', 'mises à jour automatiques'],
     mustNotInclude: ['fidélisez'],
+  },
+  {
+    name: 'multi-turn workspace explanation ends with a document request',
+    action: 'WHAT_TO_SAY',
+    selectedSegments: [
+      {
+        role: 'interviewer',
+        speaker: 'interlocutor',
+        canonicalRole: 'interlocutor',
+        timestamp: Date.now() - 42_000,
+        text: "Les données existantes seront rattachées à un espace de travail par défaut. Un nouvel espace isolera ses comptes WhatsApp, ses conversations et ses paramètres.",
+        qualityFlags: ['system_audio', 'speaker_stable', 'trusted_interlocutor'],
+      },
+      {
+        role: 'interviewer',
+        speaker: 'interlocutor',
+        canonicalRole: 'interlocutor',
+        timestamp: Date.now() - 19_000,
+        text: "Chaque organisation pourra inviter des utilisateurs avec des rôles et permissions différents. Un freelance pourra être limité à un seul compte WhatsApp ou à une partie des fonctions.",
+        qualityFlags: ['system_audio', 'speaker_stable', 'trusted_interlocutor'],
+      },
+      {
+        role: 'interviewer',
+        speaker: 'interlocutor',
+        canonicalRole: 'interlocutor',
+        timestamp: Date.now() - 2_000,
+        text: "Les agents de support pourront gérer uniquement les chats autorisés. Essayez de préparer un petit document qui explique comment on va gérer tout ça.",
+        qualityFlags: ['system_audio', 'speaker_stable', 'trusted_interlocutor'],
+      },
+    ],
+    expectKind: 'implicit_request',
+    expectLanguage: 'fr',
+    targetMustInclude: ['préparer un petit document'],
+    contextMustInclude: ['espace de travail par défaut', 'rôles et permissions', 'freelance', 'agents de support'],
+  },
+  {
+    name: 'mostly English icon explanation stays English despite a few French labels',
+    action: 'WHAT_TO_SAY',
+    selectedSegments: [
+      {
+        role: 'interviewer',
+        speaker: 'interlocutor',
+        canonicalRole: 'interlocutor',
+        timestamp: Date.now() - 28_000,
+        text: "We should keep the existing icon library for the standard interface instead of recreating every icon from scratch.",
+        qualityFlags: ['system_audio', 'speaker_stable', 'trusted_interlocutor'],
+      },
+      {
+        role: 'interviewer',
+        speaker: 'interlocutor',
+        canonicalRole: 'interlocutor',
+        timestamp: Date.now() - 12_000,
+        text: "The custom tool is useful only when we need a specific icon that does not exist in the current set, même pour le frontend.",
+        qualityFlags: ['system_audio', 'speaker_stable', 'trusted_interlocutor'],
+      },
+      {
+        role: 'interviewer',
+        speaker: 'interlocutor',
+        canonicalRole: 'interlocutor',
+        timestamp: Date.now() - 2_000,
+        text: "That is where the tool will be useful, not for rebuilding the complete library.",
+        qualityFlags: ['system_audio', 'speaker_stable', 'trusted_interlocutor'],
+      },
+    ],
+    expectKind: 'implicit_request',
+    expectLanguage: 'en',
+    targetMustInclude: ['tool', 'useful'],
+    contextMustInclude: ['existing icon library', 'specific icon'],
   },
   {
     name: 'short acknowledgement after a question does not erase the target',

@@ -10,6 +10,9 @@ import { MeetingBriefManager } from './meeting/MeetingBriefManager';
 import { MeetingSummaryAgent, type MeetingDetailedSummary } from './meeting/MeetingSummaryAgent';
 import { sanitizeMeetingTitle } from './meeting/MeetingSummaryQuality';
 const crypto = require('crypto');
+const TITLE_STAGE_TIMEOUT_MS = 30_000;
+const SUMMARY_STAGE_TIMEOUT_MS = 45_000;
+const AGENTIC_SUMMARY_STAGE_TIMEOUT_MS = 60_000;
 
 export class MeetingPersistence {
     private session: SessionTracker;
@@ -54,11 +57,10 @@ export class MeetingPersistence {
         this.session.reset();
 
         const meetingId = crypto.randomUUID();
-        this.processAndSaveMeeting(snapshot, meetingId, metadataSnapshot).catch(err => {
-            console.error('[MeetingPersistence] Background processing failed:', err);
-        });
 
-        // 4. Initial Save (Placeholder)
+        // 3. Initial save (placeholder) must happen before the background worker.
+        // Otherwise a very fast local fallback can be overwritten by Processing...
+        // after the completed meeting was already persisted.
         const minutes = Math.floor(durationMs / 60000);
         const seconds = ((durationMs % 60000) / 1000).toFixed(0);
         const durationStr = `${minutes}:${Number(seconds) < 10 ? '0' : ''}${seconds}`;
@@ -83,6 +85,12 @@ export class MeetingPersistence {
         } catch (e) {
             console.error("Failed to save placeholder", e);
         }
+
+        // 4. Process in the background after the durable placeholder exists.
+        this.processAndSaveMeeting(snapshot, meetingId, metadataSnapshot).catch(err => {
+            console.error('[MeetingPersistence] Background processing failed:', err);
+            this.saveFallbackMeeting(snapshot, meetingId, metadataSnapshot);
+        });
 
         return meetingId;
     }
@@ -122,7 +130,11 @@ Rules:
                 const groqTitlePrompt = GROQ_TITLE_PROMPT;
                 const titleContext = this.compactContextForLLM(meetingContextForLLM, 12000);
 
-                const generatedTitle = await this.llmHelper.generateMeetingSummary(titlePrompt, titleContext, groqTitlePrompt);
+                const generatedTitle = await this.withStageTimeout(
+                    this.llmHelper.generateMeetingSummary(titlePrompt, titleContext, groqTitlePrompt),
+                    TITLE_STAGE_TIMEOUT_MS,
+                    'meeting title generation',
+                );
                 const cleanedTitle = sanitizeMeetingTitle(generatedTitle || '');
                 title = cleanedTitle && !this.isGenericTitle(cleanedTitle)
                     ? cleanedTitle
@@ -225,7 +237,11 @@ Return ONLY valid JSON (no markdown code blocks):
                     groqSummaryPrompt = GROQ_SUMMARY_JSON_PROMPT;
                 }
 
-                const generatedSummary = await this.llmHelper.generateMeetingSummary(summaryPrompt, meetingContextForLLM, groqSummaryPrompt);
+                const generatedSummary = await this.withStageTimeout(
+                    this.llmHelper.generateMeetingSummary(summaryPrompt, meetingContextForLLM, groqSummaryPrompt),
+                    SUMMARY_STAGE_TIMEOUT_MS,
+                    'structured meeting summary',
+                );
 
                 if (generatedSummary) {
                     // Strip markdown fences if present
@@ -273,15 +289,19 @@ Return ONLY valid JSON (no markdown code blocks):
         if (data.transcript.length > 0) {
             try {
                 const summaryAgent = new MeetingSummaryAgent(this.llmHelper);
-                summaryData = await summaryAgent.generate({
-                    meetingId,
-                    title,
-                    transcript: data.transcript,
-                    usage: data.usage,
-                    fallbackContext: data.context,
-                    metadata: metadata || null,
-                    existingSummary: summaryData,
-                });
+                summaryData = await this.withStageTimeout(
+                    summaryAgent.generate({
+                        meetingId,
+                        title,
+                        transcript: data.transcript,
+                        usage: data.usage,
+                        fallbackContext: data.context,
+                        metadata: metadata || null,
+                        existingSummary: summaryData,
+                    }),
+                    AGENTIC_SUMMARY_STAGE_TIMEOUT_MS,
+                    'agentic meeting summary',
+                );
                 console.log('[MeetingPersistence] Agentic summary quality:', summaryData.quality);
             } catch (agentError) {
                 console.warn('[MeetingPersistence] Agentic summary pass failed; keeping structured summary:', agentError);
@@ -322,6 +342,53 @@ Return ONLY valid JSON (no markdown code blocks):
 
         } catch (error) {
             console.error('[MeetingPersistence] Failed to save meeting:', error);
+        }
+    }
+
+    private async withStageTimeout<T>(promise: Promise<T>, timeoutMs: number, stage: string): Promise<T> {
+        let timeoutHandle: NodeJS.Timeout | undefined;
+        void promise.catch((): void => {});
+        try {
+            return await Promise.race([
+                promise,
+                new Promise<T>((_, reject) => {
+                    timeoutHandle = setTimeout(
+                        () => reject(new Error(`${stage} exceeded ${timeoutMs}ms`)),
+                        timeoutMs,
+                    );
+                }),
+            ]);
+        } finally {
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+        }
+    }
+
+    private saveFallbackMeeting(
+        data: { transcript: TranscriptSegment[], usage: any[], startTime: number, durationMs: number, context: string },
+        meetingId: string,
+        metadata?: { title?: string; calendarEventId?: string; source?: 'manual' | 'calendar' } | null,
+    ): void {
+        try {
+            const minutes = Math.floor(data.durationMs / 60000);
+            const seconds = ((data.durationMs % 60000) / 1000).toFixed(0);
+            const meetingData: Meeting = {
+                id: meetingId,
+                title: sanitizeMeetingTitle(metadata?.title || this.buildLocalTitle(data.transcript)),
+                date: new Date().toISOString(),
+                duration: `${minutes}:${Number(seconds) < 10 ? '0' : ''}${seconds}`,
+                summary: 'See detailed summary',
+                detailedSummary: this.buildLocalSummary(data.transcript),
+                transcript: data.transcript,
+                usage: data.usage,
+                calendarEventId: metadata?.calendarEventId,
+                source: metadata?.source || 'manual',
+                isProcessed: true,
+            };
+            DatabaseManager.getInstance().saveMeeting(meetingData, data.startTime, data.durationMs);
+            const wins = require('electron').BrowserWindow.getAllWindows();
+            wins.forEach((w: any) => w.webContents.send('meetings-updated'));
+        } catch (fallbackError) {
+            console.error('[MeetingPersistence] Failed to persist local fallback meeting:', fallbackError);
         }
     }
 

@@ -133,12 +133,12 @@ export class MeetingContextPacketBuilder {
       qualityFlags: item.qualityFlags,
       score: (item as ContextItem & { evidenceScore?: number }).evidenceScore || 0,
     }));
+    const languageEvidenceItems = actionTarget.source === 'local_user'
+      ? actionItems.filter((item) => item.role === 'user').slice(-6)
+      : supportingInterlocutorItems.slice(-6);
     const languageHint = this.detectLanguage([
       actionTarget.text,
-      interlocutorFocus.text,
-      localUserFocus.text,
-      ...actionItems.map((item) => item.text),
-      ...retrievedEvidenceItems.map((item) => item.text),
+      ...languageEvidenceItems.map((item) => item.text),
     ].join(' '));
     const rejectedSegments = this.buildRejectedSegments(input.lastSeconds, actionItems);
     const systemPrompt = this.buildSystemPrompt(
@@ -174,6 +174,7 @@ export class MeetingContextPacketBuilder {
       ...this.session.getActionContextDiagnostics(input.lastSeconds),
       `packet_action=${input.action}`,
       `packet_language_hint=${languageHint}`,
+      `packet_language_evidence_source=${actionTarget.source === 'local_user' ? 'local_user_target' : 'recent_interlocutor_target'}`,
       `packet_has_reliable_interlocutor=${hasReliableInterlocutor}`,
       `packet_context_trust_score=${contextTrustScore.toFixed(2)}`,
       `packet_focus_kind=${interlocutorFocus.kind}`,
@@ -252,7 +253,7 @@ export class MeetingContextPacketBuilder {
       switch (action) {
         case 'WHAT_TO_SAY':
         case 'VIBE_INTERVIEW_SAY_THIS':
-          return 'Output the exact words the user can say aloud now. If CURRENT INTERLOCUTOR FOCUS is a direct_question, answer that exact question with enough substance for the selected prompt profile and live setting. Use 2-3 sentences for simple questions and 4-7 strong spoken sentences for technical, behavioral, architectural, evidence-rich, or profile-critical questions. If it is an implicit_request, acknowledge it and propose the next concrete step. No preamble.';
+          return 'Output the exact words the user can say aloud now. If CURRENT INTERLOCUTOR FOCUS is a direct_question, answer that exact question with enough substance for the selected prompt profile and live setting. Use 2-3 sentences for simple questions and 4-7 strong spoken sentences for technical, behavioral, architectural, evidence-rich, or profile-critical questions. If it is an implicit_request after a multi-turn explanation, answer the complete request: confirm the understood scope using support_* facts, state the deliverable or decision, and give the next concrete step. Never merely echo the final request fragment. No preamble.';
         case 'CLARIFY':
           return 'Output exactly one precise clarifying question about the CURRENT INTERLOCUTOR FOCUS. It must clarify a concrete ambiguity, not ask a generic context question.';
         case 'FOLLOW_UP_QUESTION':
@@ -265,9 +266,13 @@ export class MeetingContextPacketBuilder {
       }
     })();
 
-    const languageRule = languageHint === 'fr' || languageHint === 'mixed'
-      ? 'Respond in French. If the transcript mixes French and English, still answer in French unless the user explicitly requests English.'
-      : 'Use the dominant meeting language.';
+    const languageRule = languageHint === 'fr'
+      ? 'Respond in French.'
+      : languageHint === 'en'
+        ? 'Respond in English.'
+        : languageHint === 'mixed'
+          ? 'Respond in the dominant language of the ACTION TARGET and the most recent interlocutor explanation. Do not default to French merely because some French words appear. If the user selected a fixed AI response language, that explicit setting wins.'
+          : 'Use the language of the ACTION TARGET or, if it is ambiguous, the most recent interlocutor turn. If the user selected a fixed AI response language, that explicit setting wins.';
 
     return `[PREMIUM MEETING CONTEXT PACKET]
 Action: ${action}
@@ -588,7 +593,7 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
         case 'WHAT_TO_SAY':
         case 'VIBE_INTERVIEW_SAY_THIS':
         case 'ANSWER':
-          return 'Say the answer the local user should give now. If target_kind=direct_question, answer it directly instead of asking another question.';
+          return 'Say the answer the local user should give now. If target_kind=direct_question, answer it directly instead of asking another question. If target_kind=implicit_request, use support_* to answer the entire explanation and requested deliverable; do not just repeat target_text.';
         case 'CLARIFY':
           return 'Ask one precise clarifying question about the target. Do not answer the target question.';
         case 'FOLLOW_UP_QUESTION':
@@ -1381,8 +1386,9 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     const normalized = this.normalize(text);
     const words = normalized.split(' ').filter(Boolean);
     if (words.length < 4 || words.length > 110) return false;
-    return /\b(il faut|tu dois|vous devez|on doit|j aimerais que|je veux que|prochaine etape|prochaine étape|priorite|priorité|deadline|a faire|à faire|we need|you need|please|next step|priority)\b/i.test(normalized) ||
-      /\b(tu|vous)\s+(commence|commencer|regarde|regarder|verifie|vérifie|prepare|prépare|envoie|envoyer|confirme|confirmer)\b/i.test(normalized);
+    return /\b(il faut|tu dois|vous devez|on doit|j aimerais que|je veux que|prochaine etape|prochaine étape|priorite|priorité|deadline|a faire|à faire|we need|you need|please|next step|priority|can you|could you|would you)\b/i.test(normalized) ||
+      /\b(tu|vous)\s+(commence|commencer|regarde|regarder|verifie|vérifie|prepare|prépare|envoie|envoyer|confirme|confirmer)\b/i.test(normalized) ||
+      /\b(essayez|préparez|preparez|faites|envoyez|vérifiez|verifiez|regardez|confirmez|documentez|résumez|resumez)\b/i.test(normalized);
   }
 
   private looksLikeExplanatoryFutureStatement(text: string): boolean {
@@ -1392,15 +1398,18 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
   }
 
   private detectLanguage(text: string): MeetingContextPacket['languageHint'] {
-    const normalized = text.toLowerCase();
+    const normalized = this.normalize(text);
     if (!normalized.trim()) return 'unknown';
-    const frenchHits = (normalized.match(/\b(le|la|les|des|que|qui|quoi|pour|avec|dans|donc|est ce|d accord|d'accord|ça|ca|nous|vous|tu|je|j|on|oui|non|comment|pourquoi|quand|quel|quelle|pouvez|peux|devrait|devons)\b/g) || []).length;
-    const englishHits = (normalized.match(/\b(the|and|that|with|for|what|why|how|can|could|should|meeting)\b/g) || []).length;
-    if (frenchHits >= 3 && englishHits >= 3) return 'mixed';
-    if (frenchHits >= 2 && frenchHits >= Math.max(englishHits, 1)) return 'fr';
-    if (frenchHits >= englishHits + 2) return 'fr';
-    if (englishHits >= frenchHits + 2) return 'en';
-    return frenchHits > 0 ? 'fr' : 'unknown';
+    const frenchHits = (normalized.match(/\b(le|la|les|des|une|que|qui|quoi|pour|avec|dans|donc|est ce|d accord|ça|ca|nous|vous|tu|je|on|oui|non|comment|pourquoi|quand|quel|quelle|pouvez|peux|devrait|devons|vais|faut|espace|rôle|roles|rôles|gérer|gerer)\b/g) || []).length;
+    const englishHits = (normalized.match(/\b(the|and|that|this|with|for|from|what|why|how|can|could|should|would|will|we|you|they|meeting|need|only|when|where|tool|user|workspace|role|roles|manage)\b/g) || []).length;
+    if (frenchHits >= 2 && englishHits === 0) return 'fr';
+    if (englishHits >= 2 && frenchHits === 0) return 'en';
+    if (frenchHits >= 3 && frenchHits >= englishHits * 1.35) return 'fr';
+    if (englishHits >= 3 && englishHits >= frenchHits * 1.35) return 'en';
+    if (frenchHits >= 2 && englishHits >= 2) return 'mixed';
+    if (frenchHits > englishHits) return 'fr';
+    if (englishHits > frenchHits) return 'en';
+    return 'unknown';
   }
 
   private mapRole(canonicalRole?: string, speaker?: string): string {

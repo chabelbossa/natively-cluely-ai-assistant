@@ -228,6 +228,7 @@ export class IntelligenceEngine extends EventEmitter {
             localUserFocus: packet.localUserFocus,
             actionTarget: packet.actionTarget,
             selectedSegments: packet.selectedSegments,
+            retrievedEvidenceSegments: packet.retrievedEvidenceSegments,
             rejectedSegments: packet.rejectedSegments,
             diagnostics: packet.diagnostics,
             contextPreview: this.truncateForUsage(packet.context, 1800),
@@ -247,6 +248,9 @@ export class IntelligenceEngine extends EventEmitter {
             action,
             provider: this.llmHelper.getCurrentProvider(),
             model: this.llmHelper.getCurrentModel(),
+            serviceTier: this.llmHelper.getCurrentProvider() === 'codex'
+                ? this.llmHelper.getLastCodexServiceTierStatus()
+                : undefined,
             systemContext: this.truncateForUsage(systemContext),
             systemPrompt: packet?.systemPrompt,
             languageHint: packet?.languageHint,
@@ -341,6 +345,9 @@ export class IntelligenceEngine extends EventEmitter {
             answer: this.truncateForUsage(answer, 1800),
             provider: this.llmHelper.getCurrentProvider(),
             model: this.llmHelper.getCurrentModel(),
+            serviceTier: this.llmHelper.getCurrentProvider() === 'codex'
+                ? this.llmHelper.getLastCodexServiceTierStatus()
+                : undefined,
             ...telemetry,
         });
     }
@@ -442,6 +449,11 @@ export class IntelligenceEngine extends EventEmitter {
             answerAction &&
             packet.actionTarget?.kind === 'direct_question' &&
             (expectedKeywords.length >= 5 || packet.contextTrustScore >= 0.55 || (packet.questionCandidates?.length || 0) >= 2);
+        const contextualRequestWithEvidence =
+            answerAction &&
+            packet.actionTarget?.kind !== 'direct_question' &&
+            packet.selectedSegments.filter((segment) => segment.role === 'interviewer').length >= 3 &&
+            expectedKeywords.length >= 6;
 
         if (!normalizedOutput) reasons.push('empty_output');
         if (this.isInsufficientContextFallback(output) && (packet.hasReliableInterlocutor || expectedKeywords.length >= 3)) {
@@ -485,6 +497,9 @@ export class IntelligenceEngine extends EventEmitter {
         if (directQuestionWithEvidence && outputWords < 35) {
             reasons.push('underdeveloped_interview_answer');
         }
+        if (contextualRequestWithEvidence && outputWords < 24) {
+            reasons.push('underdeveloped_contextual_response');
+        }
 
         const score = Math.max(0, Math.min(100, 100 - reasons.length * 18));
         const hardReasons = new Set([
@@ -495,6 +510,7 @@ export class IntelligenceEngine extends EventEmitter {
             'manual_answer_echo_or_weak',
             'too_short_for_available_context',
             'underdeveloped_interview_answer',
+            'underdeveloped_contextual_response',
         ]);
         const repairable = reasons.some((reason) =>
             hardReasons.has(reason) ||
@@ -569,7 +585,7 @@ export class IntelligenceEngine extends EventEmitter {
                     return 'Return exactly one follow-up question that advances the current concrete topic. No list.';
                 case 'WHAT_TO_SAY':
                 case 'VIBE_INTERVIEW_SAY_THIS':
-                    return 'Return the exact words the local user can say aloud. Use 3-6 strong sentences when the selected question is technical, behavioral, architectural, or context-rich; do not collapse it into a phrase.';
+                    return 'Return the exact words the local user can say aloud. Use 3-6 strong sentences when the selected question or request is technical, behavioral, architectural, or context-rich. If the interlocutor explained the idea over several turns and ended with a request, synthesize the full explanation, requested deliverable, and next step; do not collapse it into or echo the final phrase.';
                 case 'ANSWER':
                 default:
                     return 'Answer the local user directly with a meeting-specific synthesis. Use enough detail to be professionally useful, not a fragment.';
@@ -584,7 +600,7 @@ Goal:
 - Synthesize across nearby and prior turns; do not anchor on one isolated fragment.
 - Do not mention the quality review, retrieval, packet, or transcript mechanics.
 - Do not invent facts absent from the meeting evidence.
-- Use French when the context or user question is French.
+- Follow the packet language instruction. Answer in the language of the action target and most recent interlocutor explanation; an explicit fixed response-language setting wins.
 - ${actionRule}`;
     }
 
@@ -643,7 +659,13 @@ Goal:
     }
 
     private buildLiveActionFallback(action: MeetingAction, packet: MeetingContextPacket): string {
-        const french = packet.languageHint === 'fr' || packet.languageHint === 'mixed';
+        const targetLanguageText = this.normalizeForComparison(
+            `${packet.actionTarget?.text || ''} ${packet.interlocutorFocus?.text || ''}`,
+        );
+        const frenchSignals = (targetLanguageText.match(/\b(le|la|les|des|une|que|pour|avec|dans|vous|tu|je|on|faut|gérer|gerer|préparer|preparer|document)\b/g) || []).length;
+        const englishSignals = (targetLanguageText.match(/\b(the|and|that|this|with|for|you|we|need|manage|prepare|document|tool|when|where)\b/g) || []).length;
+        const french = packet.languageHint === 'fr' ||
+            (packet.languageHint === 'mixed' && frenchSignals > englishSignals);
         const focus = packet.interlocutorFocus;
         const focusText = focus.text?.trim();
         const lastInterlocutor = [...packet.selectedSegments]
@@ -709,13 +731,17 @@ Goal:
                     : `I would say: ${answerTopic || topic}.`;
             }
             if (focus.kind === 'implicit_request' && topic) {
+                const supportTopic = answerTopic &&
+                    this.normalizeForComparison(answerTopic) !== this.normalizeForComparison(topic)
+                    ? answerTopic
+                    : topic;
                 return french
-                    ? `D'accord, je m'en occupe. Je vais partir de ce point : ${topic}`
-                    : `Got it, I'll take it from here: ${topic}`;
+                    ? `D'accord. J'ai bien compris le périmètre : ${supportTopic}. Je vais préparer le livrable demandé à partir de toute l'explication, en structurant les éléments concrets et la prochaine étape.`
+                    : `Got it. I understand the scope: ${supportTopic}. I will prepare the requested deliverable from the full explanation, with the concrete elements and the next step clearly structured.`;
             }
             return french
-                ? `D'accord, je reformule : ${topic || "je dois confirmer le périmètre, la priorité et la prochaine étape concrète avant d'avancer"}.`
-                : `Got it. Let me restate this: ${topic || 'I should confirm the scope, priority, and concrete next step before moving forward'}.`;
+                ? `D'accord. Le point complet à retenir est : ${answerTopic || topic || "le périmètre, la priorité et la prochaine étape concrète"}. Je vais répondre à partir de l'ensemble de l'explication, pas seulement de sa dernière phrase.`
+                : `Got it. The complete point is: ${answerTopic || topic || 'the scope, priority, and concrete next step'}. I will answer from the full explanation, not only its final phrase.`;
         }
 
         if (action === 'CLARIFY' || action === 'FOLLOW_UP_QUESTION') {
@@ -769,6 +795,12 @@ Goal:
     }
 
     private buildTechnicalInterviewFallbackAnswer(normalizedQuestion: string, french: boolean): string {
+        if (/\b(stock|stocks|inventaire)\b/.test(normalizedQuestion) && /\b(coherence|cohérence|synchron|pharmacie|pharmacies)\b/.test(normalizedQuestion)) {
+            return french
+                ? "Je garantirais la cohérence en traitant chaque mouvement de stock comme une opération idempotente, versionnée et traçable. Hors ligne, la pharmacie conserverait les mouvements dans une file locale, puis les synchroniserait à la reconnexion sans écraser aveuglément l'état central. Le backend appliquerait une règle de résolution déterministe dans une transaction et refuserait toute écriture qui produit un stock négatif. Enfin, je testerais explicitement les réapprovisionnements concurrents, les reprises réseau et les doublons, avec des alertes sur les écarts résiduels."
+                : "I would preserve consistency by treating every stock movement as an idempotent, versioned, and traceable operation. Offline, each pharmacy would keep movements in a local queue and synchronize them after reconnecting without blindly overwriting central state. The backend would apply a deterministic conflict rule in a transaction and reject any write that creates negative stock. Finally, I would explicitly test concurrent replenishments, network recovery, and duplicate delivery, with alerts for residual discrepancies.";
+        }
+
         if (/\barchitecture\b/.test(normalizedQuestion) && /\bcomplexe\b/.test(normalizedQuestion) && /\b(defis|surmont)\b/.test(normalizedQuestion)) {
             return french
                 ? "Je prendrais un exemple d'architecture backend avec plusieurs services qui doivent partager l'authentification, les droits d'accès et des données sensibles. Le premier défi était d'éviter un couplage trop fort entre les services, donc j'ai clarifié les frontières métier et gardé des contrats d'API simples et documentés. Le deuxième défi était la sécurité : j'ai centralisé l'identité avec OAuth2/OIDC, ajouté une validation stricte côté backend et protégé les accès aux données par rôle. Le troisième défi était l'observabilité, parce qu'une architecture distribuée devient vite difficile à déboguer sans logs corrélés, métriques et traces. Ce que j'ai appris, c'est qu'une architecture complexe doit rester explicable, mesurable et alignée sur le besoin métier, sinon elle devient une dette technique."

@@ -352,7 +352,7 @@ const checks = [
     name: "technical interview fallback answers common full-stack questions instead of echoing stale context",
     source: engine,
     pattern:
-      /(?=[\s\S]*buildTechnicalInterviewFallbackAnswer)(?=[\s\S]*architecture backend)(?=[\s\S]*OAuth2\/OIDC)(?=[\s\S]*monolithe)(?=[\s\S]*microservices)(?=[\s\S]*goulot)(?=[\s\S]*Dockerfiles)(?=[\s\S]*revue de code)(?=[\s\S]*dette technique)(?=[\s\S]*pic massif)/,
+      /(?=[\s\S]*buildTechnicalInterviewFallbackAnswer)(?=[\s\S]*mouvement de stock)(?=[\s\S]*architecture backend)(?=[\s\S]*OAuth2\/OIDC)(?=[\s\S]*monolithe)(?=[\s\S]*microservices)(?=[\s\S]*goulot)(?=[\s\S]*Dockerfiles)(?=[\s\S]*revue de code)(?=[\s\S]*dette technique)(?=[\s\S]*pic massif)/,
   },
   {
     name: "generic repeat requests are treated as insufficient when reliable context exists",

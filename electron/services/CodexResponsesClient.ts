@@ -12,7 +12,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 const RESPONSES_API_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_BETA_HEADER = "responses=2026-02-06";
 const MINIMUM_GPT_56_CODEX_VERSION = "0.144.0";
-const DEFAULT_SERVICE_TIER = "fast";
+// Codex keeps `fast` as the user-facing/config spelling, but the current
+// Responses wire value is `priority` (legacy `fast` is normalized by Codex
+// before the HTTP request is sent).
+const DEFAULT_SERVICE_TIER = "priority";
 const MAX_ROTATION_ATTEMPTS = 5;
 
 export interface CodexResponsesParams {
@@ -208,7 +211,13 @@ export class CodexResponsesClient {
     const message = await fastResponse.text().catch(() => "");
     const lowered = message.toLowerCase();
     const fastRejected = (fastResponse.status === 400 || fastResponse.status === 422)
-      && (lowered.includes("service_tier") || lowered.includes("service tier") || lowered.includes("fast mode"));
+      && (
+        lowered.includes("service_tier") ||
+        lowered.includes("service tier") ||
+        lowered.includes("fast mode") ||
+        lowered.includes("priority processing") ||
+        lowered.includes("priority tier")
+      );
     if (fastRejected) {
       console.warn(
         `[CodexResponsesClient] Fast unavailable for ${params.model} on ${account.alias}; retrying explicitly in Standard mode.`,

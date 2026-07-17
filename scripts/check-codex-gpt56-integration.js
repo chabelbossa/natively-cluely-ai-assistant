@@ -41,10 +41,10 @@ const checks = [
         pattern: /MINIMUM_GPT_56_CODEX_VERSION = "0\.144\.0"[\s\S]*Originator: "codex_cli_rs"[\s\S]*Version: MINIMUM_GPT_56_CODEX_VERSION/,
     },
     {
-        name: 'all Codex requests use the official Fast service tier without fallback',
+        name: 'Codex Fast uses the current priority wire value with an explicit Standard fallback',
         source: client,
-        pattern: /DEFAULT_SERVICE_TIER = "fast"[\s\S]*body\.service_tier = serviceTier/,
-        reject: /DEFAULT_SERVICE_TIER = "priority"|retrying without service_tier|callResponsesApi\(account, params, undefined\)/,
+        pattern: /DEFAULT_SERVICE_TIER = "priority"[\s\S]*body\.service_tier = serviceTier[\s\S]*retrying explicitly in Standard mode/,
+        reject: /DEFAULT_SERVICE_TIER = "fast"/,
     },
     {
         name: 'non-streaming and streaming Codex calls both send normalized reasoning',

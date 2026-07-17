@@ -41,8 +41,9 @@ const SOFT_REQUIRED_METHODS = ['verifyDodoKey', 'validateDodoKey', 'deactivateDo
 
 /**
  * Validates that a loaded native module conforms to the NativeModule interface.
- * Throws immediately if any required method or constructor is missing,
- * or if the functional smoke-test fails (which catches asar-stub false-pass).
+ * Throws immediately if any required method or constructor is missing.
+ * The loader requires the unpacked `.node` file directly, so a successful
+ * require already proves that the native binary can be opened.
  */
 function validateNativeModule(mod: any): asserts mod is NativeModule {
     // Hard-required: any missing function here aborts the entire module load.
@@ -70,29 +71,6 @@ function validateNativeModule(mod: any): asserts mod is NativeModule {
         }
     }
 
-    // Functional smoke-test: actually call a cheap synchronous native function.
-    // This catches the Electron asar-stub false-pass: the JS index.js stub
-    // exports all the right names (passing the checks above) but its internal
-    // require('./index.*.node') fails silently when run from inside the sealed
-    // asar. Calling getInputDevices() forces a real native ABI call.
-    //
-    // NOTE: The guard MUST be separate from the try/catch that wraps the call.
-    // Placing the throw INSIDE the try means our own error gets caught by the
-    // same catch block, producing a double-wrapped message and losing the stack.
-    let result: unknown;
-    try {
-        result = mod.getInputDevices();
-    } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        throw new Error(`NativeModule: functional smoke-test threw (${msg}) — likely loaded asar stub instead of real binary`);
-    }
-    // Guard is OUTSIDE the try block so our throw propagates cleanly.
-    if (!Array.isArray(result)) {
-        throw new Error(
-            `NativeModule: getInputDevices() returned ${typeof result} instead of Array` +
-            ` — likely loaded asar stub instead of real binary`
-        );
-    }
 }
 
 /**

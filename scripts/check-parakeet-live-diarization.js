@@ -5,12 +5,31 @@ const path = require("path");
 const Module = require("module");
 
 const repoRoot = path.resolve(__dirname, "..");
-const defaultManifest = path.join(
+const audioDebugRoot = path.join(
   process.env.HOME || "",
-  "Library/Application Support/natively/audio-debug/audio_2026-05-11T08-45-04-459Z/manifest.json",
+  "Library/Application Support/natively/audio-debug",
 );
 
-const manifestPath = path.resolve(process.argv[2] || defaultManifest);
+function findLatestAudioManifest() {
+  if (!fs.existsSync(audioDebugRoot)) return "";
+  return fs.readdirSync(audioDebugRoot)
+    .sort()
+    .reverse()
+    .map((entry) => path.join(audioDebugRoot, entry, "manifest.json"))
+    .find((candidate) => {
+      if (!fs.existsSync(candidate)) return false;
+      try {
+        const candidateManifest = JSON.parse(fs.readFileSync(candidate, "utf8"));
+        return Boolean(candidateManifest.tracks?.system?.path && fs.existsSync(candidateManifest.tracks.system.path));
+      } catch {
+        return false;
+      }
+    }) || "";
+}
+
+const defaultManifest = findLatestAudioManifest();
+
+const manifestPath = path.resolve(process.argv[2] || defaultManifest || path.join(audioDebugRoot, "manifest.json"));
 const helperPath =
   process.env.NATIVELY_PARAKEET_HELPER_PATH ||
   path.join(repoRoot, "native-helpers/parakeet-stt-helper/dist/parakeet-stt-helper");

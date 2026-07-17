@@ -764,7 +764,8 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     window.electronAPI
       ?.getAiResponseLanguage?.()
       .then((r: any) => {
-        if (r?.language) setAiLang(r.language);
+        const language = typeof r === "string" ? r : r?.language;
+        if (language) setAiLang(language);
       })
       .catch(() => {});
     // Live-update whenever mode is activated/deactivated

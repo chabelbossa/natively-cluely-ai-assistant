@@ -2693,7 +2693,7 @@ export class AppState {
       const { CredentialsManager } = require('./services/CredentialsManager');
       const cm = CredentialsManager.getInstance();
       const storedDefaultModel = cm.getDefaultModel();
-      const codexPreferredModel = cm.getCodexPreferredModel?.() || 'codex:gpt-5.5';
+      const codexPreferredModel = cm.getCodexPreferredModel?.() || 'codex:gpt-5.6-terra';
       const isSupportedDefault =
         storedDefaultModel.startsWith('codex:') ||
         storedDefaultModel.startsWith('gemini-') ||

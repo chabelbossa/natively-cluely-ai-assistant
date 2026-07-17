@@ -14,7 +14,8 @@ import {
     type CodexReasoningEffort,
 } from '../../src/config/codexModels';
 
-const CREDENTIALS_PATH = path.join(app.getPath('userData'), 'credentials.enc');
+const CREDENTIALS_PATH = process.env.NATIVELY_CREDENTIALS_PATH?.trim()
+    || path.join(app.getPath('userData'), 'credentials.enc');
 
 export interface CustomProvider {
     id: string;

@@ -42,6 +42,7 @@
     "meeting:separation:live:strict": "node scripts/watch-meeting-speaker-separation.js --require-me --fail-on-suspect-me",
     "meeting:summary:guard": "node scripts/check-meeting-summary-quality.js",
     "meeting:summary:guard:selftest": "node scripts/check-meeting-summary-quality.js --self-test",
+    "meeting:persistence:guard": "node scripts/check-meeting-persistence-reliability.js",
     "meeting:summary:normalization:test": "node scripts/check-meeting-summary-normalization.js",
     "meeting:summary:repair-titles": "node scripts/repair-duplicated-meeting-titles.js",
     "meeting:repair:db": "node scripts/check-meeting-repair-against-db.js",
