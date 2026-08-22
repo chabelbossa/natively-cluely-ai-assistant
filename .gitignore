@@ -28,6 +28,9 @@ change.md
 
 # Generated migration patches — private, not for public repo
 *.patch
+# Native-arch install guards (patches/) must be versioned — they protect
+# fresh `npm rebuild`/`npm install <pkg>` flows from Rosetta-poisoned builds.
+!patches/*.patch
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json

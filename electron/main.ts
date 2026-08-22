@@ -1,3 +1,6 @@
+// MUST stay the FIRST import in this file (see electron/nativeArchGate.ts):
+// the boot gate has to run before any import chain can dlopen better-sqlite3.
+import './nativeArchGate'
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, systemPreferences, screen, desktopCapturer } from "electron"
 import path from "path"
 import fs from "fs"
@@ -546,8 +549,34 @@ export class AppState {
   }
 
   private async bootstrapOllamaEmbeddings() {
+    // Single-flight guard: a session killed mid-pull still retries next launch
+    // (deliberately not persisted), but concurrent pulls within one session are
+    // pure waste and can race the ModelSelector restart path.
+    if (this._ollamaBootstrapPromise) {
+      return this._ollamaBootstrapPromise;
+    }
     this._ollamaBootstrapPromise = (async () => {
       try {
+        // SKIP when a cloud embedding provider is already available. Pulling the
+        // 274MB `nomic-embed-text` on first launch is pure waste for users who
+        // have an OpenAI/Gemini key (the RAG pipeline resolves to that cloud
+        // provider anyway). Only bootstrap Ollama embeddings when there is NO
+        // cloud key, i.e. Ollama is genuinely the intended provider.
+        try {
+          const { CredentialsManager } = require('./services/CredentialsManager');
+          const cm = CredentialsManager.getInstance();
+          const hasCloudEmbeddingKey =
+            !!(cm.getOpenaiApiKey() || process.env.OPENAI_API_KEY) ||
+            !!(cm.getGeminiApiKey() || process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY);
+          if (hasCloudEmbeddingKey) {
+            console.log('[AppState] Skipping Ollama embeddings bootstrap — a cloud embedding provider is configured.');
+            return;
+          }
+        } catch (guardErr: any) {
+          // Credential lookup failed — fall through and attempt the bootstrap.
+          console.warn('[AppState] Ollama bootstrap cloud-key guard failed (non-fatal):', guardErr?.message);
+        }
+
         const { OllamaBootstrap } = require('./rag/OllamaBootstrap');
         const bootstrap = new OllamaBootstrap();
 
@@ -3484,7 +3513,11 @@ export class AppState {
     // (so content protection, IPC broadcasts and the guard above are always current),
     // but the actual macOS dock/tray/focus operation only fires once the user stops
     // toggling. This eliminates the race where dock.show() + NSApp.activate() lingers
-    // after a subsequent dock.hide() call.
+    // after a subsequent dock.hide() call. The debounce window MUST be longer than a
+    // human's fast toggle cadence (~250-350ms/click); at 150ms it expired between
+    // clicks and every click fired its own dock op, churning the activation policy.
+    // 350ms collapses a burst into a single settled transition, after which
+    // _enforceDockState() verifies it actually stuck.
     if (process.platform === 'darwin') {
       if (this._dockDebounceTimer) {
         clearTimeout(this._dockDebounceTimer);
@@ -3515,33 +3548,12 @@ export class AppState {
           this.modelSelectorWindowHelper.setIgnoreBlur(true);
         }
 
-        if (settled) {
-          // Capture whether Natively is currently the frontmost app BEFORE
-          // dock.hide() — that call triggers an implicit macOS app-deactivation
-          // which shifts keyboard focus to the next frontmost app (Chrome, etc.).
-          const nativelyWasFocused =
-            targetFocusWindow != null &&
-            !targetFocusWindow.isDestroyed() &&
-            targetFocusWindow.isFocused();
-
-          console.log('[Stealth] Calling app.dock.hide()');
-          app.dock.hide();
-          this.hideTray();
-
-          // If Natively was the focused window when the user toggled stealth,
-          // restore focus to our window after dock.hide() so macOS does not
-          // hand control to Chrome / whatever is behind us.
-          // We use win.focus() (not app.focus()) to avoid the heavy-handed
-          // [NSApp activateIgnoringOtherApps:YES] side-effect.
-          if (nativelyWasFocused && targetFocusWindow && !targetFocusWindow.isDestroyed()) {
-            targetFocusWindow.focus();
-          }
-        } else {
-          console.log('[Stealth] Calling app.dock.show()');
-          app.dock.show();
-          this.showTray();
-          // Do NOT call focus() — let the user's current app retain focus
-        }
+        // Drive the dock/tray to the settled state via a SELF-VERIFYING loop.
+        // Issuing app.dock.hide()/show() once is unreliable after a burst of
+        // toggles: macOS coalesces rapid activation-policy flips and can DROP
+        // the final call. _enforceDockState() re-reads app.dock.isVisible() —
+        // the OS ground truth — and re-applies until reality matches intent.
+        this._enforceDockState(settled, targetFocusWindow, 0);
 
         if (targetFocusWindow && targetFocusWindow === settingsWindow) {
           setTimeout(() => { this.settingsWindowHelper.setIgnoreBlur(false); }, 500);
@@ -3549,8 +3561,133 @@ export class AppState {
         if (isModelSelectorVisible) {
           setTimeout(() => { this.modelSelectorWindowHelper.setIgnoreBlur(false); }, 500);
         }
-      }, 150);
+      }, 350);
     }
+  }
+
+  // Self-verifying dock/tray enforcement. macOS asynchronously coalesces and
+  // sometimes DROPS rapid app.dock.hide()/show() calls (each flips the app's
+  // activation policy), so a single fire-and-forget call is not reliable after a
+  // toggle burst. We poll app.dock.isVisible() — the OS ground truth — and
+  // re-apply the desired state until it sticks (or the user changes intent).
+  // Also re-asserts content protection on every hide, because the activation-
+  // policy flip can reset each window's NSWindowSharingType.
+  private _enforceDockState(
+    wantUndetectable: boolean,
+    targetFocusWindow: BrowserWindow | null,
+    attempt: number,
+    maxAttempts: number = 6,
+  ): void {
+    if (process.platform !== 'darwin') return;
+
+    // Abort if the user toggled again since this enforcement was scheduled —
+    // the newer toggle owns the dock now (and cleared these timers anyway).
+    if (this.isUndetectable !== wantUndetectable) return;
+
+    // app.dock.isVisible() is the OS ground truth: apply only when the dock's
+    // visibility does not already match the desired state.
+    const currentlyHidden = !app.dock.isVisible();
+    const shouldApply = wantUndetectable ? !currentlyHidden : currentlyHidden;
+
+    if (shouldApply) {
+      if (wantUndetectable) {
+        // Capture whether Natively is currently the frontmost app BEFORE
+        // dock.hide() — that call triggers an implicit macOS app-deactivation
+        // which shifts keyboard focus to the next frontmost app (Chrome, etc.).
+        const nativelyWasFocused =
+          targetFocusWindow != null &&
+          !targetFocusWindow.isDestroyed() &&
+          targetFocusWindow.isFocused();
+
+        console.log(`[Stealth] app.dock.hide() (enforce attempt ${attempt})`);
+        app.dock.hide();
+        this.hideTray();
+
+        // Re-assert content protection: the activation-policy flip can reset
+        // the windows' sharingType, silently undoing screen-capture stealth.
+        this.reassertAllContentProtection();
+
+        // Keep focus on Natively (win.focus(), not app.focus()) so dock.hide()'s
+        // implicit app-deactivation doesn't hand control to the app behind us.
+        if (nativelyWasFocused && targetFocusWindow && !targetFocusWindow.isDestroyed()) {
+          targetFocusWindow.focus();
+        }
+      } else {
+        console.log(`[Stealth] app.dock.show() (enforce attempt ${attempt})`);
+        app.dock.show();
+        this.showTray();
+        // Do NOT call focus() — let the user's current app retain focus.
+      }
+    }
+
+    // Verify it actually stuck. macOS may apply the policy change a tick later
+    // (or drop it), so re-check a few times even when this pass looked correct.
+    // Timers are tracked so the next toggle cancels stale enforcement.
+    if (attempt < maxAttempts) {
+      const t = setTimeout(() => {
+        this._dockReassertTimers = this._dockReassertTimers.filter((x) => x !== t);
+        this._enforceDockState(wantUndetectable, targetFocusWindow, attempt + 1, maxAttempts);
+      }, 130);
+      this._dockReassertTimers.push(t);
+    }
+  }
+
+  // Force-reapply the current content-protection state to every window helper,
+  // bypassing their dedupe guards. See setUndetectable() for why this is needed
+  // after macOS dock/activation-policy transitions.
+  private reassertAllContentProtection(): void {
+    this.windowHelper.setContentProtection(this.isUndetectable);
+    this.settingsWindowHelper.setContentProtection(this.isUndetectable);
+    this.modelSelectorWindowHelper.setContentProtection(this.isUndetectable);
+    this.cropperWindowHelper.setContentProtection(this.isUndetectable);
+  }
+
+  // Re-drive the app back to a fully-stealth state after any operation that can
+  // silently undo it — used by both startup convergence (applyInitialUndetectableState)
+  // and every launcher window show (WindowHelper.switchToLauncher).
+  //
+  // WHY launcher shows leak stealth: the launcher is a REGULAR macOS window (no
+  // `type: 'panel'`, no skipTaskbar — unlike the overlay NSPanel). Calling
+  // .show()+.focus() on it while the app is in accessory policy with the dock
+  // tile hidden re-activates the app as a foreground app, which makes macOS
+  // re-register it and REVEAL the dock tile — silently undoing app.dock.hide().
+  // This is the "Natively icon appears in the dock after Stop meeting" bug.
+  // It is intermittent because macOS asynchronously coalesces and sometimes
+  // drops activation-policy/dock calls.
+  //
+  // Routes through the SAME self-verifying _enforceDockState() loop the toggle
+  // path uses: polls app.dock.isVisible() (the OS ground truth) and re-applies
+  // dock.hide() + content protection until reality matches intent. Cheap and
+  // safe to call redundantly — no-ops off-darwin or when not undetectable.
+  public reassertUndetectableStealth(maxAttempts: number = 10): void {
+    if (process.platform !== 'darwin') return;
+    if (!this.isUndetectable) return;
+    // Collapse any in-flight enforcement chain from a PRIOR re-assert before
+    // starting a fresh one — same discipline as setUndetectable(). Without this,
+    // a burst of launcher shows (rapid Stop→Start→Stop) would spawn several
+    // overlapping _enforceDockState chains. They are idempotent and self-cancelling
+    // (all want dock hidden), so this is not a correctness fix — it just avoids
+    // redundant isVisible() polling. The newest re-assert owns the dock.
+    for (const timer of this._dockReassertTimers) {
+      clearTimeout(timer);
+    }
+    this._dockReassertTimers = [];
+    this.reassertAllContentProtection();
+    const focusWindow = this.windowHelper.getMainWindow();
+    this._enforceDockState(true, focusWindow, 0, maxAttempts);
+  }
+
+  // Converge a persisted-ON undetectable session to actually-stealth at startup.
+  //
+  // WHY this is needed separately from the pre-emptive app.dock.hide() in
+  // initializeApp(): that hide runs BEFORE createWindow(), but creating and
+  // showing the launcher window re-registers the app with macOS and re-shows
+  // the dock icon, silently undoing the pre-emptive hide. This method runs the
+  // SAME self-verifying enforcement at startup with a longer retry budget
+  // (~2.5s vs ~0.8s): the dock re-show lands at the launcher's ready-to-show,
+  // which on a cold launch can arrive later than the toggle path's window.
+  public applyInitialUndetectableState(): void {
+    this.reassertUndetectableStealth(18);
   }
 
   public getUndetectable(): boolean {
@@ -3929,12 +4066,21 @@ async function initializeApp() {
 
   // Apply initial stealth state based on isUndetectable setting.
   // NOTE: app.dock.hide() was already called pre-emptively before createWindow()
-  // when isUndetectable=true. Here we only need to initialize the tray for non-stealth mode.
+  // when isUndetectable=true. That pre-emptive hide is NOT sufficient on its
+  // own — createWindow() + the launcher's first show re-registers the app with
+  // macOS and re-shows the dock icon, silently undoing it. Converge through the
+  // same self-verifying enforcement the runtime toggle uses.
   if (!appState.getUndetectable()) {
     // Normal mode: show tray (dock is already showing — no need to call dock.show() again)
     appState.showTray();
+  } else {
+    // Persisted undetectable: drive the dock to hidden through the
+    // self-verifying loop so the app comes up actually undetectable without
+    // the user having to toggle off/on. The enforcement loop re-checks
+    // app.dock.isVisible() across several retries, which also catches the
+    // dock re-show that lands at the launcher's ready-to-show.
+    appState.applyInitialUndetectableState();
   }
-  // Stealth mode: dock is already hidden, tray stays hidden, no action needed here.
   // Register global shortcuts using KeybindManager
   KeybindManager.getInstance().registerGlobalShortcuts()
 

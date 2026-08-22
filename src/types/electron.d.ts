@@ -357,6 +357,7 @@ export interface ElectronAPI {
   toggleModelSelector: (coords: { x: number; y: number }) => Promise<void>;
   hideModelSelector: () => Promise<void>;
   forceRestartOllama: () => Promise<void>;
+  isOllamaReachable: () => Promise<boolean>;
 
   // Settings Window
   toggleSettingsWindow: (coords?: { x: number; y: number }) => Promise<void>;

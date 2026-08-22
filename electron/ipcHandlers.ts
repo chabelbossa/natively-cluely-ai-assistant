@@ -798,8 +798,20 @@ export function initializeIpcHandlers(appState: AppState): void {
     const launcherWin = appState.getWindowHelper().getLauncherWindow();
     if (launcherWin && !launcherWin.isDestroyed()) {
       launcherWin.webContents.send("settings:open-tab", tab);
-      launcherWin.show();
-      launcherWin.focus();
+      if (appState.getUndetectable()) {
+        // This is the ONE launcher show that does not funnel through
+        // WindowHelper.switchToLauncher() (which re-asserts stealth centrally).
+        // Even the non-activating showInactive() can make macOS re-register a
+        // regular (non-panel) window and reveal the hidden dock tile, so use
+        // the non-activating show AND re-drive stealth through the same
+        // self-verifying _enforceDockState() loop — otherwise this path is a
+        // dock-leak bypass in undetectable mode.
+        launcherWin.showInactive();
+        appState.reassertUndetectableStealth();
+      } else {
+        launcherWin.show();
+        launcherWin.focus();
+      }
     }
   });
 
@@ -950,6 +962,18 @@ export function initializeIpcHandlers(appState: AppState): void {
     } catch (error: any) {
       // console.error("Error getting Ollama models:", error);
       throw error;
+    }
+  });
+
+  // Liveness probe distinct from get-available-ollama-models. Lets callers tell
+  // "Ollama daemon is down" apart from "Ollama is up but has no models pulled"
+  // so they don't destructively restart a healthy daemon (see ModelSelectorWindow).
+  safeHandle("is-ollama-reachable", async () => {
+    try {
+      const llmHelper = appState.processingHelper.getLLMHelper();
+      return await llmHelper.isOllamaReachable();
+    } catch {
+      return false;
     }
   });
 

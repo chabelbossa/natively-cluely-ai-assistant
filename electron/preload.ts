@@ -255,6 +255,7 @@ interface ElectronAPI {
   toggleModelSelector: (coords: { x: number; y: number }) => Promise<void>
   hideModelSelector: () => Promise<void>
   forceRestartOllama: () => Promise<void>
+  isOllamaReachable: () => Promise<boolean>
 
   // Settings Window
   toggleSettingsWindow: (coords?: { x: number; y: number }) => Promise<void>
@@ -1082,6 +1083,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   toggleModelSelector: (coords: { x: number; y: number }) => ipcRenderer.invoke('toggle-model-selector', coords),
   hideModelSelector: () => ipcRenderer.invoke('hide-model-selector'),
   forceRestartOllama: () => ipcRenderer.invoke('force-restart-ollama'),
+  isOllamaReachable: () => ipcRenderer.invoke('is-ollama-reachable'),
 
   // Settings Window
   toggleSettingsWindow: (coords?: { x: number; y: number }) => ipcRenderer.invoke('toggle-settings-window', coords),
