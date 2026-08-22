@@ -6,6 +6,7 @@ import type { TranscriptQualityFlag } from '../transcript/types';
 export interface MeetingContextPacket {
   action: MeetingAction;
   builtAt: number;
+  contextMode: 'default' | 'conference';
   languageHint: 'fr' | 'en' | 'mixed' | 'unknown';
   hasReliableInterlocutor: boolean;
   contextTrustScore: number;
@@ -71,6 +72,10 @@ interface BuildPacketInput {
   fallback?: string;
   additionalItems?: ContextItem[];
   preferLocalUserTarget?: boolean;
+  mode?: {
+    name?: string;
+    templateType?: string;
+  } | null;
 }
 
 const MAX_PACKET_CONTEXT = 24_000;
@@ -90,15 +95,19 @@ export class MeetingContextPacketBuilder {
   ) {}
 
   build(input: BuildPacketInput): MeetingContextPacket {
+    const contextMode = this.resolveContextMode(input.mode);
+    const effectiveLastSeconds = contextMode === 'conference'
+      ? Math.max(input.lastSeconds, 15 * 60)
+      : input.lastSeconds;
     const liveInterimItems = this.getLiveInterimItems();
     const mergedAdditionalItems = [
       ...(input.additionalItems || []),
       ...liveInterimItems,
     ];
-    const selectedItems = this.mergeAdditionalItems(
-      this.session.getActionContext(input.lastSeconds),
-      mergedAdditionalItems,
-    );
+    const baseItems = contextMode === 'conference'
+      ? this.getConferenceFloorItems(effectiveLastSeconds)
+      : this.session.getActionContext(effectiveLastSeconds);
+    const selectedItems = this.mergeAdditionalItems(baseItems, mergedAdditionalItems);
     const repairResult = this.repairActionContext(selectedItems);
     const actionItems = repairResult.items;
     const briefBlock = MeetingBriefManager.getInstance().buildContextBlock();
@@ -113,8 +122,8 @@ export class MeetingContextPacketBuilder {
     const reliableInterlocutorItems = actionItems.filter((item) => this.isReliableInterlocutorItem(item));
     const hasReliableInterlocutor = reliableInterlocutorItems.length > 0;
     const contextTrustScore = this.computeContextTrustScore(actionItems, reliableInterlocutorItems);
-    const questionCandidates = this.collectInterlocutorQuestionCandidates(reliableInterlocutorItems);
-    const interlocutorFocus = this.deriveInterlocutorFocus(reliableInterlocutorItems, questionCandidates);
+    const questionCandidates = this.collectInterlocutorQuestionCandidates(reliableInterlocutorItems, contextMode);
+    const interlocutorFocus = this.deriveInterlocutorFocus(reliableInterlocutorItems, questionCandidates, contextMode);
     const localUserFocus = this.deriveLocalUserFocus(actionItems);
     const actionTarget = this.pickActionTarget(
       hasReliableInterlocutor,
@@ -122,8 +131,8 @@ export class MeetingContextPacketBuilder {
       localUserFocus,
       input.preferLocalUserTarget === true,
     );
-    const supportingInterlocutorItems = this.pickSupportingInterlocutorItems(reliableInterlocutorItems, interlocutorFocus);
-    const retrievedEvidenceItems = this.findRelevantPriorEvidence(actionItems, actionTarget);
+    const supportingInterlocutorItems = this.pickSupportingInterlocutorItems(reliableInterlocutorItems, interlocutorFocus, contextMode);
+    const retrievedEvidenceItems = this.findRelevantPriorEvidence(actionItems, actionTarget, contextMode);
     const retrievedEvidenceSegments = retrievedEvidenceItems.map((item) => ({
       role: item.role,
       speaker: item.speaker,
@@ -140,7 +149,7 @@ export class MeetingContextPacketBuilder {
       actionTarget.text,
       ...languageEvidenceItems.map((item) => item.text),
     ].join(' '));
-    const rejectedSegments = this.buildRejectedSegments(input.lastSeconds, actionItems);
+    const rejectedSegments = this.buildRejectedSegments(effectiveLastSeconds, actionItems, contextMode);
     const systemPrompt = this.buildSystemPrompt(
       input.action,
       languageHint,
@@ -148,19 +157,26 @@ export class MeetingContextPacketBuilder {
       contextTrustScore,
       interlocutorFocus,
       actionTarget,
+      contextMode,
     );
+    const semanticMemoryBlock = contextMode === 'conference'
+      ? this.safeSemanticMemoryContextBlock()
+      : '';
+    const relevantEvidenceBlock = this.buildRelevantEvidenceBlock(retrievedEvidenceItems, actionTarget);
 
     const parts = [
       systemPrompt,
+      semanticMemoryBlock,
+      relevantEvidenceBlock,
       briefBlock,
       input.activeModeBlock?.trim(),
+      this.buildContextModeBlock(contextMode),
       (input.liveStateBlock ?? this.safeLiveStateBlock()).trim(),
       this.buildTranscriptRepairBlock(repairResult),
-      this.buildInterlocutorFocusBlock(interlocutorFocus),
+      this.buildInterlocutorFocusBlock(interlocutorFocus, contextMode),
       this.buildLocalUserFocusBlock(localUserFocus),
       this.buildQuestionCandidatesBlock(questionCandidates),
-      this.buildActionTargetBlock(input.action, actionTarget, supportingInterlocutorItems),
-      this.buildRelevantEvidenceBlock(retrievedEvidenceItems, actionTarget),
+      this.buildActionTargetBlock(input.action, actionTarget, supportingInterlocutorItems, contextMode),
       this.buildQualityBlock(hasReliableInterlocutor, languageHint, actionItems, rejectedSegments, interlocutorFocus, actionTarget),
       this.buildSelectedTranscriptBlock(actionItems),
       input.transcriptContext?.trim()
@@ -171,8 +187,11 @@ export class MeetingContextPacketBuilder {
 
     const context = this.compact(parts.join('\n\n'), MAX_PACKET_CONTEXT);
     const diagnostics = [
-      ...this.session.getActionContextDiagnostics(input.lastSeconds),
+      ...this.session.getActionContextDiagnostics(effectiveLastSeconds),
+      ...this.safeSemanticMemoryDiagnostics(),
       `packet_action=${input.action}`,
+      `packet_context_mode=${contextMode}`,
+      `packet_effective_window_seconds=${effectiveLastSeconds}`,
       `packet_language_hint=${languageHint}`,
       `packet_language_evidence_source=${actionTarget.source === 'local_user' ? 'local_user_target' : 'recent_interlocutor_target'}`,
       `packet_has_reliable_interlocutor=${hasReliableInterlocutor}`,
@@ -201,6 +220,7 @@ export class MeetingContextPacketBuilder {
     return {
       action: input.action,
       builtAt: Date.now(),
+      contextMode,
       languageHint,
       hasReliableInterlocutor,
       contextTrustScore,
@@ -217,12 +237,93 @@ export class MeetingContextPacketBuilder {
     };
   }
 
+  private resolveContextMode(mode?: BuildPacketInput['mode']): MeetingContextPacket['contextMode'] {
+    if (mode?.templateType === 'conference') return 'conference';
+    return /\b(conf[eé]rence|conference)\b/i.test(mode?.name || '') ? 'conference' : 'default';
+  }
+
+  private getConferenceFloorItems(lastSeconds: number): ContextItem[] {
+    const fullTranscript = this.session.getFullTranscript();
+    const newestTimestamp = fullTranscript.reduce(
+      (latest, segment) => Math.max(latest, segment.timestamp || 0),
+      0,
+    ) || Date.now();
+    const cutoff = newestTimestamp - lastSeconds * 1000;
+
+    return fullTranscript
+      .filter((segment) => segment.final && segment.timestamp >= cutoff && segment.text.trim().length > 0)
+      .filter((segment) => segment.canonicalRole !== 'assistant' && !/^assistant$/i.test(segment.speaker || ''))
+      .filter((segment) => {
+        const flags = new Set(segment.qualityFlags || []);
+        // A short fragment salvaged from a giant late STT flush is useful for
+        // transcript display, but not trustworthy enough to become the current
+        // conference question or topic by itself.
+        return !(flags.has('late_flush_trimmed') && segment.text.trim().length < 80);
+      })
+      .map((segment): ContextItem => {
+        const canonicalRole = /^speaker_\d+$/i.test(segment.canonicalRole || '')
+          ? segment.canonicalRole
+          : 'interlocutor';
+        return {
+          role: 'interviewer',
+          speaker: segment.speaker,
+          text: segment.text,
+          timestamp: segment.timestamp,
+          confidence: segment.confidence,
+          source: 'recorded',
+          canonicalRole,
+          qualityFlags: [...new Set([
+            ...(segment.qualityFlags || []),
+            'conference_floor' as TranscriptQualityFlag,
+            'system_audio_unavailable' as TranscriptQualityFlag,
+            'trusted_interlocutor' as TranscriptQualityFlag,
+          ])],
+        };
+      })
+      .slice(-60);
+  }
+
+  private buildContextModeBlock(contextMode: MeetingContextPacket['contextMode']): string {
+    if (contextMode !== 'conference') return '';
+    return `[CONFERENCE FLOOR POLICY]
+audio_source=room_microphone_only
+speaker_semantics=Every audio transcript turn is part of the shared conference floor. Do not interpret Mic/ME labels as proof that the local user personally said the words.
+focus_policy=Reconstruct the latest question or problem across adjacent turns and earlier supporting turns in the conference window. The final sentence may only close or refer to a problem introduced minutes earlier.
+action_policy=CLARIFY explains the latest concept or problem; FOLLOW_UP_QUESTION proposes a useful question to ask; WHAT_TO_SAY and ANSWER respond to the latest complete question or problem.
+response_shape=Adapt depth and structure to the evidence. Do not force fixed sentence, bullet, or section counts.
+[/CONFERENCE FLOOR POLICY]`;
+  }
+
   private safeLiveStateBlock(): string {
     try {
       return this.getLiveStateBlock?.() || '';
     } catch (error: any) {
       console.warn('[MeetingContextPacketBuilder] Failed to load live state:', error?.message || error);
       return '';
+    }
+  }
+
+  private safeSemanticMemoryContextBlock(): string {
+    try {
+      const getter = (this.session as SessionTracker & {
+        getSemanticMemoryContextBlock?: () => string;
+      }).getSemanticMemoryContextBlock;
+      return typeof getter === 'function' ? getter.call(this.session) : '';
+    } catch (error: any) {
+      console.warn('[MeetingContextPacketBuilder] Failed to load semantic conference memory:', error?.message || error);
+      return '';
+    }
+  }
+
+  private safeSemanticMemoryDiagnostics(): string[] {
+    try {
+      const getter = (this.session as SessionTracker & {
+        getSemanticMemoryDiagnostics?: () => string[];
+      }).getSemanticMemoryDiagnostics;
+      return typeof getter === 'function' ? getter.call(this.session) : [];
+    } catch (error: any) {
+      console.warn('[MeetingContextPacketBuilder] Failed to load semantic memory diagnostics:', error?.message || error);
+      return ['semantic_memory_diagnostics=unavailable'];
     }
   }
 
@@ -233,7 +334,9 @@ export class MeetingContextPacketBuilder {
     contextTrustScore: number,
     focus: InterlocutorFocus,
     actionTarget: MeetingActionTarget,
+    contextMode: MeetingContextPacket['contextMode'],
   ): string {
+    const conferenceClarification = contextMode === 'conference' && action === 'CLARIFY';
     const actionRule = (() => {
       if (actionTarget.source === 'local_user') {
         switch (action) {
@@ -242,7 +345,9 @@ export class MeetingContextPacketBuilder {
           case 'ANSWER':
             return 'Answer the LOCAL USER QUESTION directly as an assistant. Do not pretend it came from the other participant.';
           case 'CLARIFY':
-            return 'Ask exactly one precise clarifying question about the LOCAL USER QUESTION.';
+            return conferenceClarification
+              ? 'Explain the latest conference concept, question, or problem in plain language. Resolve the likely ambiguity instead of asking another question.'
+              : 'Ask exactly one precise clarifying question about the LOCAL USER QUESTION.';
           case 'FOLLOW_UP_QUESTION':
             return 'Suggest exactly one useful follow-up question the local user can ask next about their own topic.';
           case 'RECAP':
@@ -255,7 +360,9 @@ export class MeetingContextPacketBuilder {
         case 'VIBE_INTERVIEW_SAY_THIS':
           return 'Output the exact words the user can say aloud now. If CURRENT INTERLOCUTOR FOCUS is a direct_question, answer that exact question with enough substance for the selected prompt profile and live setting. Use 2-3 sentences for simple questions and 4-7 strong spoken sentences for technical, behavioral, architectural, evidence-rich, or profile-critical questions. If it is an implicit_request after a multi-turn explanation, answer the complete request: confirm the understood scope using support_* facts, state the deliverable or decision, and give the next concrete step. Never merely echo the final request fragment. No preamble.';
         case 'CLARIFY':
-          return 'Output exactly one precise clarifying question about the CURRENT INTERLOCUTOR FOCUS. It must clarify a concrete ambiguity, not ask a generic context question.';
+          return conferenceClarification
+            ? 'Clarify by explaining the CURRENT INTERLOCUTOR FOCUS: make the concept, stakes, assumptions, and connection between the supporting turns easier to understand. Do not merely ask for more context.'
+            : 'Output exactly one precise clarifying question about the CURRENT INTERLOCUTOR FOCUS. It must clarify a concrete ambiguity, not ask a generic context question.';
         case 'FOLLOW_UP_QUESTION':
           return 'Output exactly one useful follow-up question that extends the CURRENT INTERLOCUTOR FOCUS and has not already been answered.';
         case 'RECAP':
@@ -276,6 +383,7 @@ export class MeetingContextPacketBuilder {
 
     return `[PREMIUM MEETING CONTEXT PACKET]
 Action: ${action}
+Context mode: ${contextMode}
 Reliable interlocutor context available: ${hasReliableInterlocutor ? 'YES' : 'NO'}
 Context trust score: ${contextTrustScore.toFixed(2)}
 Current interlocutor focus: ${focus.kind} (${focus.confidence.toFixed(2)}) ${focus.text ? `- ${focus.text}` : ''}
@@ -290,8 +398,8 @@ Action target: ${actionTarget.kind} (${actionTarget.confidence.toFixed(2)}) ${ac
 - The selected prompt profile wins over generic live-meeting defaults. Do not import behavior from another mode when the active profile is meeting, project, client, learning, recruiting, or interview.
 - If focus=implicit_request, respond with confirmation plus the next practical step.
 - If focus=topic, produce a useful bridge or question about that topic, not a broad generic fallback.
-- INTERLOCUTOR/SPEAKER is the other person, professor, client, manager, or system audio.
-- ME/Mic is the local user. Use ME only to understand the user request, never as proof of what the other person said.
+- In default mode, INTERLOCUTOR/SPEAKER is the other person and ME/Mic is the local user.
+- In conference mode, the room microphone is the shared conference floor. Treat its audio turns as meeting evidence even when a legacy transcript label says ME/Mic.
 - If Action target source=local_user, answer the local user's mic question directly and explicitly avoid relabeling it as Speaker.
 - Meeting brief is background only; never claim it was said in the meeting unless it appears in transcript.
 - Before answering, first use the repaired transcript and reconstructed sentence boundaries. Do not answer from raw cut fragments when a repaired version is available.
@@ -517,7 +625,10 @@ rejectedRecentSegments=${rejectedSegments.length}
     return /\b(est ce que|pourquoi|comment|quand|quel|quelle|quels|quelles|combien|où|ou est|pouvez vous|peux tu|tu peux|vous pouvez|can you|could you|what|why|how|when|where|which)\b/i.test(normalized);
   }
 
-  private buildInterlocutorFocusBlock(focus: InterlocutorFocus): string {
+  private buildInterlocutorFocusBlock(
+    focus: InterlocutorFocus,
+    contextMode: MeetingContextPacket['contextMode'],
+  ): string {
     if (focus.kind === 'none' || !focus.text.trim()) {
       return `[CURRENT INTERLOCUTOR FOCUS]
 kind=none
@@ -530,7 +641,9 @@ instruction=No reliable interlocutor target is available. Do not invent what the
     const instruction = (() => {
       switch (focus.kind) {
         case 'direct_question':
-          return 'Answer this exact question first. If the action is CLARIFY, ask one precision question about this question.';
+          return contextMode === 'conference'
+            ? 'Treat this as the latest complete conference question/problem span. For CLARIFY, explain it; for ANSWER/WHAT_TO_SAY, answer it; for FOLLOW_UP_QUESTION, advance it.'
+            : 'Answer this exact question first. If the action is CLARIFY, ask one precision question about this question.';
         case 'implicit_request':
           return 'Treat this as the current request/expectation from the interlocutor. Confirm and propose the next practical step.';
         case 'topic':
@@ -587,7 +700,12 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     ].join('\n');
   }
 
-  private buildActionTargetBlock(action: MeetingAction, focus: MeetingActionTarget, supportingItems: ContextItem[]): string {
+  private buildActionTargetBlock(
+    action: MeetingAction,
+    focus: MeetingActionTarget,
+    supportingItems: ContextItem[],
+    contextMode: MeetingContextPacket['contextMode'],
+  ): string {
     const actionContract = (() => {
       switch (action) {
         case 'WHAT_TO_SAY':
@@ -595,7 +713,9 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
         case 'ANSWER':
           return 'Say the answer the local user should give now. If target_kind=direct_question, answer it directly instead of asking another question. If target_kind=implicit_request, use support_* to answer the entire explanation and requested deliverable; do not just repeat target_text.';
         case 'CLARIFY':
-          return 'Ask one precise clarifying question about the target. Do not answer the target question.';
+          return contextMode === 'conference'
+            ? 'Explain the target clearly using its supporting turns. Surface the core idea, stakes, and ambiguity without turning the response into another question.'
+            : 'Ask one precise clarifying question about the target. Do not answer the target question.';
         case 'FOLLOW_UP_QUESTION':
           return 'Ask one follow-up question that advances the target topic. Do not output a list.';
         case 'RECAP':
@@ -605,7 +725,7 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     })();
 
     const supportingLines = supportingItems
-      .slice(-6)
+      .slice(contextMode === 'conference' ? -12 : -6)
       .map((item, index) => `support_${index + 1}=${this.truncate(item.text, 360)}`);
     const isComprehensionCheck = this.isComprehensionCheckQuestion(focus.text);
     const comprehensionInstruction = isComprehensionCheck
@@ -653,7 +773,11 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     ].join('\n');
   }
 
-  private findRelevantPriorEvidence(selectedItems: ContextItem[], actionTarget: MeetingActionTarget): ContextItem[] {
+  private findRelevantPriorEvidence(
+    selectedItems: ContextItem[],
+    actionTarget: MeetingActionTarget,
+    contextMode: MeetingContextPacket['contextMode'],
+  ): ContextItem[] {
     const selectedKeys = new Set(selectedItems.map((item) => this.key(item.role, item.text, item.timestamp)));
     const selectedText = selectedItems
       .slice(-10)
@@ -664,23 +788,32 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
       selectedText,
     ].filter(Boolean).join(' ');
     const keywords = this.extractEvidenceKeywords(queryText);
-    if (keywords.length < 2) return [];
 
     const newestSelected = selectedItems.reduce((max, item) => Math.max(max, item.timestamp || 0), 0);
     const oldestSelected = selectedItems.reduce((min, item) => Math.min(min, item.timestamp || Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER);
+    const toContextItem = (segment: ReturnType<SessionTracker['getFullTranscript']>[number]): ContextItem => ({
+      role: (contextMode === 'conference'
+        ? 'interviewer'
+        : ((segment as any).role || this.mapRole(segment.canonicalRole, segment.speaker))) as ContextItem['role'],
+      speaker: segment.speaker,
+      text: this.cleanSpeechUnit(segment.text),
+      timestamp: segment.timestamp,
+      confidence: segment.confidence,
+      source: 'recorded',
+      canonicalRole: contextMode === 'conference' && segment.canonicalRole !== 'assistant'
+        ? (/^speaker_\d+$/i.test(segment.canonicalRole || '') ? segment.canonicalRole : 'interlocutor')
+        : segment.canonicalRole,
+      qualityFlags: contextMode === 'conference'
+        ? [...new Set([...(segment.qualityFlags || []), 'conference_floor' as TranscriptQualityFlag, 'trusted_interlocutor' as TranscriptQualityFlag])]
+        : segment.qualityFlags,
+    });
 
-    return this.session.getFullTranscript()
+    const lexicalEvidence = keywords.length < 2
+      ? []
+      : this.session.getFullTranscript()
       .filter((segment) => segment.final && segment.text.trim().length > 0)
-      .map((segment): ContextItem => ({
-        role: ((segment as any).role || this.mapRole(segment.canonicalRole, segment.speaker)) as ContextItem['role'],
-        speaker: segment.speaker,
-        text: this.cleanSpeechUnit(segment.text),
-        timestamp: segment.timestamp,
-        confidence: segment.confidence,
-        source: 'recorded',
-        canonicalRole: segment.canonicalRole,
-        qualityFlags: segment.qualityFlags,
-      }))
+      .filter((segment) => contextMode !== 'conference' || (segment.canonicalRole !== 'assistant' && !/^assistant$/i.test(segment.speaker || '')))
+      .map(toContextItem)
       .filter((item) => item.text && !selectedKeys.has(this.key(item.role, item.text, item.timestamp)))
       .map((item) => ({
         item,
@@ -694,6 +827,44 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
         ...item,
         evidenceScore: score,
       } as ContextItem & { evidenceScore: number }));
+
+    const semanticEvidence = contextMode === 'conference'
+      ? this.safeSemanticMemoryEvidence(queryText)
+        .map(toContextItem)
+        .filter((item) => item.text && !selectedKeys.has(this.key(item.role, item.text, item.timestamp)))
+        .map((item) => ({ ...item, evidenceScore: 4.8 } as ContextItem & { evidenceScore: number }))
+      : [];
+
+    const selectedSemanticEvidence = semanticEvidence.slice(0, 4);
+    const merged = new Map<string, ContextItem & { evidenceScore: number }>();
+    for (const item of selectedSemanticEvidence) {
+      const key = this.key(item.role, item.text, item.timestamp);
+      merged.set(key, item);
+    }
+    for (const item of lexicalEvidence) {
+      const key = this.key(item.role, item.text, item.timestamp);
+      const existing = merged.get(key);
+      if (existing) {
+        if (item.evidenceScore > existing.evidenceScore) merged.set(key, item);
+        continue;
+      }
+      if (merged.size < 8) merged.set(key, item);
+    }
+
+    return [...merged.values()]
+      .sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  private safeSemanticMemoryEvidence(query: string): ReturnType<SessionTracker['getFullTranscript']> {
+    try {
+      const getter = (this.session as SessionTracker & {
+        getSemanticMemoryEvidenceSegments?: (query: string, maxSegments?: number) => ReturnType<SessionTracker['getFullTranscript']>;
+      }).getSemanticMemoryEvidenceSegments;
+      return typeof getter === 'function' ? getter.call(this.session, query, 6) : [];
+    } catch (error: any) {
+      console.warn('[MeetingContextPacketBuilder] Failed to retrieve semantic memory evidence:', error?.message || error);
+      return [];
+    }
   }
 
   private scoreEvidenceCandidate(
@@ -768,19 +939,28 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     return null;
   }
 
-  private buildRejectedSegments(lastSeconds: number, selectedItems: ContextItem[]): MeetingContextPacket['rejectedSegments'] {
+  private buildRejectedSegments(
+    lastSeconds: number,
+    selectedItems: ContextItem[],
+    contextMode: MeetingContextPacket['contextMode'],
+  ): MeetingContextPacket['rejectedSegments'] {
     const cutoff = Date.now() - lastSeconds * 1000;
     const selectedKeys = new Set(selectedItems.map((item) => this.key(item.role, item.text, item.timestamp)));
     return this.session.getFullTranscript()
       .filter((segment) => segment.final && segment.timestamp >= cutoff)
+      .filter((segment) => contextMode !== 'conference' || (segment.canonicalRole !== 'assistant' && !/^assistant$/i.test(segment.speaker || '')))
       .map((segment) => {
-        const role = this.mapRole(segment.canonicalRole, segment.speaker);
+        const role = contextMode === 'conference'
+          ? 'interviewer'
+          : this.mapRole(segment.canonicalRole, segment.speaker);
         return {
           role,
           speaker: segment.speaker,
           text: segment.text.trim(),
           timestamp: segment.timestamp,
-          canonicalRole: segment.canonicalRole,
+          canonicalRole: contextMode === 'conference'
+            ? (/^speaker_\d+$/i.test(segment.canonicalRole || '') ? segment.canonicalRole : 'interlocutor')
+            : segment.canonicalRole,
           qualityFlags: segment.qualityFlags,
         };
       })
@@ -837,6 +1017,7 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
   private deriveInterlocutorFocus(
     reliableItems: ContextItem[],
     questionCandidates: MeetingContextPacket['questionCandidates'] = [],
+    contextMode: MeetingContextPacket['contextMode'] = 'default',
   ): InterlocutorFocus {
     if (reliableItems.length === 0) {
       return {
@@ -851,10 +1032,10 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     let recentSource = reliableItems;
     let demotedQuestion: MeetingContextPacket['questionCandidates'][number] | undefined;
 
-    if (bestQuestion && !this.shouldDemoteStaleQuestionCandidate(bestQuestion, reliableItems)) {
+    if (bestQuestion && !this.shouldDemoteStaleQuestionCandidate(bestQuestion, reliableItems, contextMode)) {
       return {
         kind: 'direct_question',
-        text: this.truncate(bestQuestion.text, 420),
+        text: this.truncate(bestQuestion.text, contextMode === 'conference' ? 1400 : 420),
         confidence: bestQuestion.confidence,
         timestamp: bestQuestion.timestamp,
         reason: `ranked_question_candidate:${bestQuestion.reason}`,
@@ -872,13 +1053,15 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
       const item = recent[i];
       const question = this.extractBestQuestion(item.text);
       if (question) {
-        const enrichedQuestion = this.enrichQuestionWithNeighborContext(
-          question,
-          recent.slice(Math.max(0, i - 3), i),
-        );
+        const enrichedQuestion = contextMode === 'conference'
+          ? this.enrichConferenceQuestionSpan(question, recent, i)
+          : this.enrichQuestionWithNeighborContext(
+              question,
+              recent.slice(Math.max(0, i - 3), i),
+            );
         return {
           kind: 'direct_question',
-          text: this.truncate(enrichedQuestion, 420),
+          text: this.truncate(enrichedQuestion, contextMode === 'conference' ? 900 : 420),
           confidence: /\?\s*$/.test(question) ? 0.92 : 0.82,
           timestamp: item.timestamp,
           reason: 'latest_interlocutor_question',
@@ -886,10 +1069,29 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
       }
     }
 
+    if (contextMode === 'conference') {
+      const problemSpan = this.extractConferenceProblemSpan(recent);
+      if (problemSpan) {
+        return {
+          kind: 'implicit_request',
+          text: this.truncate(problemSpan.text, 1400),
+          confidence: 0.78,
+          timestamp: problemSpan.timestamp,
+          reason: 'latest_conference_problem_span',
+        };
+      }
+    }
+
     for (let i = recent.length - 1; i >= 0; i--) {
       const item = recent[i];
       const request = this.extractImplicitRequest(item.text);
-      if (request) {
+      const reportedConferenceExplanation = contextMode === 'conference' &&
+        /^(a ce niveau|à ce niveau|par exemple|je sais|je vais|on va dire|dans cet exemple)\b/i.test(this.normalize(request || ''));
+      if (
+        request &&
+        !(contextMode === 'conference' && this.looksLikeDanglingFragment(request)) &&
+        !reportedConferenceExplanation
+      ) {
         return {
           kind: 'implicit_request',
           text: this.truncate(request, 420),
@@ -900,7 +1102,14 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
       }
     }
 
-    const topic = this.extractTopic(recent);
+    const conferenceTopicItems = contextMode === 'conference'
+      ? recent.filter((item) => {
+          const flags = new Set(item.qualityFlags || []);
+          return !flags.has('low_confidence') &&
+            !(flags.has('stt_low_quality') && item.text.trim().length < 140);
+        })
+      : recent;
+    const topic = this.extractTopic(conferenceTopicItems.length >= 2 ? conferenceTopicItems : recent);
     return {
       kind: topic ? 'topic' : 'none',
       text: topic,
@@ -917,6 +1126,7 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
   private shouldDemoteStaleQuestionCandidate(
     question: MeetingContextPacket['questionCandidates'][number],
     reliableItems: ContextItem[],
+    contextMode: MeetingContextPacket['contextMode'] = 'default',
   ): boolean {
     const newerItems = reliableItems
       .filter((item) => item.timestamp > question.timestamp + 2_500)
@@ -929,6 +1139,13 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     const newerWords = this.normalize(newerText).split(' ').filter(Boolean).length;
 
     if (questionAgeMs < 18_000) return false;
+    // Keep the wide conference evidence window, but do not let an old audience
+    // question remain the current focus after several minutes of newer speech.
+    // Generic continuation words such as "par exemple" used to pin questions
+    // for the entire window even after the lecture had moved on.
+    if (contextMode === 'conference' && questionAgeMs >= 3 * 60_000 && newerWords >= 30) {
+      return true;
+    }
     if (this.isQuestionContinuation(question.text, newerText)) return false;
     return newerWords >= 18;
   }
@@ -1041,9 +1258,20 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     return { ...interlocutorFocus, source: 'none' };
   }
 
-  private pickSupportingInterlocutorItems(reliableItems: ContextItem[], focus: InterlocutorFocus): ContextItem[] {
+  private pickSupportingInterlocutorItems(
+    reliableItems: ContextItem[],
+    focus: InterlocutorFocus,
+    contextMode: MeetingContextPacket['contextMode'] = 'default',
+  ): ContextItem[] {
     if (reliableItems.length === 0) return [];
     if (!focus.timestamp) return reliableItems.slice(-5);
+
+    if (contextMode === 'conference') {
+      const conferenceCutoff = focus.timestamp - 10 * 60 * 1000;
+      return reliableItems
+        .filter((item) => item.timestamp >= conferenceCutoff && item.timestamp <= focus.timestamp + 30_000)
+        .slice(-24);
+    }
 
     const focusIndex = reliableItems.findIndex((item) => Math.abs(item.timestamp - focus.timestamp!) < 2000);
     if (focusIndex < 0) return reliableItems.slice(-5);
@@ -1053,22 +1281,27 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     return reliableItems.slice(start, end);
   }
 
-  private collectInterlocutorQuestionCandidates(reliableItems: ContextItem[]): MeetingContextPacket['questionCandidates'] {
-    const recent = reliableItems.slice(-20);
+  private collectInterlocutorQuestionCandidates(
+    reliableItems: ContextItem[],
+    contextMode: MeetingContextPacket['contextMode'] = 'default',
+  ): MeetingContextPacket['questionCandidates'] {
+    const recent = reliableItems.slice(contextMode === 'conference' ? -60 : -20);
     const candidates = recent
       .map((item, index) => {
         const question = this.extractBestQuestion(item.text);
         if (!question) return null;
-        const enrichedQuestion = this.enrichQuestionWithNeighborContext(
-          question,
-          recent.slice(Math.max(0, index - 3), index),
-        );
+        const enrichedQuestion = contextMode === 'conference'
+          ? this.enrichConferenceQuestionSpan(question, recent, index)
+          : this.enrichQuestionWithNeighborContext(
+              question,
+              recent.slice(Math.max(0, index - 3), index),
+            );
         const confidence = /[?？]\s*$/.test(question) ? 0.92 : 0.82;
         const score = this.scoreQuestionCandidate(enrichedQuestion, item, index, recent.length);
         const candidate: MeetingContextPacket['questionCandidates'][number] = {
           rank: 0,
           source: 'interlocutor' as const,
-          text: this.truncate(enrichedQuestion, 520),
+          text: this.truncate(enrichedQuestion, contextMode === 'conference' ? 1400 : 520),
           timestamp: item.timestamp,
           confidence,
           score,
@@ -1112,6 +1345,76 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     if (this.isComprehensionCheckQuestion(question)) return `comprehension_check:${flags}`;
     if (this.isStandaloneQuestion(question)) return `standalone_question:${flags}`;
     return `question_with_neighbor_context:${flags}`;
+  }
+
+  private enrichConferenceQuestionSpan(question: string, items: ContextItem[], questionIndex: number): string {
+    const current = items[questionIndex];
+    if (!current) return question;
+
+    const needsWideContext =
+      !this.isStandaloneQuestion(question) ||
+      this.isComprehensionCheckQuestion(question) ||
+      this.hasConferenceProblemSignal(question) ||
+      /\b(ce problème|ce probleme|ce point|cette situation|ça|ca|cela|y arriver|what i mean|this problem|this issue|this situation)\b/i.test(this.normalize(question));
+    if (!needsWideContext) return question;
+
+    const earliestTimestamp = current.timestamp - 10 * 60 * 1000;
+    let anchorIndex = Math.max(0, questionIndex - 3);
+    for (let index = questionIndex - 1; index >= 0; index--) {
+      const candidate = items[index];
+      if (candidate.timestamp < earliestTimestamp) break;
+      const priorQuestion = this.extractBestQuestion(candidate.text);
+      const hasExplicitPriorQuestion = Boolean(
+        priorQuestion &&
+        !this.isComprehensionCheckQuestion(priorQuestion) &&
+        /[?？]/.test(candidate.text),
+      );
+      if (hasExplicitPriorQuestion || this.hasConferenceProblemSignal(candidate.text)) {
+        anchorIndex = index;
+        // The nearest strong anchor defines this question. Continuing farther
+        // backwards merged several unrelated lecture topics into one target.
+        break;
+      }
+    }
+
+    const span = items
+      .slice(Math.max(anchorIndex, questionIndex - 11), questionIndex + 1)
+      .map((item) => this.cleanSpeechUnit(item.text))
+      .filter(Boolean)
+      .filter((text, index, all) => index === 0 || this.normalize(text) !== this.normalize(all[index - 1]));
+    return span.length > 0 ? span.join(' ') : question;
+  }
+
+  private extractConferenceProblemSpan(items: ContextItem[]): { text: string; timestamp: number } | null {
+    if (items.length === 0) return null;
+    const latestTimestamp = items[items.length - 1].timestamp;
+    // Implicit problems need a tighter recency boundary than explicit questions.
+    // An older problem remains available as evidence, but after three minutes of
+    // uninterrupted newer lecture it must not absorb the current topic.
+    const earliestTimestamp = latestTimestamp - 3 * 60 * 1000;
+    let anchorIndex = -1;
+
+    for (let index = items.length - 1; index >= 0; index--) {
+      if (items[index].timestamp < earliestTimestamp) break;
+      if (this.hasConferenceProblemSignal(items[index].text)) {
+        anchorIndex = index;
+      }
+    }
+    if (anchorIndex < 0) return null;
+
+    const span = items
+      .slice(anchorIndex)
+      .filter((item) => !this.isLowSignalFollowUp(item.text))
+      .map((item) => this.cleanSpeechUnit(item.text))
+      .filter(Boolean)
+      .join(' ');
+    if (this.normalize(span).split(' ').filter(Boolean).length < 8) return null;
+    return { text: span, timestamp: items[items.length - 1].timestamp };
+  }
+
+  private hasConferenceProblemSignal(text: string): boolean {
+    const normalized = this.normalize(text);
+    return /\b(probleme|problème|difficulte|difficulté|enjeu|blocage|challenge|issue|objectif|mission|contrainte|instable|instabilite|instabilité|a resoudre|à résoudre|comment ameliorer|comment améliorer|comment faire|ne marche pas|n arrive pas|n'arrive pas|besoin de trouver|we need to solve|does not work|doesn t work)\b/i.test(normalized);
   }
 
   private extractBestQuestion(text: string): string | null {
@@ -1247,6 +1550,13 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
     if (this.isIncompleteQuestionFragment(normalized)) return false;
     if (/[?？]\s*$/.test(clean)) return true;
 
+    // Parakeet often punctuates declarative lecture transitions as separate
+    // units. "Quand on parle de..." is context, not a question, unless the
+    // speaker actually used question punctuation.
+    if (/^(quand|lorsque)\s+(on|nous|vous|je|tu|il|elle|ils|elles|le|la|les)\b/i.test(normalized)) {
+      return false;
+    }
+
     const startsLikeQuestion = /^(est ce que|qu est ce|pourquoi|comment|quand|a quel moment|à quel moment|quel|quelle|quels|quelles|combien|où|ou est|what|why|how|when|where|which)\b/i.test(normalized);
     const hasQuestionPhrase =
       /\b(pouvez vous|vous pouvez|peux tu|tu peux)\s+(me|nous|dire|expliquer|confirmer|preciser|préciser|donner|partager|montrer|clarifier|indiquer)\b/i.test(normalized) ||
@@ -1339,7 +1649,7 @@ instruction=No reliable question shortlist is available. Use ACTION TARGET and C
 
   private isComprehensionCheckQuestion(text?: string): boolean {
     const normalized = this.normalize(text || '');
-    return /\b(tu comprends|vous comprenez|tu as compris|vous avez compris|what do you understand|does that make sense)\b/i.test(normalized);
+    return /\b(tu comprends|vous comprenez|tu as compris|vous avez compris|est ce clair|c est clair|c est bon|vous suivez|on est d accord|what do you understand|does that make sense|is that clear|are you following)\b/i.test(normalized);
   }
 
   private looksLikeDanglingFragment(text: string): boolean {

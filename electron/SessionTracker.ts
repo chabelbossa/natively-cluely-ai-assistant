@@ -5,6 +5,14 @@
 import { RecapLLM } from './llm';
 import { isVerboseLogging } from './verboseLog';
 import type { CanonicalTranscriptRole, TranscriptQualityFlag } from './transcript/types';
+import {
+    ConferenceMemorySnapshot,
+    conferenceSegmentId,
+    conferenceSegmentIndex,
+    formatConferenceMemoryContext,
+    normalizeConferenceMemorySnapshot,
+    selectConferenceMemoryEvidenceIds,
+} from './meeting/ConferenceMemory';
 
 export interface TranscriptSegment {
     marker?: string;
@@ -68,10 +76,19 @@ export class SessionTracker {
     private fullUsage: any[] = []; // UsageInteraction
     private sessionStartTime: number = Date.now();
 
-    // Rolling summarization: epoch summaries preserve early context when arrays are compacted
-    private static readonly MAX_EPOCH_SUMMARIES = 5;
-    private transcriptEpochSummaries: string[] = [];
-    private isCompacting: boolean = false;
+    // Loss-aware semantic projection. fullTranscript remains the immutable source
+    // of truth; this memory only reduces what must be sent to the answer LLM.
+    private static readonly SEMANTIC_COMPACTION_MIN_SEGMENTS = 18;
+    private static readonly SEMANTIC_COMPACTION_MIN_CHARS = 2_400;
+    private static readonly SEMANTIC_COMPACTION_BATCH_SEGMENTS = 48;
+    private static readonly SEMANTIC_COMPACTION_RECENT_RESERVE = 12;
+    private semanticMemory: ConferenceMemorySnapshot | null = null;
+    private semanticMemoryCoverageEndIndex: number = 0;
+    private semanticCompactionEnabled: boolean = false;
+    private semanticCompactionPromise: Promise<void> | null = null;
+    private semanticCompactionRetryAfter: number = 0;
+    private semanticCompactionLastAttemptEndIndex: number = 0;
+    private sessionGeneration: number = 0;
 
     // Track interim interviewer segment
     private lastInterimInterviewer: TranscriptSegment | null = null;
@@ -87,7 +104,7 @@ export class SessionTracker {
     // Screenshot-detected question stays sticky for 3 min before transcript can override
     private static readonly SCREENSHOT_STALE_MS = 3 * 60 * 1000;
 
-    // Reference to RecapLLM for epoch summarization (injected later)
+    // Reference to the provider-neutral LLM compactor (injected later)
     private recapLLM: RecapLLM | null = null;
 
     // ============================================
@@ -96,6 +113,20 @@ export class SessionTracker {
 
     public setRecapLLM(recapLLM: RecapLLM | null): void {
         this.recapLLM = recapLLM;
+        if (recapLLM && this.semanticCompactionEnabled) {
+            void this.compactTranscriptIfNeeded().catch(e =>
+                console.warn('[SessionTracker] semantic compaction initialization failed (non-fatal):', e)
+            );
+        }
+    }
+
+    public setSemanticCompactionEnabled(enabled: boolean): void {
+        this.semanticCompactionEnabled = enabled;
+        if (enabled) {
+            void this.compactTranscriptIfNeeded().catch(e =>
+                console.warn('[SessionTracker] semantic compaction enablement failed (non-fatal):', e)
+            );
+        }
     }
 
     public setMeetingMetadata(metadata: any): void {
@@ -485,7 +516,10 @@ export class SessionTracker {
      * Get full session context from accumulated transcript (User + Interviewer + Assistant)
      */
     getFullSessionContext(): string {
-        const recentTranscript = this.fullTranscript.map(segment => {
+        const rawStartIndex = this.semanticMemory?.coverage
+            ? Math.min(this.semanticMemoryCoverageEndIndex, this.fullTranscript.length)
+            : 0;
+        const recentTranscript = this.fullTranscript.slice(rawStartIndex).map(segment => {
             const role = this.mapSpeakerToRole(segment.speaker, segment.canonicalRole);
             const label = this.formatRoleLabel({
                 role,
@@ -495,10 +529,9 @@ export class SessionTracker {
             return `[${label}]: ${segment.text}`;
         }).join('\n');
 
-        // Prepend epoch summaries for full session context preservation
-        if (this.transcriptEpochSummaries.length > 0) {
-            const epochContext = this.transcriptEpochSummaries.join('\n---\n');
-            return `[SESSION HISTORY - EARLIER DISCUSSION]\n${epochContext}\n\n[RECENT TRANSCRIPT]\n${recentTranscript}`;
+        const semanticContext = this.getSemanticMemoryContextBlock();
+        if (semanticContext) {
+            return `${semanticContext}\n\n[RECENT VERBATIM TRANSCRIPT]\n${recentTranscript}`;
         }
 
         return recentTranscript;
@@ -510,6 +543,34 @@ export class SessionTracker {
 
     getFullTranscript(): TranscriptSegment[] {
         return this.fullTranscript;
+    }
+
+    getSemanticMemoryContextBlock(): string {
+        return formatConferenceMemoryContext(this.semanticMemory);
+    }
+
+    getSemanticMemoryDiagnostics(): string[] {
+        return [
+            `semantic_memory_enabled=${this.semanticCompactionEnabled}`,
+            `semantic_memory_available=${Boolean(this.semanticMemory?.coverage)}`,
+            `semantic_memory_compacting=${Boolean(this.semanticCompactionPromise)}`,
+            `semantic_memory_retry_cooling_down=${Date.now() < this.semanticCompactionRetryAfter}`,
+            `semantic_memory_coverage_end_index=${this.semanticMemoryCoverageEndIndex}`,
+            `semantic_memory_raw_segments_retained=${this.fullTranscript.length}`,
+        ];
+    }
+
+    getSemanticMemoryEvidenceSegments(query: string, maxSegments: number = 6): TranscriptSegment[] {
+        const ids = selectConferenceMemoryEvidenceIds(this.semanticMemory, query, maxSegments);
+        return ids
+            .map((id) => conferenceSegmentIndex(id))
+            .filter((index): index is number => index !== null && index >= 0 && index < this.fullTranscript.length)
+            .map((index) => this.fullTranscript[index])
+            .filter((segment) => segment.final && segment.canonicalRole !== 'assistant' && !/^assistant$/i.test(segment.speaker || ''));
+    }
+
+    async waitForSemanticMemoryCompaction(): Promise<void> {
+        await this.compactTranscriptIfNeeded(true);
     }
 
     getFullUsage(): any[] {
@@ -571,10 +632,15 @@ export class SessionTracker {
     // ============================================
 
     reset(): void {
+        this.sessionGeneration++;
         this.contextItems = [];
         this.fullTranscript = [];
         this.fullUsage = [];
-        this.transcriptEpochSummaries = [];
+        this.semanticMemory = null;
+        this.semanticMemoryCoverageEndIndex = 0;
+        this.semanticCompactionPromise = null;
+        this.semanticCompactionRetryAfter = 0;
+        this.semanticCompactionLastAttemptEndIndex = 0;
         this.sessionStartTime = Date.now();
         this.lastAssistantMessage = null;
         this.assistantResponseHistory = [];
@@ -897,64 +963,82 @@ export class SessionTracker {
     }
 
     /**
-     * Compact transcript buffer by summarizing oldest entries into an epoch summary.
-     * Called instead of raw slice() to preserve early meeting context.
+     * Build an incremental LLM-generated semantic projection while retaining the
+     * complete raw transcript. Coverage advances only after validated output.
      */
-    private async compactTranscriptIfNeeded(): Promise<void> {
-        if (this.fullTranscript.length <= 1800 || this.isCompacting) return;
+    private compactTranscriptIfNeeded(force: boolean = false): Promise<void> {
+        if (!this.semanticCompactionEnabled || !this.recapLLM) return Promise.resolve();
+        if (this.semanticCompactionPromise) return this.semanticCompactionPromise;
 
-        this.isCompacting = true;
-        try {
-            // Take the oldest 500 entries to summarize
-            const summarizeCount = 500;
-            const oldEntries = this.fullTranscript.slice(0, summarizeCount);
-            const summaryInput = oldEntries.map(seg => {
-                const role = this.mapSpeakerToRole(seg.speaker, seg.canonicalRole);
-                const label = this.formatRoleLabel({
-                    role,
-                    speaker: seg.speaker,
-                    canonicalRole: seg.canonicalRole
-                });
-                return `[${label}]: ${seg.text}`;
-            }).join('\n');
-
-            // Fire-and-forget LLM summarization (non-blocking)
-            if (this.recapLLM) {
-                try {
-                    const epochSummary = await this.recapLLM.generate(
-                        `Summarize this conversation segment into 3-5 concise bullet points preserving key topics, decisions, and questions:\n\n${summaryInput}`
-                    );
-                    if (epochSummary && epochSummary.trim().length > 0) {
-                        this.transcriptEpochSummaries.push(epochSummary.trim());
-                        console.log(`[SessionTracker] Epoch summary created (${this.transcriptEpochSummaries.length} total)`);
-                    } else {
-                        // Empty LLM response — store a basic marker so context is not lost
-                        const marker = `[Earlier discussion: ${oldEntries.length} segments — ${oldEntries.slice(0, 3).map(s => s.text.substring(0, 40)).join('; ')}...]`;
-                        this.transcriptEpochSummaries.push(marker);
-                    }
-                } catch (e) {
-                    // If summarization fails, store a simple marker
-                    const fallback = `[Earlier discussion: ${oldEntries.length} segments, topics: ${oldEntries.slice(0, 3).map(s => s.text.substring(0, 40)).join('; ')}...]`;
-                    this.transcriptEpochSummaries.push(fallback);
-                    console.warn('[SessionTracker] Epoch summarization failed, using fallback marker');
-                }
-            } else {
-                // BUG-03 fix: recapLLM not yet available — always push a plain marker so early
-                // context is not silently discarded with no record in transcriptEpochSummaries.
-                const marker = `[Earlier discussion (no LLM): ${oldEntries.length} segments — ${oldEntries.slice(0, 3).map(s => s.text.substring(0, 40)).join('; ')}...]`;
-                this.transcriptEpochSummaries.push(marker);
-                console.warn('[SessionTracker] recapLLM not available — storing plain epoch marker');
-            }
-
-            // Cap epoch summaries to prevent LLM context window overflow
-            if (this.transcriptEpochSummaries.length > SessionTracker.MAX_EPOCH_SUMMARIES) {
-                this.transcriptEpochSummaries = this.transcriptEpochSummaries.slice(-SessionTracker.MAX_EPOCH_SUMMARIES);
-            }
-
-            // Evict ONLY the exact 500 oldest entries that we just summarized
-            this.fullTranscript = this.fullTranscript.slice(summarizeCount);
-        } finally {
-            this.isCompacting = false;
+        const availableEndIndex = Math.max(
+            0,
+            this.fullTranscript.length - SessionTracker.SEMANTIC_COMPACTION_RECENT_RESERVE,
+        );
+        const uncompactedCount = availableEndIndex - this.semanticMemoryCoverageEndIndex;
+        if (uncompactedCount <= 0) return Promise.resolve();
+        if (!force && uncompactedCount < SessionTracker.SEMANTIC_COMPACTION_MIN_SEGMENTS) {
+            return Promise.resolve();
         }
+
+        const batchStartIndex = this.semanticMemoryCoverageEndIndex;
+        const batchEndIndex = Math.min(
+            availableEndIndex,
+            batchStartIndex + SessionTracker.SEMANTIC_COMPACTION_BATCH_SEGMENTS,
+        );
+        const retryCoolingDown = Date.now() < this.semanticCompactionRetryAfter;
+        const hasMeaningfulRetryGrowth = batchEndIndex >= this.semanticCompactionLastAttemptEndIndex + 6;
+        if (!force && retryCoolingDown && !hasMeaningfulRetryGrowth) return Promise.resolve();
+        const newSegments = this.fullTranscript
+            .slice(batchStartIndex, batchEndIndex)
+            .map((segment, offset) => ({ segment, index: batchStartIndex + offset }))
+            .filter(({ segment }) => segment.final && segment.text.trim().length > 0)
+            .filter(({ segment }) => segment.canonicalRole !== 'assistant' && !/^assistant$/i.test(segment.speaker || ''))
+            .map(({ segment, index }) => ({
+                id: conferenceSegmentId(index),
+                speaker: segment.speaker,
+                text: segment.text.trim(),
+                timestamp: segment.timestamp,
+            }));
+        const sourceChars = newSegments.reduce((total, segment) => total + segment.text.length, 0);
+        if (newSegments.length === 0) return Promise.resolve();
+        if (!force && sourceChars < SessionTracker.SEMANTIC_COMPACTION_MIN_CHARS) {
+            return Promise.resolve();
+        }
+
+        const generation = this.sessionGeneration;
+        const previousMemory = this.semanticMemory;
+        const request = { previousMemory, newSegments };
+        this.semanticCompactionLastAttemptEndIndex = batchEndIndex;
+        const run = (async () => {
+            const candidate = await this.recapLLM!.compactConferenceMemory(request);
+            if (!candidate || generation !== this.sessionGeneration) {
+                if (generation === this.sessionGeneration) this.semanticCompactionRetryAfter = Date.now() + 60_000;
+                return;
+            }
+
+            const normalized = normalizeConferenceMemorySnapshot(candidate, request, {
+                fromSegmentId: previousMemory?.coverage?.fromSegmentId || newSegments[0].id,
+                throughSegmentId: conferenceSegmentId(batchEndIndex - 1),
+                segmentCount: batchEndIndex,
+                updatedAt: Date.now(),
+            });
+            if (!normalized || generation !== this.sessionGeneration) return;
+
+            this.semanticMemory = normalized;
+            this.semanticMemoryCoverageEndIndex = batchEndIndex;
+            this.semanticCompactionRetryAfter = 0;
+            console.log(
+                `[SessionTracker] Semantic conference memory updated through ${conferenceSegmentId(batchEndIndex - 1)}; raw transcript retained (${this.fullTranscript.length} segments)`,
+            );
+        })().catch((error) => {
+            if (generation === this.sessionGeneration) this.semanticCompactionRetryAfter = Date.now() + 60_000;
+            console.warn('[SessionTracker] Semantic conference memory compaction failed; raw transcript retained:', error);
+        });
+
+        const tracked = run.finally(() => {
+            if (this.semanticCompactionPromise === tracked) this.semanticCompactionPromise = null;
+        });
+        this.semanticCompactionPromise = tracked;
+        return tracked;
     }
 }

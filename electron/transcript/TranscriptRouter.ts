@@ -1,6 +1,7 @@
 import type {
   CanonicalSpeakerRole,
   CanonicalTranscriptSegment,
+  MicRoutingPolicy,
   RawTranscriptSegment,
   TranscriptQualityFlag,
   TranscriptRouteResult,
@@ -24,6 +25,13 @@ export class TranscriptRouter {
   private recentCanonicalFinals: CanonicalTranscriptSegment[] = [];
   private recentCanonical: CanonicalTranscriptSegment[] = [];
   private sequence = 0;
+  private micRoutingPolicy: MicRoutingPolicy = 'local_user';
+
+  setMicRoutingPolicy(policy: MicRoutingPolicy): void {
+    if (this.micRoutingPolicy === policy) return;
+    this.micRoutingPolicy = policy;
+    this.reset();
+  }
 
   route(raw: RawTranscriptSegment): TranscriptRouteResult {
     let text = raw.text.trim();
@@ -65,6 +73,12 @@ export class TranscriptRouter {
     if (lateMicFlush?.text && lateMicFlush.text !== text) {
       text = lateMicFlush.text;
       lateFlushTrimmed = true;
+    }
+
+    if (this.micRoutingPolicy === 'conference_floor') {
+      const segment = this.toConferenceFloorSegment({ ...raw, text, timestamp: now }, lateFlushTrimmed);
+      this.remember(segment);
+      return { segment };
     }
 
     const originalMicText = text;
@@ -198,6 +212,41 @@ export class TranscriptRouter {
       role,
       source: 'system',
       speaker,
+      text: raw.text.trim(),
+      timestamp: raw.timestamp,
+      final: raw.final,
+      confidence: raw.confidence,
+      qualityFlags: flags,
+      rawSpeaker: raw.speaker,
+      provider: raw.provider,
+      speakerId: raw.speakerId,
+    };
+  }
+
+  private toConferenceFloorSegment(raw: RawTranscriptSegment, lateFlushTrimmed: boolean): CanonicalTranscriptSegment {
+    const hasReliableDiarization =
+      raw.diarized === true &&
+      raw.speakerId !== undefined &&
+      Number.isFinite(raw.speakerId);
+    const role = hasReliableDiarization
+      ? this.resolveCanonicalSpeakerRole(raw)
+      : 'interlocutor';
+    const flags: TranscriptQualityFlag[] = [
+      'conference_floor',
+      'system_audio_unavailable',
+      'trusted_interlocutor',
+    ];
+
+    if (hasReliableDiarization) flags.push('speaker_stable');
+    if (raw.confidence !== undefined && raw.confidence < 0.72) flags.push('low_confidence');
+    if (raw.provider === 'local' && (raw.confidence ?? 1) < 0.82) flags.push('stt_low_quality');
+    if (lateFlushTrimmed) flags.push('late_flush_trimmed');
+
+    return {
+      id: this.nextId('conference_floor', raw.timestamp),
+      role,
+      source: 'mic',
+      speaker: role,
       text: raw.text.trim(),
       timestamp: raw.timestamp,
       final: raw.final,

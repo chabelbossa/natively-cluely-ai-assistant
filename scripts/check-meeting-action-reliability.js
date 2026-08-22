@@ -361,10 +361,10 @@ const checks = [
       /isInsufficientContextFallback[\s\S]*could you repeat[\s\S]*address your question properly/,
   },
   {
-    name: "clarify and follow-up outputs are collapsed to a single question",
+    name: "default clarify and follow-up outputs stay single-question while conference clarify remains explanatory",
     source: engine,
     pattern:
-      /postProcessLiveActionOutput[\s\S]*sanitizeSingleQuestionOutput[\s\S]*sanitizeSingleQuestion: true[\s\S]*sanitizeSingleQuestion: true/,
+      /postProcessLiveActionOutput[\s\S]*sanitizeSingleQuestionOutput[\s\S]*sanitizeSingleQuestion: !conferenceExplanation[\s\S]*sanitizeSingleQuestion: true/,
   },
   {
     name: "live action outputs collapse duplicated model paragraphs before persistence",
@@ -400,7 +400,7 @@ const checks = [
     name: "clarify falls back from empty or generic unreliable answers",
     source: engine,
     pattern:
-      /empty_live_action_output[\s\S]*buildLiveActionFallback\(action, packet\)[\s\S]*'CLARIFY'[\s\S]*sanitizeSingleQuestion: true/,
+      /empty_live_action_output[\s\S]*buildLiveActionFallback\(action, packet\)[\s\S]*'CLARIFY'[\s\S]*sanitizeSingleQuestion: !conferenceExplanation/,
   },
   {
     name: "follow-up questions fall back from empty or generic unreliable answers",

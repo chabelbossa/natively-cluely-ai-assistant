@@ -180,6 +180,7 @@ import { MeetingBriefManager } from "./meeting/MeetingBriefManager"
 import { MeetingSummaryAgent } from "./meeting/MeetingSummaryAgent"
 import { MeetingDebugRecorder } from "./diagnostics/MeetingDebugRecorder"
 import { AudioDebugRecorder, type AudioDebugTrackName } from "./diagnostics/AudioDebugRecorder"
+import { ModesManager } from "./services/ModesManager"
 
 /** Unified type for all STT providers with optional extended capabilities */
 type STTProvider = (GoogleSTT | RestSTT | LocalSTT | ParakeetStreamingSTT | DeepgramStreamingSTT | SonioxStreamingSTT | ElevenLabsStreamingSTT | OpenAIStreamingSTT | NativelyProSTT) & {
@@ -263,6 +264,7 @@ export class AppState {
 
   private hasDebugged: boolean = false
   private isMeetingActive: boolean = false; // Guard for session state leaks
+  private conferenceMicOnlyMode: boolean = false;
   private isMeetingStopping: boolean = false;
   private meetingFinalizationPromise: Promise<void> | null = null;
   private lastAcceptedSttTranscriptAt: number = 0;
@@ -2021,6 +2023,51 @@ export class AppState {
     }
   }
 
+  private setupConferenceMicrophonePipeline(inputDeviceId?: string): void {
+    if (inputDeviceId && this.microphoneCapture) {
+      this.microphoneCapture.destroy();
+      this.microphoneCapture = null;
+    }
+
+    if (!this.microphoneCapture) {
+      this.microphoneCapture = new MicrophoneCapture(inputDeviceId || undefined);
+      this.microphoneCapture.on('data', (chunk: Buffer) => {
+        this.writeAudioDebugTrack('mic', chunk, this.microphoneCapture?.getSampleRate() || 48000);
+        this.maybeLogAudioLevel('user', chunk);
+        this.googleSTT_User?.write(chunk);
+      });
+      this.microphoneCapture.on('sample_rate_changed', (rate: number) => {
+        console.log(`[Main] Conference MicrophoneCapture rate updated dynamically to ${rate}Hz`);
+        this.googleSTT_User?.setSampleRate(rate);
+      });
+      this.microphoneCapture.on('speech_ended', () => {
+        this.googleSTT_User?.notifySpeechEnded?.();
+      });
+      this.microphoneCapture.on('error', (err: Error) => {
+        console.error('[Main] Conference MicrophoneCapture Error:', err);
+      });
+    }
+
+    if (!this.googleSTT_User) {
+      this.googleSTT_User = this.createSTTProvider('user');
+    }
+
+    const micRate = this.microphoneCapture?.getSampleRate() || 48000;
+    this.googleSTT_User?.setSampleRate(micRate);
+    this.googleSTT_User?.setAudioChannelCount?.(1);
+    console.log(`[Main] Conference microphone-only pipeline initialized at ${micRate}Hz.`);
+  }
+
+  private isConferenceModeActive(): boolean {
+    try {
+      const mode = ModesManager.getInstance().getActiveMode();
+      return mode?.templateType === 'conference' || /\b(conf[eé]rence|conference)\b/i.test(mode?.name || '');
+    } catch (error: any) {
+      console.warn('[Main] Failed to resolve active conference mode:', error?.message || error);
+      return false;
+    }
+  }
+
   private async reconfigureAudio(inputDeviceId?: string, outputDeviceId?: string): Promise<void> {
     console.log(`[Main] Reconfiguring Audio: Input=${inputDeviceId}, Output=${outputDeviceId}`);
 
@@ -2191,11 +2238,17 @@ export class AppState {
     // eagerly construct a MicrophoneCapture (which calls build_input_stream on
     // macOS and immediately triggers the orange mic indicator even without .play()).
     if (this.isMeetingActive) {
-      this.setupSystemAudioPipeline();
-      this.systemAudioCapture?.start();
-      this.microphoneCapture?.start();
-      this.googleSTT?.start();
-      this.googleSTT_User?.start();
+      if (this.conferenceMicOnlyMode) {
+        this.setupConferenceMicrophonePipeline();
+        this.microphoneCapture?.start();
+        this.googleSTT_User?.start();
+      } else {
+        this.setupSystemAudioPipeline();
+        this.systemAudioCapture?.start();
+        this.microphoneCapture?.start();
+        this.googleSTT?.start();
+        this.googleSTT_User?.start();
+      }
     }
 
     console.log('[Main] STT Provider reconfigured');
@@ -2400,11 +2453,16 @@ export class AppState {
       });
     }
     this.clearPendingMicEchoTranscripts('new_meeting', false);
+    this.conferenceMicOnlyMode = this.isConferenceModeActive();
+    this.transcriptRouter.setMicRoutingPolicy(
+      this.conferenceMicOnlyMode ? 'conference_floor' : 'local_user',
+    );
     this.transcriptRouter.reset();
     this._recentTranscripts = [];
     this._lastSystemAudioLevel = null;
     this._systemAudioSilentWarningActive = false;
     this._lastSystemAudioNonSilentAt = 0;
+    this._micGated = false;
     const activeBrief = this.meetingBriefManager.activateForMeeting(metadata?.meetingBrief, { title: metadata?.title });
     if (activeBrief) {
       metadata = { ...(metadata || {}), meetingBrief: activeBrief };
@@ -2416,6 +2474,7 @@ export class AppState {
       : null;
     MeetingDebugRecorder.getInstance().startSession({
       ...(metadata || {}),
+      audioCaptureMode: this.conferenceMicOnlyMode ? 'conference_mic_only' : 'dual_channel',
       stt: {
         provider: debugSttProvider,
         language: credentialsManager.getSttLanguage(),
@@ -2445,7 +2504,7 @@ export class AppState {
     // (in initializeApp) so it never pops up mid-meeting here. We only act on
     // explicit 'denied' — in that case warn the user but let the meeting continue
     // with microphone-only transcription.
-    if (process.platform === 'darwin') {
+    if (process.platform === 'darwin' && !this.conferenceMicOnlyMode) {
       const screenStatus = getMacScreenCaptureStatus();
       console.log(`[Main] macOS screen recording permission status: ${screenStatus}`);
       if (screenStatus === 'denied') {
@@ -2514,17 +2573,23 @@ export class AppState {
         return;
       }
       try {
-        // Check for audio configuration preference
-        if (metadata?.audio) {
+        // Conference mode intentionally captures the whole room from the selected microphone.
+        if (this.conferenceMicOnlyMode) {
+          this.setupConferenceMicrophonePipeline(metadata?.audio?.inputDeviceId);
+        } else if (metadata?.audio) {
           await this.reconfigureAudio(metadata.audio.inputDeviceId, metadata.audio.outputDeviceId);
         }
 
         // LAZY INIT: Ensure pipeline is ready (if not reconfigured above)
-        this.setupSystemAudioPipeline();
+        if (!this.conferenceMicOnlyMode) {
+          this.setupSystemAudioPipeline();
+        }
 
         // Start System Audio
-        this.systemAudioCapture?.start();
-        this.googleSTT?.start();
+        if (!this.conferenceMicOnlyMode) {
+          this.systemAudioCapture?.start();
+          this.googleSTT?.start();
+        }
 
         // Start Microphone
         this.microphoneCapture?.start();
@@ -2543,14 +2608,16 @@ export class AppState {
           const micRate = this.microphoneCapture?.getSampleRate() || 48000;
           console.log(`[Main][debug] Audio pipeline: input=${requestedInput} output=${requestedOutput} backend=${backend} sysRate=${sysRate}Hz micRate=${micRate}Hz`);
         }
-        console.log('[Main] Audio pipeline started successfully.');
+        console.log(this.conferenceMicOnlyMode
+          ? '[Main] Conference microphone-only pipeline started successfully.'
+          : '[Main] Audio pipeline started successfully.');
 
         // ── System Audio Health Check ──
         // After 7 seconds, verify the system audio stream is actually
         // delivering non-zero samples. If silent, the Rust DSP loop will
         // have already logged a warning, but we also notify the UI so the
         // user knows Speaker separation is broken before they waste a meeting.
-        setTimeout(() => {
+        if (!this.conferenceMicOnlyMode) setTimeout(() => {
           if (!this.isMeetingActive) return; // Meeting already ended
           const level = this._lastSystemAudioLevel;
           if (level && level.rms === 0 && level.peak === 0) {
@@ -3986,11 +4053,13 @@ async function initializeApp() {
     // If no window exists, create it
     if (appState.getMainWindow() === null) {
       appState.createWindow()
-    } else {
-      // If the window exists but is hidden, clicking the dock icon should restore it
-      if (!appState.isVisible()) {
-        appState.toggleMainWindow();
-      }
+    } else if (!appState.isVisible()) {
+      // macOS can emit `activate` for reasons other than a deliberate request to
+      // reveal Natively (dock re-registration, focus restoration, notifications,
+      // or another window briefly becoming key). Never turn that lifecycle event
+      // into a visibility change. A hidden window is revealed only by an explicit
+      // Natively action such as the visibility shortcut or the tray "Show" item.
+      console.log('[Main] App activation preserved the explicit hidden-window state.');
     }
   })
 

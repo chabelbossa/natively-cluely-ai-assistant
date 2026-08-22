@@ -9,6 +9,8 @@ export type CanonicalTranscriptRole =
 
 export type CanonicalTranscriptSource = 'mic' | 'system' | 'merged';
 
+export type MicRoutingPolicy = 'local_user' | 'conference_floor';
+
 export type TranscriptQualityFlag =
   | 'echo_suppressed'
   | 'possible_overlap'
@@ -30,6 +32,7 @@ export type TranscriptQualityFlag =
   | 'unstable_fragment'
   | 'system_audio_unavailable'
   | 'mic_speaker_fallback'
+  | 'conference_floor'
   | 'stt_low_quality'
   | 'raw_debug';
 

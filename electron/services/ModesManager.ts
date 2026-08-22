@@ -6,6 +6,7 @@ import {
     MODE_RECRUITING_PROMPT,
     MODE_TEAM_MEET_PROMPT,
     MODE_LECTURE_PROMPT,
+    MODE_CONFERENCE_PROMPT,
     MODE_TECHNICAL_INTERVIEW_PROMPT,
     MODE_BUG_TRIAGE_PROMPT,
     MODE_FEATURE_PLANNING_PROMPT,
@@ -20,6 +21,7 @@ export type ModeTemplateType =
     | 'recruiting'
     | 'team-meet'
     | 'lecture'
+    | 'conference'
     | 'technical-interview'
     | 'bug-triage'
     | 'feature-planning'
@@ -68,6 +70,7 @@ export const MODE_TEMPLATES: Array<{
     { type: 'team-meet',            label: 'Team Meet',            description: 'Track action items and key decisions from meetings.' },
     { type: 'looking-for-work',     label: 'Looking for work',     description: 'Answer interview questions with confidence and clarity.' },
     { type: 'lecture',              label: 'Lecture',              description: 'Capture key concepts and content from lectures.' },
+    { type: 'conference',           label: 'Conference',           description: 'Use the room microphone to understand the talk, explain the current point, suggest a question, or answer the latest question.' },
     { type: 'technical-interview',  label: 'Technical Interview',  description: 'Solve coding problems and system design with progressive hints.' },
     { type: 'bug-triage',           label: 'Bug Triage',           description: 'Clarify reproduction, impact, priority, and ownership of bugs.' },
     { type: 'feature-planning',     label: 'Feature Planning',     description: 'Define scope, acceptance criteria, dependencies, and risks.' },
@@ -125,6 +128,13 @@ export const TEMPLATE_NOTE_SECTIONS: Record<ModeTemplateType, Array<{ title: str
         { title: 'Topic',           description: 'Main subject or theme of the lecture.' },
         { title: 'Key concepts',    description: 'Core ideas or frameworks covered.' },
         { title: 'Content',         description: 'All content from the lecture with incredibly detailed bullet notes.' },
+    ],
+    conference: [
+        { title: 'Sujet et fil conducteur', description: 'Main subject, progression, and how the ideas connect across the conference.' },
+        { title: 'Concepts et explications', description: 'Important concepts, definitions, examples, and reasoning developed by the speakers.' },
+        { title: 'Questions et problèmes', description: 'Questions asked, problems posed, and the context needed to understand them.' },
+        { title: 'Réponses et clarifications', description: 'Answers given, unresolved ambiguities, and useful clarifications.' },
+        { title: 'À retenir et approfondir', description: 'Key takeaways, references, and follow-up topics worth studying.' },
     ],
     'technical-interview': [
         { title: 'Problems covered',  description: 'Each problem asked, the approach used, and the outcome.' },
@@ -216,6 +226,7 @@ const TEMPLATE_SYSTEM_PROMPTS: Record<ModeTemplateType, string> = {
     recruiting: MODE_RECRUITING_PROMPT,
     'team-meet': MODE_TEAM_MEET_PROMPT,
     lecture: MODE_LECTURE_PROMPT,
+    conference: MODE_CONFERENCE_PROMPT,
     'bug-triage': MODE_BUG_TRIAGE_PROMPT,
     'feature-planning': MODE_FEATURE_PLANNING_PROMPT,
     'architecture-review': MODE_ARCHITECTURE_REVIEW_PROMPT,

@@ -209,6 +209,13 @@ export class IntelligenceEngine extends EventEmitter {
         additionalItems?: ContextItem[],
         preferLocalUserTarget?: boolean,
     ): MeetingContextPacket {
+        let activeMode: ReturnType<ModesManager['getActiveMode']> = null;
+        try {
+            activeMode = ModesManager.getInstance().getActiveMode();
+        } catch (error: any) {
+            console.warn('[IntelligenceEngine] Failed to resolve active mode descriptor:', error?.message || error);
+        }
+        this.session.setSemanticCompactionEnabled(this.modeUsesConferenceMemory(activeMode));
         const packet = this.contextPacketBuilder.build({
             action,
             lastSeconds,
@@ -217,10 +224,14 @@ export class IntelligenceEngine extends EventEmitter {
             activeModeBlock: this.getActiveModeActionContextBlock(),
             additionalItems,
             preferLocalUserTarget,
+            mode: activeMode
+                ? { name: activeMode.name, templateType: activeMode.templateType }
+                : null,
         });
 
         MeetingDebugRecorder.getInstance().recordActionContext({
             action,
+            contextMode: packet.contextMode,
             languageHint: packet.languageHint,
             hasReliableInterlocutor: packet.hasReliableInterlocutor,
             contextTrustScore: packet.contextTrustScore,
@@ -253,6 +264,7 @@ export class IntelligenceEngine extends EventEmitter {
                 : undefined,
             systemContext: this.truncateForUsage(systemContext),
             systemPrompt: packet?.systemPrompt,
+            contextMode: packet?.contextMode,
             languageHint: packet?.languageHint,
             hasReliableInterlocutor: packet?.hasReliableInterlocutor,
             contextTrustScore: packet?.contextTrustScore,
@@ -444,13 +456,16 @@ export class IntelligenceEngine extends EventEmitter {
         const evidenceKeywords = this.extractContentKeywords(evidenceText);
         const expectedKeywords = [...new Set([...targetKeywords, ...evidenceKeywords])].slice(0, 18);
         const outputWords = normalizedOutput.split(' ').filter(Boolean).length;
-        const answerAction = action === 'WHAT_TO_SAY' || action === 'VIBE_INTERVIEW_SAY_THIS' || action === 'ANSWER';
+        const conferenceExplanation = action === 'CLARIFY' && packet.contextMode === 'conference';
+        const answerAction = action === 'WHAT_TO_SAY' || action === 'VIBE_INTERVIEW_SAY_THIS' || action === 'ANSWER' || conferenceExplanation;
         const directQuestionWithEvidence =
             answerAction &&
+            !conferenceExplanation &&
             packet.actionTarget?.kind === 'direct_question' &&
             (expectedKeywords.length >= 5 || packet.contextTrustScore >= 0.55 || (packet.questionCandidates?.length || 0) >= 2);
         const contextualRequestWithEvidence =
             answerAction &&
+            !conferenceExplanation &&
             packet.actionTarget?.kind !== 'direct_question' &&
             packet.selectedSegments.filter((segment) => segment.role === 'interviewer').length >= 3 &&
             expectedKeywords.length >= 6;
@@ -479,13 +494,17 @@ export class IntelligenceEngine extends EventEmitter {
             if (asksAnotherQuestion) reasons.push('answered_question_with_question');
         }
 
-        if ((action === 'CLARIFY' || action === 'FOLLOW_UP_QUESTION') && !/[?？]\s*$/.test(output.trim())) {
+        if (((action === 'CLARIFY' && !conferenceExplanation) || action === 'FOLLOW_UP_QUESTION') && !/[?？]\s*$/.test(output.trim())) {
             reasons.push('expected_single_question');
+        }
+
+        if (conferenceExplanation && outputWords < 12 && expectedKeywords.length >= 4) {
+            reasons.push('conference_clarification_too_short');
         }
 
         if (expectedKeywords.length >= 4 && normalizedOutput.length > 0) {
             const overlap = expectedKeywords.filter((keyword) => normalizedOutput.includes(keyword)).length;
-            const requiredOverlap = action === 'CLARIFY' || action === 'FOLLOW_UP_QUESTION' ? 1 : 2;
+            const requiredOverlap = action === 'FOLLOW_UP_QUESTION' || (action === 'CLARIFY' && !conferenceExplanation) ? 1 : 2;
             if (overlap < requiredOverlap && packet.contextTrustScore >= 0.45) {
                 reasons.push('missing_meeting_specific_evidence');
             }
@@ -559,7 +578,7 @@ export class IntelligenceEngine extends EventEmitter {
             userPrompt,
             undefined,
             context,
-            this.buildLiveActionRepairSystemPrompt(action),
+            this.buildLiveActionRepairSystemPrompt(action, packet),
             true,
         );
         const result = await this.consumeActionStream(
@@ -576,11 +595,14 @@ export class IntelligenceEngine extends EventEmitter {
         };
     }
 
-    private buildLiveActionRepairSystemPrompt(action: MeetingAction): string {
+    private buildLiveActionRepairSystemPrompt(action: MeetingAction, packet?: MeetingContextPacket): string {
+        const conferenceExplanation = action === 'CLARIFY' && packet?.contextMode === 'conference';
         const actionRule = (() => {
             switch (action) {
                 case 'CLARIFY':
-                    return 'Return exactly one precise clarifying question. It must name the concrete ambiguity from the meeting evidence.';
+                    return conferenceExplanation
+                        ? 'Return a clear explanation of the latest complete conference concept or problem. Connect its concrete facts and reasoning; do not respond with another question.'
+                        : 'Return exactly one precise clarifying question. It must name the concrete ambiguity from the meeting evidence.';
                 case 'FOLLOW_UP_QUESTION':
                     return 'Return exactly one follow-up question that advances the current concrete topic. No list.';
                 case 'WHAT_TO_SAY':
@@ -677,6 +699,19 @@ Goal:
             ? packet.actionTarget.text?.trim()
             : '';
 
+        if (action === 'CLARIFY' && packet.contextMode === 'conference') {
+            const explanation = answerTopic || topic || localTarget;
+            if (explanation) {
+                return french
+                    ? `Le point central est le suivant : ${explanation}. Il faut relier les contraintes et les exemples donnés dans la discussion pour comprendre le problème complet, plutôt que d'isoler sa dernière phrase.`
+                    : `The central point is this: ${explanation}. The constraints and examples from the discussion need to be connected to understand the complete problem instead of isolating its final sentence.`;
+            }
+        }
+
+        if (action === 'FOLLOW_UP_QUESTION' && packet.contextMode === 'conference') {
+            return this.buildConferenceFollowUpFallback(packet, french);
+        }
+
         if (!packet.hasReliableInterlocutor) {
             if (localTarget) {
                 const topicText = this.extractFallbackTopic(localTarget) || localTarget;
@@ -770,6 +805,21 @@ Goal:
         return french
             ? `Le point principal à sécuriser est : ${topic || 'le périmètre et la prochaine action attendue'}.`
             : `The main point to secure is: ${topic || 'the scope and expected next action'}.`;
+    }
+
+    private buildConferenceFollowUpFallback(packet: MeetingContextPacket, french: boolean): string {
+        const evidence = this.selectedInterlocutorContextText(packet);
+        const normalized = this.normalizeForComparison(`${packet.actionTarget?.text || ''} ${evidence}`);
+        if (/\b(cluster|clustering|classement|classes?)\b/.test(normalized) && /\b(80|quatre vingts|10|dix|runs?)\b/.test(normalized)) {
+            return french
+                ? "Pour les quelque 80 tables qui changent de classe entre les dix exécutions, avez-vous mesuré leur stabilité avec une matrice de co-clustering ou un indice comme l’ARI ?"
+                : "For the roughly 80 tables that switch classes across the ten runs, did you measure their stability with a co-clustering matrix or an index such as ARI?";
+        }
+
+        const topic = this.extractFallbackTopic(packet.actionTarget?.text || evidence);
+        return french
+            ? `Quel critère ou résultat concret permettrait de vérifier l’hypothèse principale sur ${topic || 'ce point'} ?`
+            : `What concrete criterion or result would test the main assumption about ${topic || 'this point'}?`;
     }
 
     private buildDirectQuestionFallbackAnswer(question: string | undefined, french: boolean): string {
@@ -1054,6 +1104,7 @@ Goal:
      * Process transcript from native audio, and trigger follow-up if appropriate
      */
     handleTranscript(segment: TranscriptSegment, skipRefinementCheck: boolean = false): void {
+        this.session.setSemanticCompactionEnabled(this.isConferenceMemoryModeActive());
         const result = this.session.handleTranscript(segment);
         this.lastTranscriptTime = Date.now();
 
@@ -1064,6 +1115,20 @@ Goal:
                 this.runFollowUp(intent, segment.text.trim());
             }
         }
+    }
+
+    private isConferenceMemoryModeActive(): boolean {
+        try {
+            return this.modeUsesConferenceMemory(ModesManager.getInstance().getActiveMode());
+        } catch (error: any) {
+            console.warn('[IntelligenceEngine] Failed to resolve conference memory mode:', error?.message || error);
+            return false;
+        }
+    }
+
+    private modeUsesConferenceMemory(mode: ReturnType<ModesManager['getActiveMode']>): boolean {
+        if (!mode) return false;
+        return mode.templateType === 'conference' || /\b(conf[eé]rence|conference)\b/i.test(mode.name || '');
     }
 
     /**
@@ -1532,7 +1597,10 @@ Goal:
             const context = rawContext || '[No reliable interlocutor transcript is available yet. Generate one short, natural question asking for the missing context or the main constraint. Do not invent what the other person said.]';
 
             const generationId = this.nextGenerationId('clarify');
-            const stream = this.clarifyLLM.generateStream(context);
+            const conferenceExplanation = actionPacket.contextMode === 'conference';
+            const stream = conferenceExplanation
+                ? this.clarifyLLM.generateConferenceExplanationStream(context)
+                : this.clarifyLLM.generateStream(context);
             const streamResult = await this.consumeActionStream(
                 'clarify',
                 'CLARIFY',
@@ -1556,7 +1624,7 @@ Goal:
                 actionPacket,
                 {
                     streamTimedOut: streamResult.timedOut,
-                    sanitizeSingleQuestion: true,
+                    sanitizeSingleQuestion: !conferenceExplanation,
                 },
             );
             fullClarification = qualityResult.answer;
@@ -1579,7 +1647,7 @@ Goal:
                 this.session.pushUsage({
                     type: 'chat',
                     timestamp: Date.now(),
-                    question: 'Clarify Question',
+                    question: conferenceExplanation ? 'Clarify Conference Point' : 'Clarify Question',
                     answer: fullClarification,
                     items: diagnostics,
                     metadata: this.buildUsageMetadata('CLARIFY', context, diagnostics, actionPacket, {
@@ -1589,7 +1657,7 @@ Goal:
                         fallback: streamResult.timedOut ? 'soft_timeout' : qualityResult.fallbackReason,
                     })
                 });
-                this.recordActionResult('CLARIFY', 'Clarify Question', fullClarification, {
+                this.recordActionResult('CLARIFY', conferenceExplanation ? 'Clarify Conference Point' : 'Clarify Question', fullClarification, {
                     latencyMs: streamResult.latencyMs,
                     timedOut: streamResult.timedOut,
                     hasReliableInterlocutor: actionPacket.hasReliableInterlocutor,

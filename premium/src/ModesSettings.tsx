@@ -13,6 +13,7 @@ import {
   LayoutGrid,
   Settings,
   BookOpen,
+  Mic,
   Brain,
   AlertCircle,
   Zap,
@@ -40,6 +41,7 @@ type TemplateType =
   | 'recruiting'
   | 'team-meet'
   | 'lecture'
+  | 'conference'
   | 'technical-interview'
   | 'bug-triage'
   | 'feature-planning'
@@ -95,6 +97,7 @@ const TEMPLATE_LABELS: Record<TemplateType, string> = {
   recruiting: 'Recruiting',
   'team-meet': 'Team Meeting',
   lecture: 'Lecture / Course',
+  conference: 'Conference',
   'technical-interview': 'Technical Interview',
   'bug-triage': 'Bug Triage',
   'feature-planning': 'Feature Planning',
@@ -115,6 +118,7 @@ const TEMPLATE_DESCRIPTIONS: Record<TemplateType, string> = {
   recruiting: 'Recruiting interview copilot — candidate evaluation and question guidance.',
   'team-meet': 'Team meeting copilot — action items, decisions, blockers, and follow-ups.',
   lecture: 'Lecture & course copilot — wait for complete points, then suggest clarifying questions.',
+  conference: 'Room-microphone conference copilot — explain the current point, suggest a question, or answer the latest multi-part question.',
   'technical-interview': 'Technical interview copilot — DSA, system design, coding hints.',
   'bug-triage': 'Bug triage copilot — clarify reproduction, impact, priority, and ownership.',
   'feature-planning': 'Feature planning copilot — define scope, acceptance criteria, dependencies.',
@@ -135,6 +139,7 @@ const TEMPLATE_ICONS: Record<TemplateType, React.ReactNode> = {
   recruiting: <Search size={16} />,
   'team-meet': <LayoutGrid size={16} />,
   lecture: <BookOpen size={16} />,
+  conference: <Mic size={16} />,
   'technical-interview': <Settings size={16} />,
   'bug-triage': <Bug size={16} />,
   'feature-planning': <Blocks size={16} />,

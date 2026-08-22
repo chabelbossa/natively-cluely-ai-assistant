@@ -686,6 +686,44 @@ export class DatabaseManager {
             this.db.pragma('user_version = 16');
         }
 
+        // Version 16 → 17: Add a first-class Conference mode. It is seeded once
+        // so existing users can select it immediately, but remains editable and
+        // deletable like other non-General modes.
+        if (version < 17) {
+            console.log('[DatabaseManager] Applying migration v16 → v17: Seed Conference mode');
+            const conferenceModeId = 'mode_conference_default';
+            this.db.prepare(`
+                INSERT OR IGNORE INTO modes (id, name, template_type, custom_context, is_active)
+                VALUES (?, ?, ?, ?, 0)
+            `).run(
+                conferenceModeId,
+                'Conference',
+                'conference',
+                'Room conference mode: all live audio comes from the microphone. Reconstruct the latest question or problem across adjacent transcript segments before answering.',
+            );
+
+            const conferenceSections = [
+                { title: 'Sujet et fil conducteur', description: 'Main subject, progression, and how the ideas connect across the conference.' },
+                { title: 'Concepts et explications', description: 'Important concepts, definitions, examples, and reasoning developed by the speakers.' },
+                { title: 'Questions et problèmes', description: 'Questions asked, problems posed, and the context needed to understand them.' },
+                { title: 'Réponses et clarifications', description: 'Answers given, unresolved ambiguities, and useful clarifications.' },
+                { title: 'À retenir et approfondir', description: 'Key takeaways, references, and follow-up topics worth studying.' },
+            ];
+            const insertConferenceSection = this.db.prepare(
+                'INSERT OR IGNORE INTO mode_note_sections (id, mode_id, title, description, sort_order) VALUES (?, ?, ?, ?, ?)'
+            );
+            conferenceSections.forEach((section, index) => {
+                insertConferenceSection.run(
+                    `ns_conference_default_${index}`,
+                    conferenceModeId,
+                    section.title,
+                    section.description,
+                    index,
+                );
+            });
+            this.db.pragma('user_version = 17');
+        }
+
         console.log('[DatabaseManager] Migrations completed.');
     }
 

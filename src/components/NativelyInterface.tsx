@@ -734,6 +734,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
   // Active mode name (shown as a badge near the Modes button)
   const [activeModeLabel, setActiveModeLabel] = useState<string | null>(null);
+  const [activeModeTemplate, setActiveModeTemplate] = useState<string | null>(null);
   const [availableModes, setAvailableModes] = useState<
     Array<{ id: string; name: string; templateType: string }>
   >([]);
@@ -752,9 +753,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     // Load initial active mode name
     window.electronAPI
       ?.modesGetActive?.()
-      .then((mode: { name: string } | null) =>
-        setActiveModeLabel(mode?.name ?? null),
-      )
+      .then((mode: { name: string; templateType?: string } | null) => {
+        setActiveModeLabel(mode?.name ?? null);
+        setActiveModeTemplate(mode?.templateType ?? null);
+      })
       .catch(() => {});
     window.electronAPI
       ?.modesGetAll?.()
@@ -772,10 +774,18 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     const unsub = window.electronAPI?.onModeChanged?.(
       (data: { id: string | null; name: string | null }) => {
         setActiveModeLabel(data.name);
+        window.electronAPI
+          ?.modesGetActive?.()
+          .then((mode: { templateType?: string } | null) =>
+            setActiveModeTemplate(mode?.templateType ?? null),
+          )
+          .catch(() => setActiveModeTemplate(null));
       },
     );
     return () => unsub?.();
   }, []);
+
+  const isConferenceMode = activeModeTemplate === "conference";
 
   // Close mode/lang dropdowns on outside click
   useEffect(() => {
@@ -1760,7 +1770,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const handleWhatToSay = async () => {
     const intent = "what_to_answer";
     setIsExpanded(true);
-    const actionId = queueActionMessage(intent, "Preparing what you can say...", "whatToSay");
+    const actionId = queueActionMessage(
+      intent,
+      isConferenceMode ? "Answering the latest conference question or problem..." : "Preparing what you can say...",
+      "whatToSay",
+    );
     incrementPending();
     analytics.trackCommandExecuted("what_to_say");
 
@@ -1873,7 +1887,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const handleFollowUpQuestions = async () => {
     const intent = "follow_up_questions";
     setIsExpanded(true);
-    const actionId = queueActionMessage(intent, "Finding a useful follow-up question...", "followUpQuestions");
+    const actionId = queueActionMessage(
+      intent,
+      isConferenceMode ? "Finding a useful question to ask about the current point..." : "Finding a useful follow-up question...",
+      "followUpQuestions",
+    );
     incrementPending();
     analytics.trackCommandExecuted("suggest_questions");
 
@@ -1906,7 +1924,11 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   const handleClarify = async () => {
     const intent = "clarify";
     setIsExpanded(true);
-    const actionId = queueActionMessage(intent, "Preparing one clarifying question...", "clarify");
+    const actionId = queueActionMessage(
+      intent,
+      isConferenceMode ? "Explaining the latest conference point..." : "Preparing one clarifying question...",
+      "clarify",
+    );
     incrementPending();
     analytics.trackCommandExecuted("clarify");
 
@@ -4570,7 +4592,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
                     ) : (
                       <Pencil className="w-3 h-3 opacity-70" />
                     )}
-                    <span>What to say</span>
+                    <span>{isConferenceMode ? "Answer last" : "What to say"}</span>
                   </button>
                   <button
                     data-testid="natively-action-clarify"
@@ -4584,7 +4606,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
                     ) : (
                       <MessageSquare className="w-3 h-3 opacity-70" />
                     )}
-                    <span>Clarify</span>
+                    <span>{isConferenceMode ? "Explain" : "Clarify"}</span>
                   </button>
                   <button
                     data-testid="natively-action-dynamic"
@@ -4633,7 +4655,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
                     ) : (
                       <HelpCircle className="w-3 h-3 opacity-70" />
                     )}
-                    <span>Follow Up</span>
+                    <span>{isConferenceMode ? "Question to ask" : "Follow Up"}</span>
                   </button>
                   <button
                     data-testid="natively-action-agentic-toggle"

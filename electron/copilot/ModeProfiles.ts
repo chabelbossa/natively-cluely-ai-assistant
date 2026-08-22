@@ -222,6 +222,8 @@ export function resolveCopilotMode(activeMode: ActiveModeLike): CopilotMode | nu
         return 'lecture';
     }
 
+    if (activeMode.templateType === 'conference') return 'conference';
+
     if (activeMode.templateType === 'technical-interview') return 'technical_interview';
     if (activeMode.templateType === 'coding-assessment') return 'coding_assessment';
     if (activeMode.templateType === 'looking-for-work') return 'interview';

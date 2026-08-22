@@ -1,5 +1,5 @@
 import { LLMHelper } from "../LLMHelper";
-import { CLARIFY_MODE_PROMPT } from "./prompts";
+import { CLARIFY_MODE_PROMPT, CONFERENCE_CLARIFICATION_PROMPT } from "./prompts";
 import { isUserVisibleLiveLlmError } from "./LiveLlmError";
 
 export class ClarifyLLM {
@@ -34,6 +34,16 @@ export class ClarifyLLM {
             yield* this.llmHelper.streamChat(context, undefined, undefined, CLARIFY_MODE_PROMPT);
         } catch (error) {
             console.error("[ClarifyLLM] Streaming generation failed:", error);
+            if (isUserVisibleLiveLlmError(error)) throw error;
+        }
+    }
+
+    async *generateConferenceExplanationStream(context: string): AsyncGenerator<string> {
+        if (!context.trim()) return;
+        try {
+            yield* this.llmHelper.streamChat(context, undefined, undefined, CONFERENCE_CLARIFICATION_PROMPT);
+        } catch (error) {
+            console.error("[ClarifyLLM] Conference explanation streaming failed:", error);
             if (isUserVisibleLiveLlmError(error)) throw error;
         }
     }
