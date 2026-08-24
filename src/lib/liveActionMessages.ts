@@ -14,6 +14,7 @@ export interface LiveActionMessageBase {
   durationMs?: number;
   serviceTierUsed?: 'fast' | 'standard';
   serviceTierFallback?: boolean;
+  precomputed?: boolean;
 }
 
 export interface LiveActionMessageMeta {
@@ -22,6 +23,7 @@ export interface LiveActionMessageMeta {
   durationMs?: number;
   serviceTierUsed?: 'fast' | 'standard';
   serviceTierFallback?: boolean;
+  precomputed?: boolean;
 }
 
 export function resolveLiveActionModelId(
@@ -145,6 +147,7 @@ export function finalizeStreamingMessage<T extends LiveActionMessageBase>(
         durationMs: existing.durationMs ?? meta.durationMs,
         serviceTierUsed: existing.serviceTierUsed ?? meta.serviceTierUsed,
         serviceTierFallback: existing.serviceTierFallback ?? meta.serviceTierFallback,
+        precomputed: existing.precomputed ?? meta.precomputed,
       };
       return updated;
     }

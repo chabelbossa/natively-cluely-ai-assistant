@@ -13,6 +13,7 @@ import { SessionTracker } from './SessionTracker';
 import { IntelligenceEngine } from './IntelligenceEngine';
 import { MeetingPersistence } from './MeetingPersistence';
 import { CopilotDecisionEngine, CopilotDecision, CopilotFeedback, CopilotTranscriptSegment } from './copilot';
+import { PreAnswerCache } from './meeting/PreAnswerCache';
 
 // Re-export types for backward compatibility
 export type { TranscriptSegment, SuggestionTrigger, ContextItem } from './SessionTracker';
@@ -35,6 +36,7 @@ export class IntelligenceManager extends EventEmitter {
     private engine: IntelligenceEngine;
     private persistence: MeetingPersistence;
     private copilot: CopilotDecisionEngine;
+    private preAnswer: PreAnswerCache;
 
     constructor(llmHelper: LLMHelper) {
         super();
@@ -43,6 +45,7 @@ export class IntelligenceManager extends EventEmitter {
         this.copilot = new CopilotDecisionEngine(llmHelper);
         this.engine = new IntelligenceEngine(llmHelper, this.session, () => this.copilot.getMeetingStateContextBlock());
         this.persistence = new MeetingPersistence(this.session, llmHelper);
+        this.preAnswer = new PreAnswerCache((question) => this.engine.precomputeWhatToSay(question));
 
         // Forward all engine events through the facade
         this.forwardEngineEvents();
@@ -274,6 +277,7 @@ export class IntelligenceManager extends EventEmitter {
         this.session.reset();
         this.engine.reset();
         this.copilot.reset();
+        this.preAnswer.clear();
     }
 
     private processCopilotTranscript(segment: import('./SessionTracker').TranscriptSegment): void {
@@ -302,5 +306,33 @@ export class IntelligenceManager extends EventEmitter {
             .catch((error: Error) => {
                 this.emit('copilot_error', error);
             });
+
+        // Stage 1 real-time copilot: silently pre-compute the What-to-say
+        // answer when an interlocutor finishes asking something that looks
+        // like a question. Serving still requires an explicit button press.
+        if (copilotSegment.final) {
+            try {
+                this.preAnswer.onFinalSegment(copilotSegment);
+            } catch {
+                // Never let pre-compute bookkeeping break transcript routing.
+            }
+        }
+    }
+
+    /**
+     * Stage 1 real-time copilot: returns a freshly precomputed What-to-say
+     * answer if one is available and still contextually valid, so the button
+     * press serves instantly instead of generating from scratch.
+     */
+    servePreAnswer(): { answer: string; question: string } | null {
+        const served = this.preAnswer.serve();
+        if (served) {
+            console.log(`[IntelligenceManager] PreAnswerCache HIT — serving precomputed answer for: "${served.question.substring(0, 60)}..."`);
+        }
+        return served;
+    }
+
+    getPreAnswerStats() {
+        return this.preAnswer.getStats();
     }
 }

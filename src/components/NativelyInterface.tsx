@@ -1817,9 +1817,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
         setMessages((prev) =>
           finalizePendingActionMessage(prev, actionId, intent, answer, {
             tokensUsed: estimateTokens(answer),
+            precomputed: result?.precomputed === true,
             ...getActionMessageMeta(actionId, result),
           }),
         );
+        if (result?.precomputed) {
+          console.log("[Natively] What-to-say served from pre-computed cache (instant).");
+        }
       }
     } catch (err) {
       setMessages((prev) =>
@@ -4315,6 +4319,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
                       data-action-intent={msg.intent || undefined}
                       data-service-tier={msg.serviceTierUsed || undefined}
                       data-service-tier-fallback={msg.serviceTierFallback ? "true" : undefined}
+                      data-precomputed={msg.precomputed ? "true" : undefined}
                       className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"} animate-fade-in-up`}
                     >
                       <div

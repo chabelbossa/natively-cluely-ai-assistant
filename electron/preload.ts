@@ -196,7 +196,7 @@ interface ElectronAPI {
 
   // Intelligence Mode IPC
   generateAssist: () => Promise<{ insight: string | null }>
-  generateWhatToSay: (request: LiveActionRequest) => Promise<{ actionId: string; answer: string | null; question?: string; error?: string }>
+  generateWhatToSay: (request: LiveActionRequest) => Promise<{ actionId: string; answer: string | null; question?: string; error?: string; precomputed?: boolean }>
   generateClarify: (request?: LiveActionRequest) => Promise<{ actionId: string; clarification: string | null }>
   generateCodeHint: (request?: LiveActionRequest) => Promise<{ actionId: string; hint: string | null }>
   generateBrainstorm: (request?: LiveActionRequest) => Promise<{ actionId: string; script: string | null }>

@@ -3199,6 +3199,22 @@ export function initializeIpcHandlers(appState: AppState): void {
       try {
         await appState.flushPendingSttTranscripts?.("what_to_say");
         const intelligenceManager = appState.getIntelligenceManager();
+
+        // Stage 1 real-time copilot: if a question was just asked and the
+        // background pre-compute already produced an answer for THIS exact
+        // conversational state, serve it instantly. flushPendingSttTranscripts
+        // above may have added new final segments, which invalidates stale
+        // entries inside the cache itself.
+        const precomputed = intelligenceManager.servePreAnswer();
+        if (precomputed) {
+          return {
+            actionId: request.actionId,
+            answer: precomputed.answer,
+            question: precomputed.question,
+            precomputed: true,
+          };
+        }
+
         // Question and imagePaths are now optional - IntelligenceManager infers from transcript
         const answer = await intelligenceManager.runWhatShouldISay(
           request.question,

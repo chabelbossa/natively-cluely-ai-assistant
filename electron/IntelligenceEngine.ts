@@ -1396,6 +1396,89 @@ Goal:
     }
 
     /**
+     * SILENT pre-computation of the What-to-say answer (stage 1 real-time copilot).
+     *
+     * Uses the EXACT same context-packet pipeline as runWhatShouldISay so the
+     * precomputed answer has identical quality — but with ZERO user-visible
+     * side effects: no mode switch, no cooldown bookkeeping, no session
+     * history write, no suggested_answer/token events, no action-result
+     * recording. The result goes into the PreAnswerCache and is served only
+     * if the user presses the button before the conversation moves on.
+     */
+    async precomputeWhatToSay(question?: string): Promise<string | null> {
+        try {
+            const hasWhatToAnswer = !!this.whatToAnswerLLM;
+            const hasLegacyAnswer = !!this.answerLLM;
+            if (!hasWhatToAnswer && !hasLegacyAnswer) return null;
+
+            const contextItems = this.session.getActionContext(180);
+            const transcriptTurns = contextItems.map(item => ({
+                role: item.role,
+                text: item.text,
+                timestamp: item.timestamp,
+            }));
+            const preparedBaseTranscript = prepareTranscriptForWhatToAnswer(transcriptTurns, 12);
+            const actionPacket = this.buildActionContextPacket(
+                'WHAT_TO_SAY',
+                180,
+                undefined,
+                preparedBaseTranscript,
+            );
+
+            // Resolve the question to answer: explicit argument first, then the
+            // same target-resolution order the foreground path uses.
+            const lastInterviewerTurn =
+                question?.trim() ||
+                (actionPacket.actionTarget.source !== 'none'
+                    ? actionPacket.actionTarget.text
+                    : (actionPacket.interlocutorFocus.kind !== 'none'
+                        ? actionPacket.interlocutorFocus.text
+                        : this.session.getLastInterviewerTurnForActions())) ||
+                '';
+
+            if (!lastInterviewerTurn && !question) return null;
+
+            if (hasWhatToAnswer) {
+                const temporalContext = buildTemporalContext(
+                    contextItems,
+                    this.session.getAssistantResponseHistory(),
+                    180,
+                );
+                const intentResult = await classifyIntent(
+                    lastInterviewerTurn,
+                    actionPacket.context,
+                    this.session.getAssistantResponseHistory().length,
+                );
+                const stream = this.whatToAnswerLLM!.generateStream(
+                    actionPacket.context,
+                    temporalContext,
+                    intentResult,
+                );
+                let text = '';
+                const deadline = Date.now() + 10_000;
+                for await (const token of stream) {
+                    text += token;
+                    if (Date.now() > deadline) {
+                        await stream.return?.(undefined as never);
+                        break;
+                    }
+                }
+                const answer = text.trim();
+                return answer.length > 0 ? answer : null;
+            }
+
+            // Legacy fallback path (same as foreground's non-WhatToAnswer branch).
+            const packet = this.buildActionContextPacket('WHAT_TO_SAY', 180);
+            const answer = await this.answerLLM!.generate(lastInterviewerTurn, packet.context);
+            const cleaned = (answer || '').trim();
+            return cleaned.length > 0 ? cleaned : null;
+        } catch (error: any) {
+            console.warn('[IntelligenceEngine] precomputeWhatToSay failed (non-fatal):', error?.message);
+            return null;
+        }
+    }
+
+    /**
      * MODE 3: Follow-Up (Refinement)
      * Modify the last assistant message
      */
