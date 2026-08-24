@@ -84,21 +84,19 @@ export class PreAnswerCache {
     }
 
     /**
-     * Feed every FINAL non-own transcript segment here. Bumps staleness
-     * counters (invalidating any cached entry) and, when the segment looks
-     * like a question, schedules a debounced background pre-computation.
+     * Feed every FINAL non-own transcript segment here. Bumps the staleness
+     * counter (so serve() keeps refusing outdated answers) and, when the
+     * segment looks like a question, schedules a debounced background
+     * pre-computation.
+     *
+     * NOTE: we deliberately do NOT retract the UI banner on every new speech —
+     * in a flowing conversation that would make it flash for a second and the
+     * user would never see it. The banner manages its own dwell time; serve()
+     * remains strictly freshness-gated and falls back to fresh generation.
      */
     onFinalSegment(segment: CopilotTranscriptSegment): void {
         if (isOwnSpeech(segment)) return;
         this.finalCount += 1;
-
-        // Any new interlocutor speech invalidates the cached answer — notify
-        // the UI so the proactive banner retracts (only when something was
-        // actually showing).
-        if (this.entry) {
-            this.entry = null;
-            try { this.onInvalidate?.(); } catch { /* UI hooks must never break routing */ }
-        }
 
         const text = (segment.text || '').trim();
         if (!looksLikeQuestion(text)) return;

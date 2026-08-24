@@ -584,7 +584,15 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
     useState<CopilotSuggestion | null>(null);
   // Stage 2 real-time copilot: a pre-computed answer is available for the
   // latest question. Purely informational — nothing is used without a click.
+  // The banner dwells 20s so it stays visible in a flowing conversation; if
+  // the answer went stale meanwhile, clicking Use falls back to fresh
+  // generation seamlessly (backend-enforced).
   const [preparedAnswer, setPreparedAnswer] = useState<{ question: string } | null>(null);
+  useEffect(() => {
+    if (!preparedAnswer) return;
+    const t = setTimeout(() => setPreparedAnswer(null), 20_000);
+    return () => clearTimeout(t);
+  }, [preparedAnswer]);
   // Comprehension aid: rolling simple-language reformulation of what was
   // just said, so an English meeting stays easy to follow.
   const [liveDigest, setLiveDigest] = useState<{ text: string; updatedAt: number } | null>(null);
@@ -4196,37 +4204,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
                 </div>
               )}
 
-              {copilotQuality && !hasActionConversation && (
-                <div
-                  className={`mx-4 mt-2 mb-1 px-3 py-1.5 rounded-[12px] border no-drag ${subtleSurfaceClass}`}
-                  style={appearance.subtleStyle}
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div
-                      className="shrink-0 p-1 rounded-full overlay-icon-surface overlay-text-interactive"
-                      style={appearance.iconStyle}
-                    >
-                      <Sparkles className="w-3 h-3" />
-                    </div>
-                    <div className="min-w-0 flex-1 flex items-baseline gap-2">
-                      <div className="text-[9px] font-semibold uppercase tracking-wide overlay-text-muted shrink-0">
-                        Autopilot
-                      </div>
-                      <div className="text-[12px] leading-tight font-medium overlay-text-primary truncate">
-                        {copilotQuality.label}
-                      </div>
-                      {copilotQuality.reason && (
-                        <div className="hidden sm:block truncate text-[10px] overlay-text-muted">
-                          {copilotQuality.reason}
-                        </div>
-                      )}
-                    </div>
-                    <div className="shrink-0 text-[11px] font-semibold overlay-text-interactive">
-                      {copilotQualityScore}%
-                    </div>
-                  </div>
-                </div>
-              )}
+              {/* Autopilot quality strip removed (user feedback): the score
+                  added noise without actionable value. The suggestion card
+                  below remains the single informational surface. */}
 
               {copilotSuggestion?.suggestion && !isConversationFocusMode && (
                 <div
@@ -4654,15 +4634,21 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
                 {liveDigest && (
                   <div
                     data-testid="natively-live-digest"
-                    className="mx-4 mt-1.5 flex items-center gap-2 rounded-[12px] border no-drag px-2.5 py-1.5"
-                    style={appearance.controlStyle}
+                    className="mx-4 mt-1.5 flex items-start gap-2 rounded-[12px] border no-drag px-2.5 py-2"
+                    style={appearance.subtleStyle}
                   >
-                    <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wide overlay-text-muted">
+                    <span className="shrink-0 mt-0.5 text-[9px] font-semibold uppercase tracking-wide overlay-text-muted">
                       Live
                     </span>
                     <div
-                      className="min-w-0 flex-1 truncate text-[11px] leading-tight overlay-text-secondary"
+                      className="min-w-0 flex-1 text-[12px] leading-snug overlay-text-primary"
                       title={liveDigest.text}
+                      style={{
+                        display: "-webkit-box",
+                        WebkitBoxOrient: "vertical",
+                        WebkitLineClamp: 2,
+                        overflow: "hidden",
+                      }}
                     >
                       {liveDigest.text}
                     </div>
@@ -5084,30 +5070,10 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
                       </button>
                     </div>
 
-                    {/* Mouse Passthrough Toggle */}
-                    <div className="relative">
-                      <button
-                        onClick={() => {
-                          const newState = !isMousePassthrough;
-                          setIsMousePassthrough(newState);
-                          window.electronAPI?.setOverlayMousePassthrough?.(
-                            newState,
-                          );
-                        }}
-                        className={`
-                                                    w-7 h-7 flex items-center justify-center rounded-lg
-                                                    interaction-base interaction-press
-                                                    ${
-                                                      isMousePassthrough
-                                                        ? "overlay-icon-surface overlay-icon-surface-hover text-sky-400 opacity-100"
-                                                        : "overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive"
-                                                    }
-                                                `}
-                        style={appearance.iconStyle}
-                      >
-                        <PointerOff className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+                    {/* Mouse Passthrough toggle TEMPORARILY DISABLED (user request):
+                        enabling it made the whole overlay click-through, locking
+                        every button including this one. Escape hatch still exists
+                        via the global shortcut Cmd/Ctrl+Shift+B. */}
                   </div>
 
                 </div>
