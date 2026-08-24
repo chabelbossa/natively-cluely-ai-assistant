@@ -7,6 +7,8 @@ export interface LiveActionRequest {
   problemStatement?: string;
   intent?: string;
   userRequest?: string;
+  /** Serve the pre-computed answer when available; silently fall back to a fresh generation otherwise. */
+  usePrepared?: boolean;
 }
 
 export interface LiveActionEventBase {

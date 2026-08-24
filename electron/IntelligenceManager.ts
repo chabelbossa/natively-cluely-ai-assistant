@@ -45,7 +45,17 @@ export class IntelligenceManager extends EventEmitter {
         this.copilot = new CopilotDecisionEngine(llmHelper);
         this.engine = new IntelligenceEngine(llmHelper, this.session, () => this.copilot.getMeetingStateContextBlock());
         this.persistence = new MeetingPersistence(this.session, llmHelper);
-        this.preAnswer = new PreAnswerCache((question) => this.engine.precomputeWhatToSay(question));
+        this.preAnswer = new PreAnswerCache(
+            (question) => this.engine.precomputeWhatToSay(question),
+            {
+                onReady: (question) => {
+                    try { this.emit('pre_answer_ready', { available: true, question }); } catch { /* never break routing */ }
+                },
+                onInvalidate: () => {
+                    try { this.emit('pre_answer_ready', { available: false }); } catch { /* never break routing */ }
+                },
+            },
+        );
 
         // Forward all engine events through the facade
         this.forwardEngineEvents();

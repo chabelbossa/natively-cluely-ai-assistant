@@ -243,6 +243,7 @@ interface ElectronAPI {
   onIntelligenceError: (callback: (data: LiveActionErrorPayload) => void) => () => void
   onCopilotDecision: (callback: (data: CopilotDecisionPayload) => void) => () => void
   onCopilotSuggestion: (callback: (data: CopilotDecisionPayload) => void) => () => void
+  onPreAnswerReady: (callback: (data: { available: boolean; question?: string }) => void) => () => void
   onCopilotError: (callback: (data: { error: string }) => void) => () => void
   getMeetingHealth: () => Promise<{ health: MeetingHealthData | null; risks: DetectedRiskData[] }>
 
@@ -1020,6 +1021,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("copilot-suggestion", subscription)
     return () => {
       ipcRenderer.removeListener("copilot-suggestion", subscription)
+    }
+  },
+  onPreAnswerReady: (callback: (data: { available: boolean; question?: string }) => void) => {
+    const subscription = (_: any, data: any) => callback(data)
+    ipcRenderer.on("copilot-preanswer", subscription)
+    return () => {
+      ipcRenderer.removeListener("copilot-preanswer", subscription)
     }
   },
   onCopilotDecision: (callback: (data: CopilotDecisionPayload) => void) => {

@@ -3200,19 +3200,23 @@ export function initializeIpcHandlers(appState: AppState): void {
         await appState.flushPendingSttTranscripts?.("what_to_say");
         const intelligenceManager = appState.getIntelligenceManager();
 
-        // Stage 1 real-time copilot: if a question was just asked and the
-        // background pre-compute already produced an answer for THIS exact
-        // conversational state, serve it instantly. flushPendingSttTranscripts
-        // above may have added new final segments, which invalidates stale
-        // entries inside the cache itself.
-        const precomputed = intelligenceManager.servePreAnswer();
-        if (precomputed) {
-          return {
-            actionId: request.actionId,
-            answer: precomputed.answer,
-            question: precomputed.question,
-            precomputed: true,
-          };
+        // Stage 2 real-time copilot, "Use prepared" button: serve the
+        // pre-computed answer ONLY when explicitly requested. If it went stale
+        // between the banner appearing and the click (new speech arrived),
+        // fall through to a fresh generation in the SAME request so the user
+        // is never blocked by the cache. The normal button path below never
+        // consults the cache — fresh generation is always unlimited.
+        if (request.usePrepared) {
+          const precomputed = intelligenceManager.servePreAnswer();
+          if (precomputed) {
+            return {
+              actionId: request.actionId,
+              answer: precomputed.answer,
+              question: precomputed.question,
+              precomputed: true,
+            };
+          }
+          console.log('[IPC] usePrepared requested but no valid precomputed answer — generating fresh.');
         }
 
         // Question and imagePaths are now optional - IntelligenceManager infers from transcript

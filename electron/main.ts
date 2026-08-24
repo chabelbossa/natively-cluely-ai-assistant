@@ -2963,6 +2963,11 @@ export class AppState {
       sendToRenderers('copilot-decision', decision);
     })
 
+    // Stage 2 real-time copilot: proactive "prepared answer" banner state.
+    this.intelligenceManager.on('pre_answer_ready', (payload: { available: boolean; question?: string }) => {
+      sendToRenderers('copilot-preanswer', payload);
+    })
+
     this.intelligenceManager.on('copilot_error', (error: Error) => {
       console.warn('[CopilotDecisionEngine] Error:', error.message)
       const helper = this.getWindowHelper();

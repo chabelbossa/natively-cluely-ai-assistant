@@ -70,10 +70,17 @@ export class PreAnswerCache {
     private generating = false;
     private lastComputeStartedAt = 0;
     private readonly generate: (question: string) => Promise<string | null>;
+    private readonly onReady?: (question: string) => void;
+    private readonly onInvalidate?: () => void;
     private stats: PreAnswerStats = { generationsStarted: 0, generationsSucceeded: 0, serves: 0, staleSkips: 0 };
 
-    constructor(generate: (question: string) => Promise<string | null>) {
+    constructor(
+        generate: (question: string) => Promise<string | null>,
+        hooks?: { onReady?: (question: string) => void; onInvalidate?: () => void },
+    ) {
         this.generate = generate;
+        this.onReady = hooks?.onReady;
+        this.onInvalidate = hooks?.onInvalidate;
     }
 
     /**
@@ -84,6 +91,14 @@ export class PreAnswerCache {
     onFinalSegment(segment: CopilotTranscriptSegment): void {
         if (isOwnSpeech(segment)) return;
         this.finalCount += 1;
+
+        // Any new interlocutor speech invalidates the cached answer — notify
+        // the UI so the proactive banner retracts (only when something was
+        // actually showing).
+        if (this.entry) {
+            this.entry = null;
+            try { this.onInvalidate?.(); } catch { /* UI hooks must never break routing */ }
+        }
 
         const text = (segment.text || '').trim();
         if (!looksLikeQuestion(text)) return;
@@ -114,8 +129,16 @@ export class PreAnswerCache {
         try {
             const answer = await this.generate(question);
             if (answer && answer.trim().length > 0) {
+                // Re-check staleness at completion: if new speech arrived while
+                // generating, the answer is already outdated — drop it instead
+                // of advertising a stale banner.
+                if (finalsAtCompute !== this.finalCount) {
+                    console.log('[PreAnswerCache] Discarding precomputed answer — conversation moved on during generation.');
+                    return;
+                }
                 this.entry = { answer, question, createdAt: Date.now(), finalsAtCompute };
                 this.stats.generationsSucceeded += 1;
+                try { this.onReady?.(question); } catch { /* UI hooks must never break routing */ }
                 console.log(
                     `[PreAnswerCache] Precomputed answer ready (${answer.length} chars) for: "${question.substring(0, 60)}..."`,
                 );
@@ -155,9 +178,13 @@ export class PreAnswerCache {
             clearTimeout(this.pendingTimer);
             this.pendingTimer = null;
         }
+        const hadEntry = this.entry !== null;
         this.entry = null;
         this.latestQuestion = null;
         this.finalCount = 0;
         this.lastComputeStartedAt = 0;
+        if (hadEntry) {
+            try { this.onInvalidate?.(); } catch { /* UI hooks must never break routing */ }
+        }
     }
 }

@@ -582,6 +582,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   }, [messages]);
   const [copilotSuggestion, setCopilotSuggestion] =
     useState<CopilotSuggestion | null>(null);
+  // Stage 2 real-time copilot: a pre-computed answer is available for the
+  // latest question. Purely informational — nothing is used without a click.
+  const [preparedAnswer, setPreparedAnswer] = useState<{ question: string } | null>(null);
   const [copilotStatus, setCopilotStatus] =
     useState<CopilotDecisionPayload | null>(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -1184,6 +1187,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setInputValue("");
       setAttachedContext([]);
       setCopilotSuggestion(null);
+      setPreparedAnswer(null);
       setManualTranscript("");
       setLiveTranscriptTurns([]);
       setCopyTranscriptTurns([]);
@@ -1464,6 +1468,17 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       },
     );
     if (cleanupCopilotSuggestion) cleanups.push(cleanupCopilotSuggestion);
+
+    const cleanupPreAnswer = window.electronAPI.onPreAnswerReady?.(
+      (data) => {
+        if (data?.available && data.question) {
+          setPreparedAnswer({ question: data.question });
+        } else {
+          setPreparedAnswer(null);
+        }
+      },
+    );
+    if (cleanupPreAnswer) cleanups.push(cleanupPreAnswer);
 
     const cleanupCopilotDecision = window.electronAPI.onCopilotDecision?.(
       (data) => {
@@ -1821,9 +1836,52 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
             ...getActionMessageMeta(actionId, result),
           }),
         );
-        if (result?.precomputed) {
-          console.log("[Natively] What-to-say served from pre-computed cache (instant).");
-        }
+      }
+    } catch (err) {
+      setMessages((prev) =>
+        settleActionMessage(prev, actionId, intent, formatLiveActionError(err), undefined, "failed"),
+      );
+    } finally {
+      finishActionLoading("whatToSay", actionId);
+      decrementPending();
+    }
+  };
+
+  // Stage 2 real-time copilot: insert the pre-computed answer instantly.
+  // The main "What to say" button ALWAYS generates fresh — this fast path is
+  // purely additive, so the cache can never limit or replace it. If the
+  // prepared answer went stale before the click, the backend transparently
+  // falls back to a fresh generation inside the same request.
+  const handleUsePrepared = async () => {
+    if (!preparedAnswer) return;
+    const intent = "what_to_answer";
+    setIsExpanded(true);
+    const actionId = queueActionMessage(
+      intent,
+      "Inserting prepared answer...",
+      "whatToSay",
+    );
+    incrementPending();
+    analytics.trackCommandExecuted("what_to_say_prepared");
+    setPreparedAnswer(null);
+
+    try {
+      const result = await window.electronAPI.generateWhatToSay({
+        actionId,
+        usePrepared: true,
+      });
+      if (result?.error) throw new Error(result.error);
+      const answer = result?.answer || "";
+      if (answer) {
+        setMessages((prev) =>
+          finalizePendingActionMessage(prev, actionId, intent, answer, {
+            tokensUsed: estimateTokens(answer),
+            precomputed: result?.precomputed === true,
+            ...getActionMessageMeta(actionId, result),
+          }),
+        );
+      } else {
+        throw new Error("No prepared answer available.");
       }
     } catch (err) {
       setMessages((prev) =>
@@ -4580,6 +4638,46 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
 
                 </div>
 
+                {/* Stage 2: prepared-answer banner — proactive, never auto-inserted.
+                    Shows in ALL modes (slim strip) while a fresh precomputed
+                    answer exists; retracts automatically on new speech. */}
+                {preparedAnswer && (
+                  <div
+                    data-testid="natively-prepared-banner"
+                    className="mx-4 mt-1.5 flex items-center gap-2 rounded-[12px] border no-drag px-2.5 py-1.5"
+                    style={appearance.chipStyle}
+                  >
+                    <Zap className="w-3 h-3 shrink-0 overlay-text-interactive" />
+                    <div
+                      className="min-w-0 flex-1 truncate text-[11px] overlay-text-muted"
+                      title={preparedAnswer.question}
+                    >
+                      Prepared · {preparedAnswer.question}
+                    </div>
+                    <button
+                      onClick={handleUsePrepared}
+                      disabled={!!actionLoading.whatToSay}
+                      className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border transition-all active:scale-95 shrink-0 ${quickActionClass}`}
+                      title="Insert the prepared answer instantly"
+                    >
+                      {actionLoading.whatToSay ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <CheckCircle2 className="w-3 h-3" />
+                      )}
+                      <span>Use</span>
+                    </button>
+                    <button
+                      onClick={() => setPreparedAnswer(null)}
+                      className="p-1 rounded-md overlay-icon-surface overlay-icon-surface-hover overlay-text-interactive shrink-0"
+                      title="Dismiss (the main button still generates fresh)"
+                      style={appearance.iconStyle}
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                )}
+
                 {/* Quick Actions - pinned below input so typing never disappears */}
                 <div
                   className="flex flex-nowrap justify-start items-center gap-1.5 overflow-x-auto mt-1.5 pb-0.5"
@@ -4599,6 +4697,19 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
                     )}
                     <span>{isConferenceMode ? "Answer last" : "What to say"}</span>
                   </button>
+                  {preparedAnswer && (
+                    <button
+                      data-testid="natively-action-use-prepared"
+                      onClick={handleUsePrepared}
+                      disabled={!!actionLoading.whatToSay}
+                      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10.5px] font-medium border transition-all active:scale-95 duration-200 interaction-base interaction-press whitespace-nowrap shrink-0 ${quickActionClass}`}
+                      style={appearance.chipStyle}
+                      title="Insert the pre-computed answer instantly (fresh generation stays available on the main button)"
+                    >
+                      <Zap className="w-3 h-3 opacity-80" />
+                      <span>Use prepared</span>
+                    </button>
+                  )}
                   <button
                     data-testid="natively-action-clarify"
                     onClick={handleClarify}
