@@ -585,6 +585,9 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
   // Stage 2 real-time copilot: a pre-computed answer is available for the
   // latest question. Purely informational — nothing is used without a click.
   const [preparedAnswer, setPreparedAnswer] = useState<{ question: string } | null>(null);
+  // Comprehension aid: rolling simple-language reformulation of what was
+  // just said, so an English meeting stays easy to follow.
+  const [liveDigest, setLiveDigest] = useState<{ text: string; updatedAt: number } | null>(null);
   const [copilotStatus, setCopilotStatus] =
     useState<CopilotDecisionPayload | null>(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -1188,6 +1191,7 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       setAttachedContext([]);
       setCopilotSuggestion(null);
       setPreparedAnswer(null);
+      setLiveDigest(null);
       setManualTranscript("");
       setLiveTranscriptTurns([]);
       setCopyTranscriptTurns([]);
@@ -1479,6 +1483,13 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
       },
     );
     if (cleanupPreAnswer) cleanups.push(cleanupPreAnswer);
+
+    const cleanupLiveDigest = window.electronAPI.onLiveDigestUpdate?.(
+      (data) => {
+        setLiveDigest(data && data.text ? { text: data.text, updatedAt: data.updatedAt } : null);
+      },
+    );
+    if (cleanupLiveDigest) cleanups.push(cleanupLiveDigest);
 
     const cleanupCopilotDecision = window.electronAPI.onCopilotDecision?.(
       (data) => {
@@ -4637,6 +4648,26 @@ const NativelyInterface: React.FC<NativelyInterfaceProps> = ({
                   )}
 
                 </div>
+
+                {/* Comprehension aid: simple-language digest of what was just
+                    said, refreshed automatically from the live transcript. */}
+                {liveDigest && (
+                  <div
+                    data-testid="natively-live-digest"
+                    className="mx-4 mt-1.5 flex items-center gap-2 rounded-[12px] border no-drag px-2.5 py-1.5"
+                    style={appearance.controlStyle}
+                  >
+                    <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wide overlay-text-muted">
+                      Live
+                    </span>
+                    <div
+                      className="min-w-0 flex-1 truncate text-[11px] leading-tight overlay-text-secondary"
+                      title={liveDigest.text}
+                    >
+                      {liveDigest.text}
+                    </div>
+                  </div>
+                )}
 
                 {/* Stage 2: prepared-answer banner — proactive, never auto-inserted.
                     Shows in ALL modes (slim strip) while a fresh precomputed

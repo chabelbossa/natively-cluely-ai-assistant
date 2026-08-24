@@ -2968,6 +2968,11 @@ export class AppState {
       sendToRenderers('copilot-preanswer', payload);
     })
 
+    // Comprehension aid: rolling simple-language digest of the conversation.
+    this.intelligenceManager.on('live_digest_update', (digest: { text: string; updatedAt: number } | null) => {
+      sendToRenderers('copilot-live-digest', digest);
+    })
+
     this.intelligenceManager.on('copilot_error', (error: Error) => {
       console.warn('[CopilotDecisionEngine] Error:', error.message)
       const helper = this.getWindowHelper();

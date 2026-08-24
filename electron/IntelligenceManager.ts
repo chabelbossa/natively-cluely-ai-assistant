@@ -14,6 +14,7 @@ import { IntelligenceEngine } from './IntelligenceEngine';
 import { MeetingPersistence } from './MeetingPersistence';
 import { CopilotDecisionEngine, CopilotDecision, CopilotFeedback, CopilotTranscriptSegment } from './copilot';
 import { PreAnswerCache } from './meeting/PreAnswerCache';
+import { LiveDigestService } from './meeting/LiveDigest';
 
 // Re-export types for backward compatibility
 export type { TranscriptSegment, SuggestionTrigger, ContextItem } from './SessionTracker';
@@ -37,6 +38,7 @@ export class IntelligenceManager extends EventEmitter {
     private persistence: MeetingPersistence;
     private copilot: CopilotDecisionEngine;
     private preAnswer: PreAnswerCache;
+    private liveDigest: LiveDigestService;
 
     constructor(llmHelper: LLMHelper) {
         super();
@@ -53,6 +55,33 @@ export class IntelligenceManager extends EventEmitter {
                 },
                 onInvalidate: () => {
                     try { this.emit('pre_answer_ready', { available: false }); } catch { /* never break routing */ }
+                },
+            },
+        );
+        // Comprehension aid: rolling simple-language reformulation of the
+        // latest transcript stretch (French by default — see LiveDigest).
+        this.liveDigest = new LiveDigestService(
+            () => {
+                try {
+                    return this.session
+                        .getContext(180)
+                        .map((item: any) => `${item.speaker || item.role}: ${item.text}`)
+                        .join('\n');
+                } catch {
+                    return '';
+                }
+            },
+            async (systemPrompt, context) => {
+                try {
+                    const out = await llmHelper.generateMeetingSummary(systemPrompt, context);
+                    return typeof out === 'string' && out.trim() ? out : null;
+                } catch {
+                    return null;
+                }
+            },
+            {
+                onUpdate: (digest) => {
+                    try { this.emit('live_digest_update', digest); } catch { /* never break routing */ }
                 },
             },
         );
@@ -288,6 +317,7 @@ export class IntelligenceManager extends EventEmitter {
         this.engine.reset();
         this.copilot.reset();
         this.preAnswer.clear();
+        this.liveDigest.clear();
     }
 
     private processCopilotTranscript(segment: import('./SessionTracker').TranscriptSegment): void {
@@ -325,6 +355,11 @@ export class IntelligenceManager extends EventEmitter {
                 this.preAnswer.onFinalSegment(copilotSegment);
             } catch {
                 // Never let pre-compute bookkeeping break transcript routing.
+            }
+            try {
+                this.liveDigest.onFinalSegment();
+            } catch {
+                // Never let comprehension bookkeeping break transcript routing.
             }
         }
     }

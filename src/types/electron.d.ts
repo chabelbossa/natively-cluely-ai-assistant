@@ -337,6 +337,7 @@ export interface ElectronAPI {
   onCopilotDecision: (callback: (data: CopilotDecisionPayload) => void) => () => void
   onCopilotSuggestion: (callback: (data: CopilotDecisionPayload) => void) => () => void
   onPreAnswerReady: (callback: (data: { available: boolean; question?: string }) => void) => () => void
+  onLiveDigestUpdate: (callback: (data: { text: string; updatedAt: number } | null) => void) => () => void
   onCopilotError: (callback: (data: { error: string }) => void) => () => void
   getMeetingHealth: () => Promise<{ health: MeetingHealthData | null; risks: DetectedRiskData[] }>
   // Session Management
